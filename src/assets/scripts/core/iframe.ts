@@ -573,7 +573,7 @@ export function updateHistoryUI(
     if (_searchInputNav) _searchInputNav.value = "";
     if (_backIcon) _backIcon.classList.add("disabled");
     if (_forwardIcon) _forwardIcon.classList.add("disabled");
-    if (_lockIcon) _lockIcon.className = "fa-regular fa-magnifying-glass";
+    if (_lockIcon) _lockIcon.className = "fa-solid fa-magnifying-glass";
     return;
   }
 
@@ -639,11 +639,11 @@ export function updateHistoryUI(
 
       let newClass = "";
       if (!real || real === "about:blank" || !hasProtocol) {
-        newClass = "fa-regular fa-magnifying-glass";
+        newClass = "fa-solid fa-magnifying-glass";
       } else if (real.startsWith("https://")) {
-        newClass = "fa-regular fa-lock-keyhole";
+        newClass = "fa-solid fa-lock";
       } else {
-        newClass = "fa-regular fa-unlock-keyhole";
+        newClass = "fa-solid fa-unlock";
       }
 
       if (_lockIcon.className !== newClass) {

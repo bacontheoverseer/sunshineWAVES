@@ -268,7 +268,7 @@ export default function GamesPage() {
   );
 
   const placeholder = loaded
-    ? `search through ${allGames.length} games... ٩(^ᗜ^ )و ´-`
+    ? `search through ${allGames.length} games... :D`
     : "fetching games...";
 
   if (!visible) return null;

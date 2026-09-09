@@ -558,7 +558,7 @@ function _initSettings(): void {
 
   const siteCloakingPresets: Record<string, SiteCloakingPreset> = {
     none: {
-      title: "sunshine",
+      title: "Operation Cookie",
       icon: "/sunshinelogo.png",
     },
     google: {
@@ -639,7 +639,7 @@ function _initSettings(): void {
     let isTabActive = !isUnloading && !document.hidden && document.hasFocus();
 
     if (focusCloakingEnabled && isTabActive) {
-      titleToSet = "sunshine";
+      titleToSet = "Operation Cookie";
       iconToSet = "/sunshinelogo.png";
     } else {
       const preset = siteCloakingPresets[currentSiteCloakingName];

@@ -218,7 +218,7 @@ export default function NavBar() {
     <div class="main-nav">
       <div class="nav-controls">
         <a id="toggle-sidebar-btn" href="#" onClick={handleSidebarToggle}>
-          <i class="fa-regular fa-table-rows"></i>
+          <i class="fa-solid fa-bars"></i>
         </a>
         <a
           id="backIcon"
@@ -228,7 +228,7 @@ export default function NavBar() {
             handleBack();
           }}
         >
-          <i class="fa-regular fa-chevron-left"></i>
+          <i class="fa-solid fa-arrow-left"></i>
         </a>
         <a
           id="forwardIcon"
@@ -238,7 +238,7 @@ export default function NavBar() {
             handleForward();
           }}
         >
-          <i class="fa-regular fa-chevron-right"></i>
+          <i class="fa-solid fa-arrow-right"></i>
         </a>
         <a
           id="refreshIcon"
@@ -249,12 +249,12 @@ export default function NavBar() {
           }}
         >
           <i
-            class={`fa-regular ${activeTab?.isLoading ? "fa-xmark" : "fa-arrow-rotate-right"}`}
+            class={`fa-solid ${activeTab?.isLoading ? "fa-xmark" : "fa-rotate-right"}`}
           ></i>
         </a>
       </div>
       <div class="omnibox">
-        <i id="lockIcon" class="fa-regular fa-unlock-keyhole"></i>
+        <i id="lockIcon" class="fa-solid fa-unlock"></i>
         <input
           type="text"
           id="searchInputt"
@@ -265,7 +265,7 @@ export default function NavBar() {
       </div>
       <div class="window-controls">
         <a id="home-btn" href="/" onClick={handleHome}>
-          <i class="fa-regular fa-house-chimney-window"></i>
+          <i class="fa-solid fa-house"></i>
         </a>
         <a
           id="fullscreenBtn"
@@ -275,7 +275,7 @@ export default function NavBar() {
             handleFullscreen();
           }}
         >
-          <i class="fa-regular fa-expand"></i>
+          <i class="fa-solid fa-expand"></i>
         </a>
         <a
           id="splitViewBtn"
@@ -284,7 +284,7 @@ export default function NavBar() {
           class={`${splitBtnActive ? "active" : ""} ${splitBtnDisabled ? "disabled" : ""}`}
           aria-disabled={splitBtnDisabled}
         >
-          <i class="fa-regular fa-table-columns"></i>
+          <i class="fa-solid fa-table-columns"></i>
         </a>
         <a
           id="erudaBtn"
@@ -294,7 +294,7 @@ export default function NavBar() {
             toggleEruda();
           }}
         >
-          <i class="fa-regular fa-square-code"></i>
+          <i class="fa-solid fa-terminal"></i>
         </a>
       </div>
     </div>

@@ -388,7 +388,7 @@ export default function SettingsMenu() {
               {t.label}
             </button>
           ))}
-          <div class="settings-bottom">{versionInfo || "sunshine"}</div>
+          <div class="settings-bottom">{versionInfo || "Operation Cookie"}</div>
         </div>
         <div class="settings-content-wrapper">
           <div
@@ -440,7 +440,7 @@ export default function SettingsMenu() {
           >
             <div class="settings-item">
               <label>theme</label>
-              <p>change the look and feel of sunshine.</p>
+              <p>change the look and feel of Operation Cookie.</p>
               <Selector
                 label="theme"
                 value={theme}
@@ -546,7 +546,7 @@ export default function SettingsMenu() {
               <p>
                 thank you so much for using{" "}
                 <a href="https://sunshine.lat/" target="_blank" class="hover-link">
-                  sunshine
+                  Operation Cookie
                 </a>{" "}
                 if you have any suggestions or issues, please contact us on our{" "}
                 <a

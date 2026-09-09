@@ -14,7 +14,7 @@ export default function TopBar() {
       <div id="top-left-stuff">
         <div id="branding-container" class="icon-btn">
           <img src="/sunshinelogo.png" style={{ width: '20px', height: '20px', marginRight: '8px' }} />
-          <span id="brand">sunshine</span>
+          <span id="brand">Operation Cookie</span>
         </div>
         <a
           href="https://discord.gg/dJvdkPRheV"

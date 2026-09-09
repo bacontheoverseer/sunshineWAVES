@@ -1,10 +1,10 @@
-# sunshine
-a really cool web-proxy branded as sunshine
+# Operation Cookie
+a really cool web-proxy branded as Operation Cookie
 
 [![join our discord](https://invidget.switchblade.xyz/dJvdkPRheV)](https://discord.gg/dJvdkPRheV)
 
 ## features
-- very clean and nice looking sunshine ui
+- very clean and nice looking Operation Cookie ui
 - support for thousands of games from different game sources
 - insanely fast
 - cloud syncing system that sync games data, browsing data, settings, and basically everything else

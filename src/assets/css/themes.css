@@ -148,7 +148,9 @@
     --brand-color: #fff;
 }
 
-[data-theme="sunshine"] {
+[data-theme="sunshine"],
+[data-theme="operation cookie"],
+[data-theme="operation-cookie"] {
     --bg-body: #070a12;
     --bg-body-translucent: rgba(7, 10, 18, 0.78);
     --bg-body-grid: rgba(255, 255, 255, 0.012);

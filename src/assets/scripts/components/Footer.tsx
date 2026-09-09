@@ -3,7 +3,7 @@ export default function Footer() {
     <div class="footer">
       <div id="stuff">
         <a>Credits</a>
-        <a style={{ marginLeft: '10px' }}>sunshine</a>
+        <a style={{ marginLeft: '10px' }}>Operation Cookie</a>
         <a style={{ marginLeft: '10px' }}>Workspace</a>
       </div>
       <div id="cute">

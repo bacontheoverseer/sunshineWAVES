@@ -5,7 +5,7 @@ import { useSearchInputBindings } from "../search/search.ts";
 const placeholders = [
   "search freely...",
   "escape to somewhere",
-  "sunshine learning",
+  "Operation Cookie learning",
   "celebrating 2 years!",
   "always on",
   "true freedom",

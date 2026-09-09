@@ -372,7 +372,7 @@ export default function NewTabModal() {
                     handleAction(game.gameUrl, game.name, true, game.coverUrl)
                   }
                 >
-                  <i class="fa-solid fa-gamepad-modern"></i>{" "}
+                  <i class="fa-solid fa-gamepad"></i>{" "}
                   <span>{game.name}</span>
                 </div>
               ))}
