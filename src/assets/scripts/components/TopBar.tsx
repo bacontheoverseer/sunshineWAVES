@@ -17,7 +17,7 @@ export default function TopBar() {
           <span id="brand">Operation Cookie</span>
         </div>
         <a
-          href="https://discord.gg/dJvdkPRheV"
+          href="https://discord.gg"
           target="_blank"
           id="discord-btn"
           class="icon-btn"

@@ -513,7 +513,7 @@ export const store = {
     const searchInputNav = document.getElementById("searchInputt") as HTMLInputElement | null;
     if (searchInputNav) {
       searchInputNav.placeholder = activeTab?.isLoading
-        ? "fetching url... (˶˃ ᵕ ˂˶)"
+        ? "fetching lesson..."
         : "search or enter url (˶>⩊<˶)";
     }
   },
