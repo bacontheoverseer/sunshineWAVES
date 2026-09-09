@@ -1,0 +1,43 @@
+{
+  "name": "sunshine",
+  "version": "3.6.4",
+  "description": "sunshine - a fast, minimal web proxy start page",
+  "type": "module",
+  "packageManager": "bun@1.2.17",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "start": "UV_THREADPOOL_SIZE=4 NODE_ENV=production bun --max-old-space-size=192 index.mjs",
+    "dev": "UV_THREADPOOL_SIZE=32 NODE_ENV=development bun index.mjs",
+    "lint": "eslint .",
+    "build": "bun node_modules/vite/bin/vite.js build --config vite.config.js",
+    "build:legacy": "bun build.mjs",
+    "postinstall": "bun others/patch.js"
+  },
+  "dependencies": {
+    "@mercuryworkshop/bare-mux": "latest",
+    "@mercuryworkshop/epoxy-transport": "latest",
+    "@mercuryworkshop/libcurl-transport": "latest",
+    "@mercuryworkshop/wisp-js": "^0.4.1",
+    "@preact/preset-vite": "^2.10.5",
+    "@preact/signals": "^2.9.0",
+    "compression": "^1.7.4",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.5",
+    "express": "^5.0.0-beta.3",
+    "express-rate-limit": "^7.3.1",
+    "helmet": "^7.1.0",
+    "lru-cache": "^11.1.0",
+    "preact": "^10.29.1",
+    "vite": "^8.0.8",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "eslint": "^9.5.0",
+    "javascript-obfuscator": "^5.0.1",
+    "prettier": "^3.8.2",
+    "terser": "^5.46.1",
+    "typescript": "^6.0.3"
+  }
+}

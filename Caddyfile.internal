@@ -1,0 +1,67 @@
+{
+    auto_https off
+}
+
+:80 {
+    encode zstd gzip
+
+    @nuru_routes {
+        path /w/*
+    }
+    reverse_proxy @nuru_routes nuru:8080 {
+        lb_policy least_conn
+        fail_duration 10s
+        max_fails 4
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        flush_interval -1
+        transport http {
+            keepalive 120s
+            keepalive_idle_conns 4096
+            keepalive_idle_conns_per_host 1024
+            dial_timeout 5s
+            read_buffer 65536
+            write_buffer 65536
+        }
+    }
+
+    @mochi_routes {
+        path /!!/* /!cover!/*
+    }
+    reverse_proxy @mochi_routes mochi:4000 {
+        lb_policy least_conn
+        fail_duration 10s
+        max_fails 4
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        transport http {
+            keepalive 120s
+            keepalive_idle_conns 4096
+            keepalive_idle_conns_per_host 1024
+            dial_timeout 5s
+            response_header_timeout 60s
+        }
+    }
+
+    handle /api/auth/* {
+        reverse_proxy cloudsync:5000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle /api/sync/* {
+        reverse_proxy cloudsync:5000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    reverse_proxy sunshine:3000 {
+        header_up X-Real-IP {remote_host}
+        transport http {
+            keepalive 120s
+            keepalive_idle_conns 512
+            keepalive_idle_conns_per_host 64
+            dial_timeout 5s
+        }
+    }
+}

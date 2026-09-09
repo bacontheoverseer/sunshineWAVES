@@ -1,0 +1,87 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: sunshine_gateway
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - sunshine
+      - mochi
+      - nuru
+      - cloudsync
+    networks:
+      - sunshine_net
+
+  sunshine:
+    build:
+      context: .
+      dockerfile: Dockerfile.sunshine
+    image: sunshine:latest
+    container_name: sunshine_app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - JWT_SECRET=${JWT_SECRET}
+      - SYNC_SECRET=${SYNC_SECRET}
+    networks:
+      - sunshine_net
+
+  mochi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mochi:latest
+    container_name: mochi_app
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+      - MOCHI_PORT=4000
+    networks:
+      - sunshine_net
+
+  nuru:
+    build:
+      context: .
+      dockerfile: Dockerfile.nuru
+    image: nuru:latest
+    container_name: nuru_app
+    restart: unless-stopped
+    networks:
+      - sunshine_net
+
+  cloudsync:
+    build:
+      context: .
+      dockerfile: Dockerfile.cloudsync
+    image: cloudsync:latest
+    container_name: cloudsync_app
+    restart: unless-stopped
+    environment:
+      - JWT_SECRET=${JWT_SECRET}
+      - SYNC_SECRET=${SYNC_SECRET}
+      - COOKIE_SECURE=true
+      - CLOUDSYNC_DB_PATH=/data/.db
+    volumes:
+      - cloudsync_data:/data
+    networks:
+      - sunshine_net
+
+  eturnal:
+    image: eturnal/eturnal:latest
+    container_name: eturnal_app
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - ETURNAL_RELAY_IPV4_ADDR=${PUBLIC_IP}
+      - ETURNAL_REALM=${TURN_REALM:-sunshine.lat}
+
+networks:
+  sunshine_net:
+    driver: bridge
+
+volumes:
+  cloudsync_data:

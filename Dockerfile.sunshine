@@ -1,0 +1,27 @@
+FROM oven/bun:1.2.17-slim AS builder
+
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY . .
+# Ensure Coolify/Railpack's layer copy can't strip exec bits on .bin symlinks —
+# package.json's build script already invokes vite via the bun runtime directly,
+# so this is just a safety net if that ever changes.
+RUN chmod -R a+rX node_modules/.bin || true
+RUN bun run build
+
+FROM oven/bun:1.2.17-slim
+
+WORKDIR /app
+
+COPY --from=builder /app /app
+
+ENV NODE_ENV=production
+ENV UV_THREADPOOL_SIZE=4
+ENV PORT=3000
+
+EXPOSE 3000
+
+CMD ["bun", "--max-old-space-size=192", "index.mjs"]

@@ -1,0 +1,11 @@
+node_modules
+dist
+*/target
+target
+.env
+*/.env
+cloudsync/.db
+cloudsync/.db-shm
+cloudsync/.db-wal
+.DS_Store
+*.log
