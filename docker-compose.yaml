@@ -5,8 +5,8 @@ services:
       dockerfile: Dockerfile.gateway
     container_name: sunshine_gateway
     restart: unless-stopped
-    ports:
-      - "80:80"
+    expose:
+      - "80"
     depends_on:
       - sunshine
       - mochi
