@@ -1,7 +1,7 @@
 # Operation Cookie
 a really cool web-proxy branded as Operation Cookie
 
-[![join our discord](https://invidget.switchblade.xyz/dJvdkPRheV)](https://discord.gg/dJvdkPRheV)
+
 
 ## features
 - very clean and nice looking Operation Cookie ui
