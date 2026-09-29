@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y python3 build-essential && rm -rf /var/
 
 COPY package.json bun.lock ./
 COPY others/ ./others/
+# Limit node-gyp C++ compilation to 1 thread to prevent Raspberry Pi from running out of memory
+ENV MAKEFLAGS="-j1"
 RUN bun install --frozen-lockfile
 
 COPY . .
