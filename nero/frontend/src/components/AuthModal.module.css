@@ -1,0 +1,72 @@
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(8px);
+  z-index: 300;
+  display: flex; align-items: center; justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+@keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
+
+.modal {
+  width: 340px;
+  background: #111;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  animation: slideUp 0.15s ease;
+}
+@keyframes slideUp { from { transform:translateY(10px); opacity:0 } to { transform:translateY(0); opacity:1 } }
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab, .activeTab {
+  flex: 1;
+  padding: 14px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.tab { color: var(--text-muted); }
+.activeTab { color: var(--accent); border-bottom: 2px solid var(--accent); }
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+}
+
+.input {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 13px;
+  transition: border-color 0.15s;
+}
+
+.input:focus { border-color: var(--border-hover); }
+
+.error {
+  font-size: 12px;
+  color: #f87171;
+  text-align: center;
+}
+
+.submit {
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+  transition: opacity 0.15s;
+  margin-top: 4px;
+}
+.submit:hover { opacity: 0.85; }
+.submit:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -1,0 +1,26 @@
+.app {
+  min-height: 100vh;
+  position: relative;
+}
+
+.main {
+  position: relative;
+  z-index: 1;
+}
+
+.placeholder {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); font-size: 14px;
+  position: relative; z-index: 1;
+}
+
+.onlineCount {
+  position: fixed;
+  bottom: 16px; left: 20px;
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  z-index: 10;
+  pointer-events: none;
+}
