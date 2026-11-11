@@ -3,7 +3,7 @@ mod db;
 mod proxy;
 mod routes;
 
-use axum::{Router, middleware};
+use axum::Router;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::sync::Arc;

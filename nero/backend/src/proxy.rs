@@ -1,11 +1,10 @@
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
-    http::{HeaderMap, Response, StatusCode},
+    extract::Query,
+    http::{Response, StatusCode},
     routing::get,
     Router,
 };
-use bytes::Bytes;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -50,7 +49,7 @@ async fn proxy_fetch(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
-    let mut builder = Response::builder()
+    let builder = Response::builder()
         .status(status)
         .header("content-type", content_type)
         .header("access-control-allow-origin", "*")

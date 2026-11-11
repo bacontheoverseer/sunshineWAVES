@@ -2,7 +2,7 @@ use crate::{auth as jwt, AppState};
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    routing::{delete, get, post},
+    routing::{delete, get},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
