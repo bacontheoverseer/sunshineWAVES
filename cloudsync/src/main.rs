@@ -50,8 +50,8 @@ async fn main() {
         }
     };
 
-    let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
-    let sync_secret = std::env::var("SYNC_SECRET").expect("SYNC_SECRET must be set");
+    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev_jwt_secret_cookie_super_safe_key_123".to_string());
+    let sync_secret = std::env::var("SYNC_SECRET").unwrap_or_else(|_| "dev_sync_secret_cookie_super_safe_key_123".to_string());
     let mut hasher = Sha256::new();
     hasher.update(sync_secret.as_bytes());
     let key_bytes = hasher.finalize();

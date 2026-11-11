@@ -399,6 +399,7 @@ impl ServerListener {
 				.set_nodelay(true)
 				.context("failed to set tcp nodelay")?;
 			let sock_ref = SockRef::from(&stream);
+			#[cfg(target_os = "linux")]
 			let _ = sock_ref.set_tcp_quickack(true);
 		}
 		Ok((stream, addr.to_string()))

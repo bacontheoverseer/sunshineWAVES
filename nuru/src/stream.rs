@@ -347,6 +347,7 @@ impl ClientStream {
                     stream
                         .set_nodelay(true)
                         .context("failed to set tcp nodelay")?;
+                    #[cfg(target_os = "linux")]
                     let _ = sock_ref.set_tcp_quickack(true);
                     let _ = sock_ref.set_recv_buffer_size(1048576);
                     let _ = sock_ref.set_send_buffer_size(1048576);
