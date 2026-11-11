@@ -10,5 +10,7 @@ cloudsync/.db-wal
 *.db
 *.db-shm
 *.db-wal
+mochi/cache
+cache
 .DS_Store
 *.log
