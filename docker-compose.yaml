@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.gateway
     container_name: sunshine_gateway
     restart: unless-stopped
+    mem_limit: 128m
     expose:
       - "80"
     ports:
@@ -24,6 +25,7 @@ services:
     image: sunshine:latest
     container_name: sunshine_app
     restart: unless-stopped
+    mem_limit: 256m
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -39,6 +41,7 @@ services:
     image: mochi:latest
     container_name: mochi_app
     restart: unless-stopped
+    mem_limit: 256m
     environment:
       - RUST_LOG=info
       - MOCHI_PORT=4000
@@ -52,6 +55,7 @@ services:
     image: nuru:latest
     container_name: nuru_app
     restart: unless-stopped
+    mem_limit: 128m
     networks:
       - sunshine_net
 
@@ -62,6 +66,7 @@ services:
     image: cloudsync:latest
     container_name: cloudsync_app
     restart: unless-stopped
+    mem_limit: 128m
     environment:
       - JWT_SECRET=${JWT_SECRET}
       - SYNC_SECRET=${SYNC_SECRET}

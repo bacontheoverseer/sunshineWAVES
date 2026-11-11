@@ -11,10 +11,11 @@ RUN apt-get update && apt-get install -y \
 
 COPY nuru/ ./nuru/
 
-ENV CARGO_BUILD_JOBS=2
+# Limit parallel compilation jobs to 1 for low memory
+ENV CARGO_BUILD_JOBS=1
 
 WORKDIR /app/nuru
-RUN cargo build --release --jobs 2
+RUN cargo build --release --jobs 1
 
 # --- Stage 2: Runtime ---
 FROM debian:bookworm-slim

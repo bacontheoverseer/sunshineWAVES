@@ -698,7 +698,7 @@ export class CloudSync {
                         <div style="text-align: center;">
                             <button type="submit" class="auth-action-btn" style="width: 60%; margin-top: 15px;">create account</button>
                             <p style="font-size: 11.5px; color: #ff5555; margin-top: 10px; max-width: 80%; margin-left: auto; margin-right: auto;">
-                                save your password somewhere safe! all data will be forever lost if you forget your password ( \u2022\u032F\u0301 ^ \u2022\u0300)
+                                save your password somewhere safe! all data will be forever lost if you forget your password
                             </p>
                         </div>
                     </form>

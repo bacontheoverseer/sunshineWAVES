@@ -31,8 +31,8 @@ dashmap = "6"
 sysinfo = "0.32"
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 4
 panic = "abort"
 opt-level = 3
 strip = true
