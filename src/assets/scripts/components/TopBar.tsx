@@ -24,6 +24,18 @@ export default function TopBar() {
         >
           <i class="fa-brands fa-discord"></i>
         </a>
+        <a
+          href="#"
+          id="chat-btn"
+          class="icon-btn"
+          title="Chatroom"
+          onClick={(e) => {
+            e.preventDefault();
+            document.dispatchEvent(new CustomEvent("toggleChatModal"));
+          }}
+        >
+          <i class="fa-solid fa-comments"></i>
+        </a>
         <a href="#" id="choi" class="icon-btn">
           <i class="fa-solid fa-gamepad"></i>
         </a>

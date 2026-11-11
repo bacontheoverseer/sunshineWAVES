@@ -6,6 +6,7 @@ import { initClickParticles } from "./core/particles.ts";
 import "../css/themes.css";
 import "../css/index.css";
 import "../css/tabs.css";
+import "../css/chat.css";
 
 window.__sunshineStuffData = fetch("/api/stuff", { cache: "no-store" })
   .then((res) => (res.ok ? res.json() : null))

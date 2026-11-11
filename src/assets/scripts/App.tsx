@@ -10,6 +10,7 @@ const loadGamesPage = () => import("./components/GamesPage.tsx");
 const GamesPage = lazy(loadGamesPage);
 const NewTabModal = lazy(() => import("./components/NewTabModal.tsx"));
 const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
+const ChatModal = lazy(() => import("./components/ChatModal.tsx"));
 
 export default function App() {
   return (
@@ -36,6 +37,9 @@ export default function App() {
       </Suspense>
       <Suspense fallback={null}>
         <SettingsMenu />
+      </Suspense>
+      <Suspense fallback={null}>
+        <ChatModal />
       </Suspense>
       <div id="overlay" class="overlay" />
     </>
