@@ -149,11 +149,18 @@
           "apps-view",
           "studio-view",
           "shop-view",
+          "master-view",
         ];
         function isAdFreePurchased() {
           try {
             var until = Number(localStorage.getItem("sunshine_ad_free_until") || "0");
-            return isFinite(until) && until > Date.now();
+            if (isFinite(until) && until > Date.now()) return true;
+            var rawMaster = localStorage.getItem("cookie_master_status_v1");
+            if (rawMaster) {
+              var master = JSON.parse(rawMaster);
+              if (master && master.active === true) return true;
+            }
+            return false;
           } catch (_e) {
             return false;
           }

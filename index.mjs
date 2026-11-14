@@ -3303,6 +3303,131 @@ app.post("/api/shop/troll", async (req, res) => {
   }
 });
 
+// --- Cookie Master ($5/mo Subscription) & Gumroad Checkout Integration ---
+const GUMROAD_PRODUCT_URL = (
+  process.env.GUMROAD_CHECKOUT_URL ||
+  process.env.GUMROAD_PRODUCT_URL ||
+  ""
+).trim();
+const GUMROAD_PRODUCT_ID = (process.env.GUMROAD_PRODUCT_ID || "").trim();
+const GUMROAD_PRODUCT_PERMALINK = (process.env.GUMROAD_PRODUCT_PERMALINK || "").trim();
+
+function buildGumroadCheckoutUrl() {
+  const base =
+    GUMROAD_PRODUCT_URL ||
+    (GUMROAD_PRODUCT_PERMALINK
+      ? `https://gumroad.com/l/${encodeURIComponent(GUMROAD_PRODUCT_PERMALINK)}`
+      : "");
+  if (!base) return "";
+  try {
+    const u = new URL(base);
+    if (!u.searchParams.has("wanted")) {
+      u.searchParams.set("wanted", "true");
+    }
+    return u.toString();
+  } catch {
+    const sep = base.includes("?") ? "&" : "?";
+    return base.includes("wanted=") ? base : `${base}${sep}wanted=true`;
+  }
+}
+
+app.get("/api/cookie-master/config", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  const checkoutUrl = buildGumroadCheckoutUrl();
+  res.json({
+    configured: Boolean(checkoutUrl),
+    checkoutUrl,
+    hasLicenseVerification: Boolean(GUMROAD_PRODUCT_ID || GUMROAD_PRODUCT_PERMALINK),
+    priceMonthly: 5,
+    dailyCoins: 1000,
+  });
+});
+
+app.post("/api/cookie-master/verify", async (req, res) => {
+  try {
+    const licenseKey = String(req.body?.licenseKey || "").trim();
+    const incrementUses = req.body?.incrementUses !== false;
+    if (!licenseKey || licenseKey.length < 6 || licenseKey.length > 128) {
+      return res.status(400).json({
+        success: false,
+        active: false,
+        error: "Please enter a valid Gumroad license key.",
+      });
+    }
+
+    if (!GUMROAD_PRODUCT_ID && !GUMROAD_PRODUCT_PERMALINK) {
+      return res.status(503).json({
+        success: false,
+        active: false,
+        error: "Server is missing GUMROAD_PRODUCT_ID (or GUMROAD_PRODUCT_PERMALINK).",
+      });
+    }
+
+    const params = new URLSearchParams({
+      license_key: licenseKey,
+      increment_uses_count: incrementUses ? "true" : "false",
+    });
+    if (GUMROAD_PRODUCT_ID) {
+      params.set("product_id", GUMROAD_PRODUCT_ID);
+    } else {
+      params.set("product_permalink", GUMROAD_PRODUCT_PERMALINK);
+    }
+
+    const gumroadRes = await fetch("https://api.gumroad.com/v2/licenses/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    const data = await gumroadRes.json().catch(() => null);
+
+    if (!data || !data.success || !data.purchase) {
+      return res.status(400).json({
+        success: false,
+        active: false,
+        error: data?.message || "Invalid or unrecognized Gumroad license key.",
+      });
+    }
+
+    const p = data.purchase;
+    if (p.refunded || p.disputed || p.chargebacked) {
+      return res.status(403).json({
+        success: false,
+        active: false,
+        error: "This purchase has been refunded, disputed, or chargebacked.",
+      });
+    }
+    if (p.subscription_ended_at) {
+      return res.status(403).json({
+        success: false,
+        active: false,
+        error: "This Cookie Master subscription has ended.",
+      });
+    }
+    if (p.subscription_failed_at) {
+      return res.status(403).json({
+        success: false,
+        active: false,
+        error: "Your latest Cookie Master renewal payment failed on Gumroad.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      active: true,
+      email: typeof p.email === "string" ? p.email : "",
+      cancelledAt: p.subscription_cancelled_at || null,
+      createdAt: p.created_at || null,
+      uses: Number(data.uses || 1),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      active: false,
+      error: err?.message || "Failed to verify license key with Gumroad.",
+    });
+  }
+});
+
 function getBuiltModuleEntryPath() {
   if (NODE_ENV !== "production") return null;
   try {

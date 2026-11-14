@@ -27,6 +27,120 @@ const COINS_STORAGE_KEY = "cookie_coins_balance_v1";
 const STUDIO_STORAGE_KEY = "cookie_user_studio_v1";
 const LEADERBOARD_STORAGE_KEY = "cookie_game_leaderboards_v2";
 const AD_FREE_UNTIL_KEY = "sunshine_ad_free_until";
+export const COOKIE_MASTER_STORAGE_KEY = "cookie_master_status_v1";
+export const COOKIE_MASTER_DAILY_COINS = 1000;
+const DAILY_CLAIM_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export interface CookieMasterState {
+  active: boolean;
+  licenseKey: string;
+  email?: string;
+  verifiedAt: number;
+  cancelledAt?: string | null;
+  lastDailyClaimAt: number;
+}
+
+export function getCookieMasterState(): CookieMasterState | null {
+  try {
+    const raw = localStorage.getItem(COOKIE_MASTER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      active: parsed.active === true,
+      licenseKey: typeof parsed.licenseKey === "string" ? parsed.licenseKey : "",
+      email: typeof parsed.email === "string" ? parsed.email : undefined,
+      verifiedAt: Number(parsed.verifiedAt) || 0,
+      cancelledAt: typeof parsed.cancelledAt === "string" ? parsed.cancelledAt : null,
+      lastDailyClaimAt: Number(parsed.lastDailyClaimAt) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function isCookieMasterActive(): boolean {
+  const st = getCookieMasterState();
+  return Boolean(st?.active);
+}
+
+export function setCookieMasterState(next: CookieMasterState | null): void {
+  try {
+    if (!next) {
+      localStorage.removeItem(COOKIE_MASTER_STORAGE_KEY);
+    } else {
+      localStorage.setItem(COOKIE_MASTER_STORAGE_KEY, JSON.stringify(next));
+    }
+  } catch {}
+  syncAdFreeDomClass();
+  try {
+    window.dispatchEvent(new CustomEvent("cookie-master-changed", { detail: next }));
+    window.dispatchEvent(
+      new CustomEvent("sunshine-ad-free-changed", {
+        detail: { until: getAdFreeUntil(), masterActive: Boolean(next?.active) },
+      }),
+    );
+  } catch {}
+}
+
+export function getNextDailyClaimRemainingMs(): number {
+  const st = getCookieMasterState();
+  if (!st?.active) return DAILY_CLAIM_INTERVAL_MS;
+  if (!st.lastDailyClaimAt) return 0;
+  return Math.max(0, st.lastDailyClaimAt + DAILY_CLAIM_INTERVAL_MS - Date.now());
+}
+
+export function canClaimDailyMasterCoins(): boolean {
+  const st = getCookieMasterState();
+  return Boolean(st?.active) && getNextDailyClaimRemainingMs() === 0;
+}
+
+export function formatDurationCompact(ms: number): string {
+  const diff = Math.max(0, ms);
+  if (diff <= 0) return "ready now";
+  const totalMins = Math.ceil(diff / 60000);
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+export function claimDailyMasterCoins(): {
+  claimed: boolean;
+  amount: number;
+  nextBalance: number;
+  remainingMs: number;
+} {
+  const st = getCookieMasterState();
+  if (!st?.active) {
+    return {
+      claimed: false,
+      amount: 0,
+      nextBalance: getCookieCoins(),
+      remainingMs: DAILY_CLAIM_INTERVAL_MS,
+    };
+  }
+  const remaining = getNextDailyClaimRemainingMs();
+  if (remaining > 0) {
+    return {
+      claimed: false,
+      amount: 0,
+      nextBalance: getCookieCoins(),
+      remainingMs: remaining,
+    };
+  }
+  const nextBalance = addCookieCoins(COOKIE_MASTER_DAILY_COINS, "cookie master daily coins");
+  setCookieMasterState({
+    ...st,
+    lastDailyClaimAt: Date.now(),
+  });
+  return {
+    claimed: true,
+    amount: COOKIE_MASTER_DAILY_COINS,
+    nextBalance,
+    remainingMs: DAILY_CLAIM_INTERVAL_MS,
+  };
+}
 
 export function getAdFreeUntil(): number {
   try {
@@ -39,7 +153,7 @@ export function getAdFreeUntil(): number {
 }
 
 export function isAdFreeActive(): boolean {
-  return getAdFreeUntil() > Date.now();
+  return isCookieMasterActive() || getAdFreeUntil() > Date.now();
 }
 
 export function syncAdFreeDomClass(): void {

@@ -8,6 +8,7 @@ import {
   activateAdFreePass,
   formatAdFreeRemaining,
   syncAdFreeDomClass,
+  isCookieMasterActive,
 } from "../core/cookieCoins.ts";
 import { getClientId, executeTrollAction } from "../core/liveClient.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
@@ -270,6 +271,9 @@ export default function ShopPage() {
     }
     if (document.body.classList.contains("studio-view") && (window as any).hideStudioMenu) {
       (window as any).hideStudioMenu();
+    }
+    if (document.body.classList.contains("master-view") && (window as any).hideMasterMenu) {
+      (window as any).hideMasterMenu();
     }
 
     showHomeView();
@@ -574,15 +578,34 @@ export default function ShopPage() {
           >
             <div class="apps-custom-launcher-label" style={{ gap: "8px" }}>
               <i
-                class={`fa-solid ${adFreeUntil > Date.now() ? "fa-circle-check" : "fa-shield-halved"}`}
-                style={{ color: adFreeUntil > Date.now() ? "#4ade80" : "var(--text-primary)" }}
+                class={`fa-solid ${isCookieMasterActive() || adFreeUntil > Date.now() ? "fa-circle-check" : "fa-shield-halved"}`}
+                style={{
+                  color:
+                    isCookieMasterActive() || adFreeUntil > Date.now()
+                      ? "#4ade80"
+                      : "var(--text-primary)",
+                }}
               ></i>
               <span>
-                {adFreeUntil > Date.now()
-                  ? `ad-free pass active · ${formatAdFreeRemaining(adFreeUntil)} (expires ${new Date(adFreeUntil).toLocaleString()})`
-                  : "ad-free status: inactive — remove all homepage ads starting at 5,000 coins for 2 days"}
+                {isCookieMasterActive()
+                  ? "ad-free status: active via cookie master membership"
+                  : adFreeUntil > Date.now()
+                    ? `ad-free pass active · ${formatAdFreeRemaining(adFreeUntil)} (expires ${new Date(adFreeUntil).toLocaleString()})`
+                    : "ad-free status: inactive — remove all homepage ads starting at 5,000 coins for 2 days"}
               </span>
             </div>
+
+            <button
+              type="button"
+              class="studio-tab-btn"
+              onClick={() => {
+                hide();
+                (window as any).showMasterMenu?.();
+              }}
+            >
+              <i class="fa-solid fa-crown" style={{ color: "#fbbf24" }}></i>
+              <span>{isCookieMasterActive() ? "manage cookie master" : "or get cookie master ($5/mo)"}</span>
+            </button>
           </div>
 
           <div

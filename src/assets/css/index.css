@@ -1121,7 +1121,8 @@ html.low-power-device body {
 html.low-power-device body.games-view,
 html.low-power-device body.apps-view,
 html.low-power-device body.studio-view,
-html.low-power-device body.shop-view {
+html.low-power-device body.shop-view,
+html.low-power-device body.master-view {
     overflow: hidden;
     will-change: auto;
 }
@@ -1129,7 +1130,8 @@ html.low-power-device body.shop-view {
 html.low-power-device body.games-view .meow,
 html.low-power-device body.apps-view .meow,
 html.low-power-device body.studio-view .meow,
-html.low-power-device body.shop-view .meow {
+html.low-power-device body.shop-view .meow,
+html.low-power-device body.master-view .meow {
     will-change: auto;
 }
 
@@ -1147,7 +1149,8 @@ html.low-power-device .chat-toast,
 html.low-power-device body.games-view::before,
 html.low-power-device body.apps-view::before,
 html.low-power-device body.studio-view::before,
-html.low-power-device body.shop-view::before {
+html.low-power-device body.shop-view::before,
+html.low-power-device body.master-view::before {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
 }
@@ -1167,6 +1170,7 @@ body.games-view .sunshine-ad-node,
 body.apps-view .sunshine-ad-node,
 body.studio-view .sunshine-ad-node,
 body.shop-view .sunshine-ad-node,
+body.master-view .sunshine-ad-node,
 body:has(#auth-gate-backdrop) .sunshine-ad-node {
     display: none !important;
     visibility: hidden !important;
@@ -1181,7 +1185,9 @@ body:has(#auth-gate-backdrop) .sunshine-ad-node {
     body.studio-view,
     body.studio-view .meow,
     body.shop-view,
-    body.shop-view .meow {
+    body.shop-view .meow,
+    body.master-view,
+    body.master-view .meow {
         scroll-behavior: auto;
     }
 }

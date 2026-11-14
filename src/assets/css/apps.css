@@ -2,7 +2,8 @@
 
 body.apps-view,
 body.studio-view,
-body.shop-view {
+body.shop-view,
+body.master-view {
   overflow-y: auto;
   overscroll-behavior: contain;
   background-color: var(--bg-body);
@@ -13,7 +14,8 @@ body.shop-view {
 body.games-view::before,
 body.apps-view::before,
 body.studio-view::before,
-body.shop-view::before {
+body.shop-view::before,
+body.master-view::before {
   content: "";
   position: fixed;
   top: 0;
@@ -31,7 +33,8 @@ body.shop-view::before {
 
 body.apps-view .meow,
 body.studio-view .meow,
-body.shop-view .meow {
+body.shop-view .meow,
+body.master-view .meow {
   overflow-y: auto;
   overscroll-behavior: contain;
   scroll-behavior: smooth;
@@ -46,7 +49,10 @@ body.studio-view #bookmarks-container,
 body.studio-view #arrow-pointer,
 body.shop-view .main-container,
 body.shop-view #bookmarks-container,
-body.shop-view #arrow-pointer {
+body.shop-view #arrow-pointer,
+body.master-view .main-container,
+body.master-view #bookmarks-container,
+body.master-view #arrow-pointer {
   display: none !important;
 }
 

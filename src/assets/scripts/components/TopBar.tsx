@@ -1,8 +1,11 @@
 import { useEffect, useState } from "preact/hooks";
-import { getCookieCoins } from "../core/cookieCoins.ts";
+import { getCookieCoins, isCookieMasterActive } from "../core/cookieCoins.ts";
 
 export default function TopBar() {
   const [coins, setCoins] = useState<number>(() => getCookieCoins());
+  const [masterActive, setMasterActive] = useState<boolean>(() =>
+    isCookieMasterActive()
+  );
 
   useEffect(() => {
     const user = JSON.parse(localStorage.getItem("auth_user") || "{}");
@@ -12,6 +15,7 @@ export default function TopBar() {
     }
 
     const onCoins = () => setCoins(getCookieCoins());
+    const onMasterChanged = () => setMasterActive(isCookieMasterActive());
     const onAuthChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       const statusEl = document.getElementById("auth-status");
@@ -21,10 +25,14 @@ export default function TopBar() {
     };
     window.addEventListener("cookie-coins-updated", onCoins);
     window.addEventListener("storage", onCoins);
+    window.addEventListener("cookie-master-changed", onMasterChanged);
+    document.addEventListener("cloudsync-restored", onMasterChanged);
     window.addEventListener("cloudsync-auth-changed", onAuthChanged);
     return () => {
       window.removeEventListener("cookie-coins-updated", onCoins);
       window.removeEventListener("storage", onCoins);
+      window.removeEventListener("cookie-master-changed", onMasterChanged);
+      document.removeEventListener("cloudsync-restored", onMasterChanged);
       window.removeEventListener("cloudsync-auth-changed", onAuthChanged);
     };
   }, []);
@@ -40,13 +48,17 @@ export default function TopBar() {
           <span id="brand">Operation Cookie</span>
         </div>
         <a
-          href="https://discord.gg"
-          target="_blank"
-          id="discord-btn"
-          class="icon-btn"
-          title="Discord"
+          href="#"
+          id="master-btn"
+          class="text-icon-btn"
+          title="Cookie Master — $5/mo Ad-Free & Daily Cookie Coins"
+          style={{ fontSize: "13px", padding: "10px 14px" }}
         >
-          <i class="fa-brands fa-discord"></i>
+          <i
+            class="fa-solid fa-crown"
+            style={{ color: masterActive ? "#fbbf24" : undefined }}
+          ></i>
+          <span>{masterActive ? "cookie master ✓" : "cookie master"}</span>
         </a>
         <a
           href="#"

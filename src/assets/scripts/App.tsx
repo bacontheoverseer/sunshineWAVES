@@ -11,6 +11,7 @@ const GamesPage = lazy(loadGamesPage);
 const AppsPage = lazy(() => import("./components/AppsPage.tsx"));
 const GameStudioPage = lazy(() => import("./components/GameStudioPage.tsx"));
 const ShopPage = lazy(() => import("./components/ShopPage.tsx"));
+const CookieMasterPage = lazy(() => import("./components/CookieMasterPage.tsx"));
 const GameSpaceModal = lazy(() => import("./components/GameSpaceModal.tsx"));
 const NewTabModal = lazy(() => import("./components/NewTabModal.tsx"));
 const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
@@ -40,6 +41,9 @@ export default function App() {
         </Suspense>
         <Suspense fallback={null}>
           <ShopPage />
+        </Suspense>
+        <Suspense fallback={null}>
+          <CookieMasterPage />
         </Suspense>
         <div id="iframe-container">
           <div id="iframe-resize-divider"></div>
