@@ -28,7 +28,7 @@ const DEFAULT_CONFIG: MasterConfig = {
   configured: false,
   checkoutUrl: "",
   hasWebhookVerification: false,
-  priceMonthly: 5,
+  priceMonthly: 2,
   dailyCoins: COOKIE_MASTER_DAILY_COINS,
   tierName: "Cookie Master",
 };
@@ -178,7 +178,7 @@ export default function CookieMasterPage() {
           configured: Boolean(data.configured),
           checkoutUrl: typeof data.checkoutUrl === "string" ? data.checkoutUrl : "",
           hasWebhookVerification: Boolean(data.hasWebhookVerification),
-          priceMonthly: Number(data.priceMonthly) || 5,
+          priceMonthly: Number(data.priceMonthly) || 2,
           dailyCoins: Number(data.dailyCoins) || COOKIE_MASTER_DAILY_COINS,
           tierName: typeof data.tierName === "string" ? data.tierName : "Cookie Master",
         });
@@ -535,7 +535,7 @@ export default function CookieMasterPage() {
                   : config.configured
                     ? isActiveMaster
                       ? "manage on ko-fi"
-                      : "buy cookie master — $5/mo"
+                      : `buy cookie master — $${config.priceMonthly}/mo`
                     : "ko-fi checkout not configured"}
               </span>
             </a>

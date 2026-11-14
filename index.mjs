@@ -3304,7 +3304,7 @@ app.post("/api/shop/troll", async (req, res) => {
   }
 });
 
-// --- Cookie Master ($5/mo Subscription) & Ko-fi Checkout / Webhook Integration ---
+// --- Cookie Master ($2/mo Subscription) & Ko-fi Checkout / Webhook Integration ---
 const KOFI_USERNAME = (process.env.KOFI_USERNAME || "").trim().replace(/^@+/, "");
 const KOFI_CHECKOUT_URL = (
   process.env.KOFI_CHECKOUT_URL ||
@@ -3369,7 +3369,7 @@ async function persistKofiSubscriptionRecord(record) {
 
   if (USE_SUPABASE_CLOUDSYNC) {
     try {
-      await supabaseRest("kofi_subscriptions?on_conflict=transaction_id", {
+      const { ok, status, text } = await supabaseRest("kofi_subscriptions?on_conflict=transaction_id", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({
@@ -3379,12 +3379,17 @@ async function persistKofiSubscriptionRecord(record) {
           message_username_lower: record.messageUsernameLower,
           claimed_username_lower: record.claimedUsernameLower || "",
           tier_name: record.tierName,
-          amount: Number(record.amount) || 5,
+          amount: Number(record.amount) || 2,
           verified_at: new Date(record.verifiedAt).toISOString(),
           expires_at: new Date(record.expiresAt).toISOString(),
         }),
       });
-    } catch {}
+      if (!ok) {
+        console.warn(`Supabase kofi_subscriptions upsert failed (${status}): ${text}`);
+      }
+    } catch (e) {
+      console.warn("Supabase kofi_subscriptions upsert error:", e.message);
+    }
   }
 }
 
@@ -3414,13 +3419,14 @@ async function findActiveKofiSubscription({ query = "", username = "" }) {
 
   if (USE_SUPABASE_CLOUDSYNC && (qLower || userLower)) {
     try {
+      const quotePgVal = (v) => `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
       const filters = [];
       if (qLower) {
-        const enc = encodeURIComponent(qLower);
+        const enc = encodeURIComponent(quotePgVal(qLower));
         filters.push(`transaction_id.ilike.${enc}`, `email_lower.eq.${enc}`);
       }
       if (userLower) {
-        const encU = encodeURIComponent(userLower);
+        const encU = encodeURIComponent(quotePgVal(userLower));
         filters.push(
           `claimed_username_lower.eq.${encU}`,
           `message_username_lower.eq.${encU}`,
@@ -3440,7 +3446,7 @@ async function findActiveKofiSubscription({ query = "", username = "" }) {
             messageUsernameLower: String(match.message_username_lower || ""),
             claimedUsernameLower: String(match.claimed_username_lower || ""),
             tierName: String(match.tier_name || "Cookie Master"),
-            amount: Number(match.amount) || 5,
+            amount: Number(match.amount) || 2,
             verifiedAt: Date.parse(match.verified_at) || now,
             expiresAt: Date.parse(match.expires_at) || now + KOFI_SUB_DURATION_MS,
           };
@@ -3461,7 +3467,7 @@ app.get("/api/cookie-master/config", (_req, res) => {
     configured: Boolean(KOFI_CHECKOUT_URL),
     checkoutUrl: KOFI_CHECKOUT_URL,
     hasWebhookVerification: Boolean(KOFI_VERIFICATION_TOKEN),
-    priceMonthly: 5,
+    priceMonthly: 2,
     dailyCoins: 1000,
     tierName: KOFI_TIER_NAME || "Cookie Master",
   });
@@ -3494,7 +3500,7 @@ async function handleKofiWebhook(req, res) {
     const amountNum = Number(payload.amount || 0);
     const tierName = String(payload.tier_name || "").trim();
 
-    if (!isSub || amountNum < 4.5) {
+    if (!isSub || amountNum < 1.75) {
       return res.status(200).send("Ignored non-subscription or lower-tier payment");
     }
 
@@ -3593,7 +3599,7 @@ app.post("/api/cookie-master/verify", async (req, res) => {
         success: false,
         active: false,
         error:
-          "No active Ko-fi Cookie Master membership found yet. Make sure your monthly $5 membership finished and wait a moment for Ko-fi webhook confirmation.",
+          "No active Ko-fi Cookie Master membership found yet. Make sure your monthly $2 membership finished and wait a moment for Ko-fi webhook confirmation.",
       });
     }
 

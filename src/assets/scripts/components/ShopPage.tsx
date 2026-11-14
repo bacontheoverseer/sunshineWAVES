@@ -604,7 +604,7 @@ export default function ShopPage() {
               }}
             >
               <i class="fa-solid fa-crown" style={{ color: "#fbbf24" }}></i>
-              <span>{isCookieMasterActive() ? "manage cookie master" : "or get cookie master ($5/mo)"}</span>
+              <span>{isCookieMasterActive() ? "manage cookie master" : "or get cookie master ($2/mo)"}</span>
             </button>
           </div>
 

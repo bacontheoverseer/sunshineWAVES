@@ -51,7 +51,7 @@ export default function TopBar() {
           href="#"
           id="master-btn"
           class="text-icon-btn"
-          title="Cookie Master — $5/mo Ad-Free & Daily Cookie Coins"
+          title="Cookie Master — $2/mo Ad-Free & Daily Cookie Coins"
           style={{ fontSize: "13px", padding: "10px 14px" }}
         >
           <i

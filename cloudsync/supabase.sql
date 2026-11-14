@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS public.kofi_subscriptions (
   message_username_lower TEXT NOT NULL DEFAULT '',
   claimed_username_lower TEXT NOT NULL DEFAULT '',
   tier_name TEXT NOT NULL DEFAULT 'Cookie Master',
-  amount NUMERIC NOT NULL DEFAULT 5,
+  amount NUMERIC NOT NULL DEFAULT 2,
   verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL
 );
