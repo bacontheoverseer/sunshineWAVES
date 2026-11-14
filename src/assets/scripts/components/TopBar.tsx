@@ -50,15 +50,13 @@ export default function TopBar() {
         <a
           href="#"
           id="master-btn"
-          class="text-icon-btn"
+          class="icon-btn"
           title="Cookie Master — $2/mo Ad-Free & Daily Cookie Coins"
-          style={{ fontSize: "13px", padding: "10px 14px" }}
         >
           <i
             class="fa-solid fa-crown"
             style={{ color: masterActive ? "#fbbf24" : undefined }}
           ></i>
-          <span>{masterActive ? "cookie master ✓" : "cookie master"}</span>
         </a>
         <a
           href="#"

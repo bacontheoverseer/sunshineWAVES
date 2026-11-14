@@ -65,6 +65,7 @@ export default function CookieMasterPage() {
   const [lookupInput, setLookupInput] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [claiming, setClaiming] = useState(false);
+  const [showCancelPanel, setShowCancelPanel] = useState(false);
   const [claimRemainingMs, setClaimRemainingMs] = useState<number>(() =>
     getNextDailyClaimRemainingMs()
   );
@@ -698,6 +699,15 @@ export default function CookieMasterPage() {
               <button
                 type="button"
                 class="studio-tab-btn"
+                onClick={() => setShowCancelPanel((v) => !v)}
+              >
+                <i class="fa-solid fa-ban"></i>
+                <span>cancel subscription</span>
+              </button>
+
+              <button
+                type="button"
+                class="studio-tab-btn"
                 onClick={handleDeactivateDevice}
               >
                 <i class="fa-solid fa-right-from-bracket"></i>
@@ -705,6 +715,46 @@ export default function CookieMasterPage() {
               </button>
             </div>
           </div>
+
+          {showCancelPanel && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                flexWrap: "wrap",
+                gap: "10px",
+                padding: "12px 14px",
+                borderRadius: "10px",
+                background: "var(--bg-surface-4)",
+                border: "1px solid var(--bg-surface-10)",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "12px",
+                  lineHeight: 1.45,
+                  color: "var(--color-sublabel)",
+                  textTransform: "lowercase",
+                  flex: "1 1 320px",
+                }}
+              >
+                ko-fi processes recurring billing directly, so to stop future charges open ko-fi
+                billing settings → subscriptions → three dots → don&apos;t renew (or paypal automatic
+                payments). your cookie master perks remain active until your current month expires.
+              </div>
+              <a
+                href="https://ko-fi.com/settings"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="studio-tab-btn"
+                style={{ textDecoration: "none", color: "var(--text-primary)" }}
+              >
+                <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                <span>open ko-fi billing settings</span>
+              </a>
+            </div>
+          )}
         </div>
       ) : (
         <div class="apps-custom-launcher" style={{ padding: "16px 18px" }}>
