@@ -1,0 +1,521 @@
+/* Operation Cookie - Apps Hub & Game Studio Styles (Theme-Aware) */
+
+body.apps-view,
+body.studio-view {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background-color: var(--bg-body);
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+body.apps-view .meow,
+body.studio-view .meow {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+body.apps-view .main-container,
+body.apps-view #bookmarks-container,
+body.apps-view #arrow-pointer,
+body.studio-view .main-container,
+body.studio-view #bookmarks-container,
+body.studio-view #arrow-pointer {
+  display: none !important;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   APPS PAGE
+   ───────────────────────────────────────────────────────────── */
+.apps-page {
+  display: none;
+  flex-direction: column;
+  gap: 20px;
+  padding: 105px 44px 60px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  position: relative;
+  opacity: 0;
+  transition: opacity 0.14s ease;
+}
+
+.apps-page.is-visible {
+  display: flex;
+}
+
+.apps-page.is-active {
+  opacity: 1;
+}
+
+.apps-header-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.apps-category-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.apps-cat-pill {
+  background-color: var(--bg-surface-3);
+  border: 1px solid var(--bg-surface-10);
+  color: var(--color-sublabel);
+  padding: 7px 15px;
+  border-radius: 20px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.apps-cat-pill:hover {
+  background-color: var(--bg-surface-5);
+  color: var(--text-primary);
+}
+
+.apps-cat-pill.active {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border-color: var(--btn-primary-bg);
+  font-weight: 500;
+}
+
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.app-card {
+  background-color: var(--bg-surface-3);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 15px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.app-card:hover {
+  transform: translateY(-3px);
+  background-color: var(--bg-surface-4);
+  border-color: var(--border-focus);
+}
+
+.app-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app-icon-box {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+}
+
+.app-proxy-badge {
+  font-size: 10px;
+  color: var(--color-sublabel);
+  background-color: var(--bg-surface-5);
+  border: 1px solid var(--bg-surface-10);
+  padding: 3px 8px;
+  border-radius: 10px;
+  text-transform: lowercase;
+}
+
+.app-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.app-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+  text-transform: lowercase;
+}
+
+.app-card-desc {
+  font-size: 11.5px;
+  color: var(--color-sublabel);
+  margin: 0;
+  line-height: 1.35;
+  text-transform: lowercase;
+}
+
+/* Custom URL Proxy Launcher Bar */
+.apps-custom-launcher {
+  background-color: var(--bg-surface-3);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 15px;
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.apps-custom-launcher-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-transform: lowercase;
+}
+
+.apps-custom-launcher-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  max-width: 520px;
+}
+
+.apps-custom-input {
+  flex: 1;
+  background-color: var(--input-bg);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 10px;
+  padding: 9px 14px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.apps-custom-input:focus {
+  border-color: var(--border-focus);
+}
+
+.apps-custom-btn {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border: none;
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.apps-custom-btn:hover {
+  background-color: var(--btn-primary-hover);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   GAME STUDIO PAGE (ENGINE & COMMUNITY HUB)
+   ───────────────────────────────────────────────────────────── */
+.studio-page {
+  display: none;
+  flex-direction: column;
+  gap: 18px;
+  padding: 95px 36px 50px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1320px;
+  margin: 0 auto;
+  position: relative;
+  opacity: 0;
+  transition: opacity 0.14s ease;
+}
+
+.studio-page.is-visible {
+  display: flex;
+}
+
+.studio-page.is-active {
+  opacity: 1;
+}
+
+.studio-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 15px;
+  padding: 12px 18px;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.studio-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: lowercase;
+}
+
+.studio-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.studio-tab-btn {
+  background-color: var(--bg-surface-4);
+  border: 1px solid var(--bg-surface-10);
+  color: var(--color-sublabel);
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: all 0.15s ease;
+  text-transform: lowercase;
+}
+
+.studio-tab-btn:hover {
+  background-color: var(--bg-surface-5);
+  color: var(--text-primary);
+}
+
+.studio-tab-btn.active {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border-color: var(--btn-primary-bg);
+  font-weight: 500;
+}
+
+/* Editor Workspace Layout */
+.studio-workspace {
+  display: grid;
+  grid-template-columns: 250px 1fr 290px;
+  gap: 14px;
+  align-items: start;
+}
+
+.studio-panel {
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 15px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.studio-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+}
+
+.studio-tool-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.studio-tool-btn {
+  background-color: var(--bg-surface-4);
+  border: 1px solid var(--bg-surface-10);
+  color: var(--text-primary);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  transition: all 0.15s ease;
+  text-transform: lowercase;
+}
+
+.studio-tool-btn:hover {
+  background-color: var(--bg-surface-5);
+}
+
+.studio-tool-btn.active {
+  background-color: var(--bg-surface-6);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 1px var(--border-focus);
+}
+
+.studio-Swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+/* Center Canvas Stage */
+.studio-stage-panel {
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 15px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+.studio-stage-toolbar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.studio-canvas-wrap {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 2px solid var(--bg-surface-10);
+  background: #090d16;
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.55);
+  max-width: 100%;
+}
+
+.studio-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  cursor: crosshair;
+}
+
+.studio-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.studio-field label {
+  font-size: 11.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+  display: flex;
+  justify-content: space-between;
+}
+
+.studio-input,
+.studio-select,
+.studio-textarea {
+  background-color: var(--input-bg);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 9px;
+  padding: 8px 11px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+  font-family: inherit;
+}
+
+.studio-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  min-height: 95px;
+  resize: vertical;
+}
+
+.studio-input:focus,
+.studio-select:focus,
+.studio-textarea:focus {
+  border-color: var(--border-focus);
+}
+
+/* Community Games Grid */
+.studio-community-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.studio-game-card {
+  background-color: var(--bg-surface-3);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 15px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.studio-game-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-focus);
+}
+
+.studio-game-preview-banner {
+  height: 95px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--bg-surface-10);
+}
+
+.studio-game-mode-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background-color: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  text-transform: lowercase;
+}
+
+.studio-game-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 1020px) {
+  .studio-workspace {
+    grid-template-columns: 1fr;
+  }
+}

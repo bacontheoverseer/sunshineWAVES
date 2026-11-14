@@ -971,6 +971,8 @@ export function initLiveClient(): void {
         window.dispatchEvent(new CustomEvent("sunshine-chat-event", { detail: msg }));
       } else if (msg.type === "voice-event") {
         window.dispatchEvent(new CustomEvent("sunshine-voice-event", { detail: msg }));
+      } else if (msg.type === "studio-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-studio-event", { detail: msg }));
       }
     } catch (err) {
       console.warn("Failed to parse SSE live message:", err);

@@ -170,6 +170,18 @@ export default function GamesPage() {
     ) {
       window.hideWatchMenu();
     }
+    if (
+      document.body.classList.contains("apps-view") &&
+      (window as any).hideAppsMenu
+    ) {
+      (window as any).hideAppsMenu();
+    }
+    if (
+      document.body.classList.contains("studio-view") &&
+      (window as any).hideStudioMenu
+    ) {
+      (window as any).hideStudioMenu();
+    }
 
     showHomeView();
     document.body.classList.add("games-view");

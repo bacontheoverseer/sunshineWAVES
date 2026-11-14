@@ -8,6 +8,8 @@ import TopBar from "./components/TopBar.tsx";
 
 const loadGamesPage = () => import("./components/GamesPage.tsx");
 const GamesPage = lazy(loadGamesPage);
+const AppsPage = lazy(() => import("./components/AppsPage.tsx"));
+const GameStudioPage = lazy(() => import("./components/GameStudioPage.tsx"));
 const NewTabModal = lazy(() => import("./components/NewTabModal.tsx"));
 const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
 const ChatModal = lazy(() => import("./components/ChatModal.tsx"));
@@ -27,6 +29,12 @@ export default function App() {
         <Bookmarks />
         <Suspense fallback={null}>
           <GamesPage />
+        </Suspense>
+        <Suspense fallback={null}>
+          <AppsPage />
+        </Suspense>
+        <Suspense fallback={null}>
+          <GameStudioPage />
         </Suspense>
         <div id="iframe-container">
           <div id="iframe-resize-divider"></div>

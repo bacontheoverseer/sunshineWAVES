@@ -8,6 +8,7 @@ import "../css/index.css";
 import "../css/tabs.css";
 import "../css/chat.css";
 import "../css/admin.css";
+import "../css/apps.css";
 
 window.__sunshineStuffData = fetch("/api/stuff", { cache: "no-store" })
   .then((res) => (res.ok ? res.json() : null))

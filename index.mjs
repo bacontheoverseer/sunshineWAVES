@@ -1056,6 +1056,57 @@ app.post("/api/voice/signal", (req, res) => {
   }
 });
 
+// --- Game Studio Published Games API ---
+const publishedStudioGames = [];
+
+app.get("/api/studio/games", (_req, res) => {
+  res.json({ success: true, games: publishedStudioGames });
+});
+
+app.post("/api/studio/games", async (req, res) => {
+  try {
+    const { game } = req.body || {};
+    if (!game || !game.title || !game.author) {
+      return res.status(400).json({ success: false, error: "Missing game title or author" });
+    }
+    const modCheck = await moderateTextWithOpenAI(`${game.title} ${game.description || ""}`);
+    if (modCheck.blocked) {
+      return res.status(400).json({
+        success: false,
+        error: modCheck.reason || "Game title or description blocked by moderation",
+      });
+    }
+    const entry = {
+      ...game,
+      id: game.id || `game_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: game.createdAt || new Date().toISOString(),
+      plays: Number(game.plays) || 0,
+      likes: Number(game.likes) || 0,
+    };
+    const existingIdx = publishedStudioGames.findIndex((g) => g.id === entry.id);
+    if (existingIdx >= 0) {
+      publishedStudioGames[existingIdx] = entry;
+    } else {
+      publishedStudioGames.unshift(entry);
+    }
+    broadcastToClients({ type: "studio-event", event: "GAME_PUBLISHED", game: entry }, "all");
+    res.json({ success: true, game: entry });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/studio/games/:id/stat", (req, res) => {
+  const { id } = req.params;
+  const { field } = req.body || {};
+  const found = publishedStudioGames.find((g) => g.id === id);
+  if (found) {
+    if (field === "likes") found.likes = (found.likes || 0) + 1;
+    if (field === "plays") found.plays = (found.plays || 0) + 1;
+  }
+  res.json({ success: true, game: found || null });
+});
+
 function getBuiltModuleEntryPath() {
   if (NODE_ENV !== "production") return null;
   try {

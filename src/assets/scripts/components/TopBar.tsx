@@ -13,7 +13,10 @@ export default function TopBar() {
     <>
       <div id="top-left-stuff">
         <div id="branding-container" class="icon-btn">
-          <img src="/sunshinelogo.png" style={{ width: '20px', height: '20px', marginRight: '8px' }} />
+          <img
+            src="/sunshinelogo.png"
+            style={{ width: "20px", height: "20px", marginRight: "8px" }}
+          />
           <span id="brand">Operation Cookie</span>
         </div>
         <a
@@ -21,6 +24,7 @@ export default function TopBar() {
           target="_blank"
           id="discord-btn"
           class="icon-btn"
+          title="Discord"
         >
           <i class="fa-brands fa-discord"></i>
         </a>
@@ -36,8 +40,21 @@ export default function TopBar() {
         >
           <i class="fa-solid fa-comments"></i>
         </a>
-        <a href="#" id="choi" class="icon-btn">
+        <a href="#" id="choi" class="icon-btn" title="Games">
           <i class="fa-solid fa-gamepad"></i>
+        </a>
+        <a href="#" id="apps-btn" class="icon-btn" title="Apps (Proxy)">
+          <i class="fa-solid fa-table-cells-large"></i>
+        </a>
+        <a
+          href="#"
+          id="studio-btn"
+          class="text-icon-btn"
+          title="Game Studio — Create & Publish Games"
+          style={{ fontSize: "13px", padding: "10px 14px" }}
+        >
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span>game studio</span>
         </a>
       </div>
       <div id="top-right-stuff">
