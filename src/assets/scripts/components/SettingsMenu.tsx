@@ -383,7 +383,7 @@ export default function SettingsMenu() {
               onClick={() => setActiveTab(t.id)}
             >
               <i
-                class={`${activeTab === t.id ? "fa-solid" : "fa-regular"} ${t.icon}`}
+                class={`fa-solid ${t.icon}`}
               />{" "}
               {t.label}
             </button>
@@ -570,7 +570,7 @@ export default function SettingsMenu() {
         </div>
       </div>
       <button id="close-settings-menu" onClick={toggleMenu}>
-        <i class="fa-regular fa-times" />
+        <i class="fa-solid fa-xmark" />
       </button>
     </div>
   );

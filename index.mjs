@@ -26,8 +26,8 @@ const packageJsonPath = path.resolve("package.json");
 const CACHING_ENABLED = NODE_ENV === "production";
 const fileCache = CACHING_ENABLED
   ? new LRUCache({
-    maxSize: parseInt(process.env.FILE_CACHE_MAX_MB || "64", 10) * 1024 * 1024,
-    ttl: 1000 * 60 * 30,
+    maxSize: parseInt(process.env.FILE_CACHE_MAX_MB || "32", 10) * 1024 * 1024,
+    ttl: 1000 * 60 * 20,
     ttlAutopurge: true,
     sizeCalculation: (buf) => buf.length,
   })
@@ -186,7 +186,7 @@ server.on("upgrade", (req, socket, head) => {
     socket.end();
   }
 });
-const pageCache = new LRUCache({ max: parseInt(process.env.PAGE_CACHE_MAX || "100", 10), ttl: 1000 * 60 * 5 });
+const pageCache = new LRUCache({ max: parseInt(process.env.PAGE_CACHE_MAX || "50", 10), ttl: 1000 * 60 * 5 });
 
 app.use((req, res, next) => {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
@@ -411,7 +411,7 @@ app.use(
 );
 
 app.use("/api/", apiLimiter);
-app.use("/api/", express.json({ limit: "30mb" }));
+app.use("/api/", express.json({ limit: "8mb" }));
 
 app.use((req, res, next) => {
   if (!CACHING_ENABLED || req.method !== "GET") return next();
@@ -546,14 +546,26 @@ function getCloudSyncDbFilePath() {
 }
 
 let cloudSyncDbInitialized = false;
-function openCloudSyncDb(readonly = false) {
+let sharedCloudSyncDb = null;
+let sharedCloudSyncDbPath = "";
+
+function getSharedCloudSyncDb() {
   const dbFile = getCloudSyncDbFilePath();
-  if (!cloudSyncDbInitialized) {
+  if (!sharedCloudSyncDb || sharedCloudSyncDbPath !== dbFile) {
     try {
-      const initDb = new Database(dbFile);
-      initDb.exec(`
-        PRAGMA journal_mode = WAL;
-        PRAGMA busy_timeout = 10000;
+      sharedCloudSyncDb?.close();
+    } catch {}
+    sharedCloudSyncDb = new Database(dbFile);
+    sharedCloudSyncDbPath = dbFile;
+    sharedCloudSyncDb.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = NORMAL;
+      PRAGMA temp_store = MEMORY;
+      PRAGMA cache_size = -4000;
+      PRAGMA busy_timeout = 10000;
+    `);
+    if (!cloudSyncDbInitialized) {
+      sharedCloudSyncDb.exec(`
         CREATE TABLE IF NOT EXISTS users (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           username TEXT UNIQUE NOT NULL,
@@ -575,13 +587,29 @@ function openCloudSyncDb(readonly = false) {
         );
         CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
       `);
-      initDb.close();
       cloudSyncDbInitialized = true;
-    } catch (e) {
-      console.warn("CloudSync DB init warning:", e.message);
     }
   }
-  return new Database(dbFile, readonly ? { readonly: true } : undefined);
+  return sharedCloudSyncDb;
+}
+
+const sharedCloudSyncDbHandle = {
+  query: (...args) => getSharedCloudSyncDb().query(...args),
+  prepare: (...args) => getSharedCloudSyncDb().prepare(...args),
+  exec: (...args) => getSharedCloudSyncDb().exec(...args),
+  transaction: (...args) => getSharedCloudSyncDb().transaction(...args),
+  close() {
+    // Keep persistent WAL handle pooled to reduce SQLite open/close overhead on Raspberry Pi
+  },
+};
+
+function openCloudSyncDb(_readonly = false) {
+  try {
+    getSharedCloudSyncDb();
+  } catch (e) {
+    console.warn("CloudSync DB init warning:", e.message);
+  }
+  return sharedCloudSyncDbHandle;
 }
 
 function base64UrlEncode(input) {
@@ -734,6 +762,7 @@ app.post("/api/auth/register", (req, res) => {
     const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
     const token = signCloudSyncJwt({ id: userId, username, v: 1, exp });
     setCloudSyncAuthCookie(res, token, req);
+    invalidateCloudSyncUsersCache();
     touchKnownUser(username);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
@@ -844,6 +873,7 @@ app.delete("/api/auth/me", (req, res) => {
       db.close();
     }
     knownUsers.delete(user.username.toLowerCase());
+    invalidateCloudSyncUsersCache();
     clearCloudSyncAuthCookie(res);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     return res.json({ success: true, user: null, error: "account deleted!" });
@@ -983,7 +1013,16 @@ function isTemporaryGuestName(name) {
   return /^guest[-_][a-z0-9]+$/i.test(lower);
 }
 
+let cloudSyncUsersCache = { map: null, expiresAt: 0 };
+function invalidateCloudSyncUsersCache() {
+  cloudSyncUsersCache = { map: null, expiresAt: 0 };
+}
+
 function getCloudSyncUsersMap() {
+  const now = Date.now();
+  if (cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
+    return cloudSyncUsersCache.map;
+  }
   const map = new Map();
   try {
     const db = openCloudSyncDb(true);
@@ -1001,6 +1040,7 @@ function getCloudSyncUsersMap() {
           });
         }
       }
+      cloudSyncUsersCache = { map, expiresAt: now + 15000 };
     } finally {
       db.close();
     }
@@ -1151,14 +1191,46 @@ function broadcastToClients(actionPayload, target = "all") {
   return delivered;
 }
 
-// Keep-alive heartbeat comment every 15s
+// Keep-alive heartbeat & low-RAM stale state cleanup every 15s
+let heartbeatTick = 0;
 setInterval(() => {
+  const now = Date.now();
+  heartbeatTick++;
   for (const [id, client] of liveClients.entries()) {
+    if (client.res?.writableEnded || client.res?.destroyed || now - (client.lastSeen || 0) > 300000) {
+      liveClients.delete(id);
+      continue;
+    }
     try {
       client.res.write(": keepalive\n\n");
     } catch {
       liveClients.delete(id);
     }
+  }
+  if (heartbeatTick % 4 === 0) {
+    // Prune disconnected peers from voiceRooms & cap knownUsers
+    for (const [roomId, peers] of voiceRooms.entries()) {
+      for (const peerId of peers.keys()) {
+        if (!liveClients.has(peerId)) peers.delete(peerId);
+      }
+      if (peers.size === 0) voiceRooms.delete(roomId);
+    }
+    if (knownUsers.size > 300) {
+      for (const [uname, lastSeen] of knownUsers.entries()) {
+        if (now - lastSeen > 24 * 60 * 60 * 1000) knownUsers.delete(uname);
+      }
+    }
+    if (userProfiles.size > 300) {
+      for (const [uname] of userProfiles.entries()) {
+        if (!knownUsers.has(uname)) userProfiles.delete(uname);
+        if (userProfiles.size <= 300) break;
+      }
+    }
+  }
+  if (heartbeatTick % 20 === 0 && sharedCloudSyncDb) {
+    try {
+      sharedCloudSyncDb.exec("PRAGMA wal_checkpoint(PASSIVE);");
+    } catch {}
   }
 }, 15000);
 
@@ -1317,19 +1389,43 @@ app.get("/api/live/audio-proxy", async (req, res) => {
   }
 });
 
+function pruneCachedSoundsInDir(dir) {
+  try {
+    if (!fs.existsSync(dir)) return;
+    const entries = fs
+      .readdirSync(dir)
+      .filter((name) => /^(cached_|upload_)/i.test(name) && /\.(mp3|wav|ogg|m4a)$/i.test(name))
+      .map((name) => {
+        const full = path.join(dir, name);
+        const st = fs.statSync(full);
+        return { full, size: st.size, mtimeMs: st.mtimeMs };
+      })
+      .sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
+
+    let totalBytes = entries.reduce((acc, e) => acc + e.size, 0);
+    const MAX_FILES = 40;
+    const MAX_BYTES = 50 * 1024 * 1024;
+    let remaining = entries.length;
+    for (const entry of entries) {
+      if (remaining <= MAX_FILES && totalBytes <= MAX_BYTES) break;
+      try {
+        fs.unlinkSync(entry.full);
+        totalBytes -= entry.size;
+        remaining--;
+      } catch {}
+    }
+  } catch {}
+}
+
 function writeSoundBufferToDirs(safeFilename, buffer) {
-  const dirs = [
-    path.join(publicPath, "assets", "sounds"),
-    path.join(__dirname, "dist", "assets", "sounds"),
-  ];
-  for (const dir of dirs) {
-    try {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(path.join(dir, safeFilename), buffer);
-    } catch {}
-  }
+  const dir = path.join(publicPath, "assets", "sounds");
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(dir, safeFilename), buffer);
+    pruneCachedSoundsInDir(dir);
+  } catch {}
 }
 
 function decodeHtmlEntities(str) {
@@ -2213,6 +2309,8 @@ app.post("/api/voice/signal", (req, res) => {
 
 // --- Game Studio Published Games API ---
 const publishedStudioGames = [];
+const MAX_PUBLISHED_STUDIO_GAMES = 60;
+const MAX_CUSTOM_HTML_BYTES = 2 * 1024 * 1024;
 
 app.get("/api/studio/games", (_req, res) => {
   res.json({ success: true, games: publishedStudioGames });
@@ -2223,6 +2321,15 @@ app.post("/api/studio/games", async (req, res) => {
     const { game } = req.body || {};
     if (!game || !game.title || !game.author) {
       return res.status(400).json({ success: false, error: "Missing game title or author" });
+    }
+    if (
+      typeof game.customHtmlContent === "string" &&
+      Buffer.byteLength(game.customHtmlContent, "utf-8") > MAX_CUSTOM_HTML_BYTES
+    ) {
+      return res.status(413).json({
+        success: false,
+        error: "Custom HTML file exceeds 2MB server memory limit",
+      });
     }
     const modCheck = await moderateTextWithOpenAI(`${game.title} ${game.description || ""}`);
     if (modCheck.blocked) {
@@ -2243,6 +2350,9 @@ app.post("/api/studio/games", async (req, res) => {
       publishedStudioGames[existingIdx] = entry;
     } else {
       publishedStudioGames.unshift(entry);
+      while (publishedStudioGames.length > MAX_PUBLISHED_STUDIO_GAMES) {
+        publishedStudioGames.pop();
+      }
     }
     broadcastToClients({ type: "studio-event", event: "GAME_PUBLISHED", game: entry }, "all");
     res.json({ success: true, game: entry });
@@ -2275,6 +2385,8 @@ app.get("/api/studio/games/:id/play.html", (req, res) => {
 
 // --- CloudSync Player Progress & Telemetry Tracking per Studio Game ---
 const studioCloudProgress = new Map(); // gameId -> Map<usernameLower, ProgressRecord>
+const MAX_PROGRESS_GAMES = 120;
+const MAX_PROGRESS_PLAYERS_PER_GAME = 250;
 
 app.get("/api/studio/progress", (req, res) => {
   const gameId = ((req.query.gameId || "") + "").trim();
@@ -2316,9 +2428,17 @@ app.post("/api/studio/progress", (req, res) => {
     const userKey = cleanUser.toLowerCase();
 
     if (!studioCloudProgress.has(gameId)) {
+      if (studioCloudProgress.size >= MAX_PROGRESS_GAMES) {
+        const oldestKey = studioCloudProgress.keys().next().value;
+        if (oldestKey) studioCloudProgress.delete(oldestKey);
+      }
       studioCloudProgress.set(gameId, new Map());
     }
     const gameMap = studioCloudProgress.get(gameId);
+    if (!gameMap.has(userKey) && gameMap.size >= MAX_PROGRESS_PLAYERS_PER_GAME) {
+      const oldestUser = gameMap.keys().next().value;
+      if (oldestUser) gameMap.delete(oldestUser);
+    }
     const prev = gameMap.get(userKey) || {
       username: cleanUser,
       cloudSynced: Boolean(cloudSynced),
@@ -2798,6 +2918,11 @@ async function gracefulShutdown() {
   shuttingDown = true;
   console.log("\nshutting down...");
   killServices();
+  try {
+    sharedCloudSyncDb?.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    sharedCloudSyncDb?.close();
+    sharedCloudSyncDb = null;
+  } catch {}
   await vite?.close().catch(() => { });
   for (const conn of connections) conn.destroy();
   connections.clear();

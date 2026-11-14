@@ -723,7 +723,7 @@ export class CloudSync {
                         <label style="margin-top: 15px;">password</label>
                         <div style="position: relative;">
                             <input type="password" id="login-password" placeholder="enter password" style="width: 100%; padding-right: 35px; box-sizing: border-box;">
-                            <i class="fa-regular fa-eye password-toggle" data-target="login-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
+                            <i class="fa-solid fa-eye password-toggle" data-target="login-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
                         </div>
 
                         <div style="text-align: center;">
@@ -739,7 +739,7 @@ export class CloudSync {
                         <label style="margin-top: 15px;">password</label>
                         <div style="position: relative;">
                             <input type="password" id="reg-password" placeholder="create password" style="width: 100%; padding-right: 35px; box-sizing: border-box;">
-                            <i class="fa-regular fa-eye password-toggle" data-target="reg-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
+                            <i class="fa-solid fa-eye password-toggle" data-target="reg-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
                         </div>
                         <div id="reg-password-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">8+ chars, 1 number, 1 symbol</div>
 
@@ -774,7 +774,7 @@ export class CloudSync {
                     </button>
                 </div>
             <button id="close-auth-modal" class="cloudsync-close-btn">
-                <i class="fa-regular fa-times"></i>
+                <i class="fa-solid fa-xmark"></i>
             </button>
         `;
 

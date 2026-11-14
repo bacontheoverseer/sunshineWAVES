@@ -312,11 +312,36 @@ function getCloudSyncState(): { username: string; isCloudSynced: boolean } {
   return { username: "guest_creator", isCloudSynced: false };
 }
 
+function rewriteExternalHtmlAssetsForCoep(rawHtml: string): string {
+  // Rewrite external http(s) script/link/img/audio/video/source URLs through /!!/ so COEP (require-corp) never blocks CDN libraries
+  return rawHtml.replace(
+    /\b(src|href)\s*=\s*(["'])(https?:\/\/[^"']+)\2/gi,
+    (match, attr, quote, url) => {
+      if (url.includes("/!!/")) return match;
+      return `${attr}=${quote}/!!/${url}${quote}`;
+    }
+  );
+}
+
 function injectCloudSyncBridgeIntoHtml(rawHtml: string, project: StudioGameProject): string {
   const { username, isCloudSynced } = getCloudSyncState();
+  const coepSafeHtml = rewriteExternalHtmlAssetsForCoep(rawHtml || "");
   const bridgeScript = `
 <script>
 (function() {
+  // Auto-proxy cross-origin fetch/Image/Audio requests through /!!/ so COEP never blocks external game assets
+  try {
+    var origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = function(input, init) {
+        if (typeof input === "string" && /^https?:\\/\\//i.test(input) && input.indexOf(location.host) === -1) {
+          input = location.origin + "/!!/" + input;
+        }
+        return origFetch.call(this, input, init);
+      };
+    }
+  } catch (e) {}
+
   window.CookieCloudSync = {
     gameId: ${JSON.stringify(project.id)},
     gameTitle: ${JSON.stringify(project.title)},
@@ -338,10 +363,13 @@ function injectCloudSyncBridgeIntoHtml(rawHtml: string, project: StudioGameProje
   };
 })();
 </script>`;
-  if (rawHtml.includes("</head>")) {
-    return rawHtml.replace("</head>", `${bridgeScript}</head>`);
+  if (/<\/head>/i.test(coepSafeHtml)) {
+    return coepSafeHtml.replace(/<\/head>/i, `${bridgeScript}</head>`);
   }
-  return bridgeScript + rawHtml;
+  if (/<body[^>]*>/i.test(coepSafeHtml)) {
+    return coepSafeHtml.replace(/<body[^>]*>/i, (m) => `${m}${bridgeScript}`);
+  }
+  return `<!DOCTYPE html><html><head><meta charset="utf-8" />${bridgeScript}</head><body>${coepSafeHtml}</body></html>`;
 }
 
 function buildStandaloneGameHtml(project: StudioGameProject): string {
@@ -531,6 +559,9 @@ export default function GameStudioPage() {
   const [htmlFileName, setHtmlFileName] = useState<string>("");
   const [customHtmlCode, setCustomHtmlCode] = useState<string>(SAMPLE_CUSTOM_HTML_GAME);
   const [isUploadingHtml, setIsUploadingHtml] = useState(false);
+  const [previewRefreshTick, setPreviewRefreshTick] = useState<number>(0);
+  const [htmlPreviewBlobUrl, setHtmlPreviewBlobUrl] = useState<string>("");
+  const [playingCustomBlobUrl, setPlayingCustomBlobUrl] = useState<string>("");
 
   // Multi-Level & Sophisticated Engine Project state
   const [title, setTitle] = useState("cyber dungeon 3d & 2d");
@@ -2129,6 +2160,10 @@ export default function GameStudioPage() {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      notifyToast("html file too large (max 2MB)", "error");
+      return;
+    }
     setHtmlFileName(file.name);
     if (!htmlTitle.trim()) {
       setHtmlTitle(file.name.replace(/\.html?$/i, "").replace(/[-_]/g, " "));
@@ -2137,11 +2172,68 @@ export default function GameStudioPage() {
     reader.onload = () => {
       if (typeof reader.result === "string") {
         setCustomHtmlCode(reader.result);
+        setPreviewRefreshTick((t) => t + 1);
         notifyToast(`loaded ${file.name} (${reader.result.length} bytes)`, "success");
       }
     };
     reader.readAsText(file);
   };
+
+  // Manage Blob URL for Live HTML File Upload Preview (debounced so typing in textarea is smooth & zero memory leaks)
+  useEffect(() => {
+    if (!visible || subTab !== "htmlupload") return;
+    const timer = window.setTimeout(() => {
+      const fullHtml = injectCloudSyncBridgeIntoHtml(customHtmlCode, {
+        id: "html_preview",
+        title: htmlTitle || "preview",
+        description: htmlDesc,
+        author: getActiveAuthor(),
+        mode: "custom_html",
+        grid: [],
+        gravity: 0,
+        jumpForce: 0,
+        moveSpeed: 0,
+        playerColor: "#fff",
+        bgColor: "#000",
+        wallColor: "#fff",
+        customScript: "",
+        likes: 0,
+        plays: 0,
+        createdAt: "",
+      });
+      const blob = new Blob([fullHtml], { type: "text/html;charset=utf-8" });
+      const nextUrl = URL.createObjectURL(blob);
+      setHtmlPreviewBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return nextUrl;
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [visible, subTab, customHtmlCode, htmlTitle, htmlDesc, previewRefreshTick]);
+
+  // Manage Blob URL for playing a published custom index.html game inside Studio
+  useEffect(() => {
+    if (!playingCustomHtmlGame || !playingCustomHtmlGame.customHtmlContent) {
+      setPlayingCustomBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return "";
+      });
+      return;
+    }
+    const fullHtml = injectCloudSyncBridgeIntoHtml(
+      playingCustomHtmlGame.customHtmlContent,
+      playingCustomHtmlGame
+    );
+    const blob = new Blob([fullHtml], { type: "text/html;charset=utf-8" });
+    const nextUrl = URL.createObjectURL(blob);
+    setPlayingCustomBlobUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return nextUrl;
+    });
+    return () => {
+      URL.revokeObjectURL(nextUrl);
+    };
+  }, [playingCustomHtmlGame]);
 
   const handlePublishCustomHtmlGame = async (e: Event) => {
     e.preventDefault();
@@ -3204,48 +3296,88 @@ export default function GameStudioPage() {
           </form>
 
           {/* Live Sandbox Preview of the uploaded index.html */}
-          <div class="studio-stage-panel">
+          <div class="studio-stage-panel" style={{ width: "100%" }}>
             <div class="studio-stage-toolbar">
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <i class="fa-solid fa-eye" style={{ color: "#38bdf8" }}></i>
                 <strong style={{ fontSize: "13px" }}>
-                  live index.html studio preview ({htmlTitle || "untitled html game"})
+                  live index.html preview ({htmlTitle || htmlFileName || "untitled html game"})
                 </strong>
               </div>
-              <span style={{ fontSize: "11.5px", color: "var(--color-sublabel)" }}>
-                window.CookieCloudSync.reportProgress(&#123; score, level &#125;) auto-enabled
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  type="button"
+                  class="studio-tool-btn"
+                  onClick={() => setPreviewRefreshTick((t) => t + 1)}
+                  title="Reload HTML Preview"
+                >
+                  <i class="fa-solid fa-rotate-right"></i>
+                  <span>reload preview</span>
+                </button>
+                <button
+                  type="button"
+                  class="studio-tool-btn"
+                  onClick={() =>
+                    openGameInBrowserTab({
+                      id: "html_preview_tab",
+                      title: htmlTitle || htmlFileName || "html preview",
+                      description: htmlDesc,
+                      author: getActiveAuthor(),
+                      studioName: userStudio.name,
+                      studioColor: userStudio.color,
+                      mode: "custom_html",
+                      grid: [],
+                      gravity: 0,
+                      jumpForce: 0,
+                      moveSpeed: 0,
+                      playerColor: "#38bdf8",
+                      bgColor: "#060913",
+                      wallColor: "#38bdf8",
+                      customScript: "",
+                      isCustomHtml: true,
+                      customHtmlContent: customHtmlCode,
+                      likes: 0,
+                      plays: 0,
+                      createdAt: new Date().toISOString(),
+                    })
+                  }
+                  title="Test in Full Browser Tab"
+                >
+                  <i class="fa-solid fa-up-right-from-square"></i>
+                  <span>test full tab</span>
+                </button>
+              </div>
             </div>
 
-            <iframe
-              title="Custom HTML Game Preview"
-              srcDoc={injectCloudSyncBridgeIntoHtml(customHtmlCode, {
-                id: "html_preview",
-                title: htmlTitle || "preview",
-                description: htmlDesc,
-                author: getActiveAuthor(),
-                mode: "custom_html",
-                grid: [],
-                gravity: 0,
-                jumpForce: 0,
-                moveSpeed: 0,
-                playerColor: "#fff",
-                bgColor: "#000",
-                wallColor: "#fff",
-                customScript: "",
-                likes: 0,
-                plays: 0,
-                createdAt: "",
-              })}
-              sandbox="allow-scripts allow-pointer-lock allow-same-origin"
-              style={{
-                width: "100%",
-                height: "440px",
-                border: "1px solid var(--bg-surface-10)",
-                borderRadius: "12px",
-                backgroundColor: "#060913",
-              }}
-            />
+            {htmlPreviewBlobUrl ? (
+              <iframe
+                key={htmlPreviewBlobUrl}
+                title="Custom HTML Game Preview"
+                src={htmlPreviewBlobUrl}
+                allow="fullscreen; autoplay; gamepad; pointer-lock; clipboard-read; clipboard-write"
+                style={{
+                  width: "100%",
+                  height: "460px",
+                  border: "1px solid var(--bg-surface-10)",
+                  borderRadius: "12px",
+                  backgroundColor: "#060913",
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: "100%",
+                  height: "460px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "var(--color-sublabel)",
+                  fontSize: "13px",
+                }}
+              >
+                loading html preview...
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3309,21 +3441,21 @@ export default function GameStudioPage() {
                 </div>
               </div>
 
-              <iframe
-                title={playingCustomHtmlGame.title}
-                srcDoc={injectCloudSyncBridgeIntoHtml(
-                  playingCustomHtmlGame.customHtmlContent || "",
-                  playingCustomHtmlGame
-                )}
-                sandbox="allow-scripts allow-pointer-lock allow-same-origin"
-                style={{
-                  width: "100%",
-                  height: "520px",
-                  border: "1px solid var(--bg-surface-10)",
-                  borderRadius: "14px",
-                  backgroundColor: "#060913",
-                }}
-              />
+              {playingCustomBlobUrl && (
+                <iframe
+                  key={playingCustomBlobUrl}
+                  title={playingCustomHtmlGame.title}
+                  src={playingCustomBlobUrl}
+                  allow="fullscreen; autoplay; gamepad; pointer-lock; clipboard-read; clipboard-write"
+                  style={{
+                    width: "100%",
+                    height: "520px",
+                    border: "1px solid var(--bg-surface-10)",
+                    borderRadius: "14px",
+                    backgroundColor: "#060913",
+                  }}
+                />
+              )}
             </div>
           ) : (
             <div class="studio-workspace">

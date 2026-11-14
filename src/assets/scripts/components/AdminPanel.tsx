@@ -531,7 +531,7 @@ export default function AdminPanel() {
             </button>
           </form>
           <button class="admin-close-btn" onClick={() => setIsOpen(false)}>
-            <i class="fa-regular fa-times" />
+            <i class="fa-solid fa-xmark" />
           </button>
         </div>
       ) : (
@@ -547,7 +547,7 @@ export default function AdminPanel() {
                   class={`tab-button${activeTab === t.id ? " active" : ""}`}
                   onClick={() => setActiveTab(t.id)}
                 >
-                  <i class={`${activeTab === t.id ? "fa-solid" : "fa-regular"} ${t.icon}`} />{" "}
+                  <i class={`fa-solid ${t.icon}`} />{" "}
                   {t.label}
                 </button>
               ))}
@@ -824,7 +824,7 @@ export default function AdminPanel() {
                             title="remove sound"
                             onClick={() => handleDeleteSound(sound.id)}
                           >
-                            <i class="fa-regular fa-trash-can" />
+                            <i class="fa-solid fa-trash-can" />
                           </button>
                         </div>
                         <div class="admin-item-actions">
@@ -1002,7 +1002,7 @@ export default function AdminPanel() {
           </div>
 
           <button class="admin-close-btn" onClick={() => setIsOpen(false)}>
-            <i class="fa-regular fa-times" />
+            <i class="fa-solid fa-xmark" />
           </button>
         </div>
       )}

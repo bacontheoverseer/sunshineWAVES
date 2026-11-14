@@ -88,7 +88,7 @@ function Tab({
         style={{ display: showClose ? "" : "none" }}
         onClick={onCloseClick}
       >
-        <i class="fa-regular fa-times"></i>
+        <i class="fa-solid fa-xmark"></i>
       </button>
     </div>
   );
@@ -154,7 +154,7 @@ export default function Sidebar() {
         onClick={openNewTabModal}
         aria-pressed={sidebarHiddenSignal}
       >
-        <i class="fa-regular fa-plus"></i> new tab
+        <i class="fa-solid fa-plus"></i> new tab
       </button>
       <div id="tabs-container" class="tabs-container">
         {tabViewModels.map(({ tab, isActive, isSplitPair, splitSide }) => {

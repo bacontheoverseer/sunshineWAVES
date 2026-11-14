@@ -147,7 +147,7 @@ function initToast(): void {
 
     const icons: Record<string, string> = {
       success: "fa-solid fa-check-circle",
-      error: "fa-solid fa-times-circle",
+      error: "fa-solid fa-circle-xmark",
       info: "fa-solid fa-info-circle",
     };
     const iconClass = iconName

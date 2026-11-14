@@ -255,7 +255,7 @@ export default function Bookmarks() {
                   deleteBookmark(index);
                 }}
               >
-                <i class="fa-regular fa-times"></i>
+                <i class="fa-solid fa-xmark"></i>
               </button>
               <button
                 class="bookmark-edit-trigger"
@@ -264,7 +264,7 @@ export default function Bookmarks() {
                   openPrompt(index);
                 }}
               >
-                <i class="fa-regular fa-pencil"></i>
+                <i class="fa-solid fa-pencil"></i>
               </button>
             </li>
           ))}
@@ -276,7 +276,7 @@ export default function Bookmarks() {
             }}
           >
             <button id="add-bookmark-btn" onClick={() => openPrompt()}>
-              <i class="fa-regular fa-plus"></i>
+              <i class="fa-solid fa-plus"></i>
             </button>
           </li>
         </ul>

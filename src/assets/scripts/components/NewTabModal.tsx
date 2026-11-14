@@ -336,7 +336,7 @@ export default function NewTabModal() {
     >
       <div class={`new-tab-unified-wrapper${hasResults ? " has-results" : ""}`}>
         <div class="new-tab-search-container">
-          <i class="fa-regular fa-magnifying-glass"></i>
+          <i class="fa-solid fa-magnifying-glass"></i>
           <input
             ref={inputRef}
             type="text"
@@ -361,7 +361,7 @@ export default function NewTabModal() {
                 class="new-tab-result-item"
                 onClick={() => handleAction(query, "fetching data...")}
               >
-                <i class="fa-regular fa-magnifying-glass"></i> {query} - Search
+                <i class="fa-solid fa-magnifying-glass"></i> {query} - Search
                 with {currentSearchEngine}
               </div>
               {filteredGames.map((game) => (
@@ -388,7 +388,7 @@ export default function NewTabModal() {
                   store.switchTab(tab.id);
                 }}
               >
-                <i class="fa-regular fa-window-maximize"></i>{" "}
+                <i class="fa-solid fa-window-maximize"></i>{" "}
                 <span>{tab.title}</span>
               </div>
             ))}

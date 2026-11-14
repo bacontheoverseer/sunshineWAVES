@@ -1062,9 +1062,12 @@ export default function ChatModal() {
 
   // Poll / listen for CloudSync login updates
   useEffect(() => {
+    let lastRaw: string | null = "__init__";
     const checkAuth = () => {
       try {
         const stored = localStorage.getItem("auth_user");
+        if (stored === lastRaw) return;
+        lastRaw = stored;
         if (stored) {
           const parsed = JSON.parse(stored);
           if (typeof parsed?.username === "string" && parsed.username.trim().length > 0) {
@@ -1076,25 +1079,31 @@ export default function ChatModal() {
       setCloudUser(null);
     };
 
+    checkAuth();
     window.addEventListener("storage", checkAuth);
-    const interval = setInterval(checkAuth, 1500);
+    window.addEventListener("cloudsync-auth-changed", checkAuth);
+    const interval = setInterval(checkAuth, 5000);
     return () => {
       window.removeEventListener("storage", checkAuth);
+      window.removeEventListener("cloudsync-auth-changed", checkAuth);
       clearInterval(interval);
     };
   }, []);
 
-  // 1-second ticker so active game playtime on profiles updates live every second
+  // 1-second ticker only while Chat modal is open so active playtime updates without background re-renders
   useEffect(() => {
+    if (!isOpen) return;
+    setNowMs(Date.now());
     const timer = window.setInterval(() => {
-      setNowMs(Date.now());
+      if (!document.hidden) setNowMs(Date.now());
     }, 1000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [isOpen]);
 
-  // Poll chat & presence state in background even when Chat modal is closed (while playing games or browsing)
+  // Poll chat & presence state gently (SSE handles real-time push; background poll acts as sync safety net)
   useEffect(() => {
     const fetchChatAndPresenceState = () => {
+      if (document.hidden && initialStateLoadedRef.current) return;
       const isInitial = !initialStateLoadedRef.current;
       fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`)
         .then((r) => (r.ok ? r.json() : null))
@@ -1141,7 +1150,10 @@ export default function ChatModal() {
     };
 
     fetchChatAndPresenceState();
-    const pollInterval = window.setInterval(fetchChatAndPresenceState, 5000);
+    const pollInterval = window.setInterval(
+      fetchChatAndPresenceState,
+      isOpen ? 8000 : 20000
+    );
     return () => window.clearInterval(pollInterval);
   }, [cloudUser, isOpen, ingestIncomingMessage]);
 
@@ -2570,7 +2582,7 @@ export default function ChatModal() {
                       )}
                       {profileData?.createdAt && (
                         <div class="chat-profile-joined">
-                          <i class="fa-regular fa-calendar"></i> member since{" "}
+                          <i class="fa-solid fa-calendar-days"></i> member since{" "}
                           {new Date(profileData.createdAt).toLocaleDateString()}
                         </div>
                       )}

@@ -131,26 +131,31 @@ body.games-view .games-page {
 
 .game-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
 }
 
 .game-card {
-  border-radius: 10px;
+  border-radius: 12px;
   background-color: var(--game-card-bg);
+  border: 1px solid var(--bg-surface-10);
   width: 100%;
   min-height: 70px;
   aspect-ratio: 1 / 1.05;
   padding: 0;
   box-sizing: border-box;
   display: block;
-  transition: transform 0.1s ease;
+  transition: transform 0.14s ease, border-color 0.14s ease;
   cursor: pointer;
   position: relative;
   overflow: hidden;
   contain: layout style paint;
   content-visibility: auto;
-  contain-intrinsic-size: 100px 105px;
+  contain-intrinsic-size: 150px 158px;
+}
+
+.game-card:hover {
+  border-color: var(--bg-surface-20);
 }
 
 .game-card::before {
@@ -159,8 +164,8 @@ body.games-view .games-page {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 40%;
-  background: linear-gradient(to top, rgba(0,0,0,.95) 0%, rgba(0,0,0,.6) 55%, transparent 100%);
+  height: 44%;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.86) 0%, rgba(0, 0, 0, 0.35) 58%, transparent 100%);
   pointer-events: none;
   z-index: 1;
 }
@@ -280,11 +285,44 @@ body.games-view .games-page {
 }
 
 .game-cover.no-cover::before {
-  content: "\e1b7";
-  font-family: "Font Awesome 7 Pro";
-  font-weight: 400;
-  font-size: 30px;
+  content: "\f11b";
+  font-family: "Font Awesome 6 Free";
+  font-weight: 900;
+  font-size: 28px;
   color: var(--game-no-cover-line);
+}
+
+.game-card-2p-btn {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background-color: rgba(10, 10, 14, 0.82);
+  backdrop-filter: blur(8px);
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: lowercase;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease, transform 0.12s ease, background-color 0.12s ease;
+}
+
+.game-card:hover .game-card-2p-btn {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.game-card-2p-btn:hover {
+  background-color: rgba(34, 197, 94, 0.28);
+  border-color: rgba(74, 222, 128, 0.55);
 }
 
 .game-cover.no-cover::after {

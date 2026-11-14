@@ -10,6 +10,25 @@ body.shop-view {
   scrollbar-gutter: stable;
 }
 
+body.games-view::before,
+body.apps-view::before,
+body.studio-view::before,
+body.shop-view::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 92px;
+  z-index: 1002;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  background: linear-gradient(to bottom, var(--bg-body) 30%, rgba(5, 5, 7, 0.52) 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+  pointer-events: none;
+}
+
 body.apps-view .meow,
 body.studio-view .meow,
 body.shop-view .meow {
@@ -248,7 +267,7 @@ body.shop-view #arrow-pointer {
   display: none;
   flex-direction: column;
   gap: 18px;
-  padding: 95px 36px 50px;
+  padding: 105px 36px 50px;
   box-sizing: border-box;
   width: 100%;
   max-width: 1320px;

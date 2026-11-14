@@ -421,26 +421,29 @@ export default function ShopPage() {
     (i) => filterCat === "all" || i.category === filterCat
   );
 
+  const activeTarget = (customTargetInput.trim() || selectedTarget || "user").replace(" (you)", "");
+
   return (
     <section
       id="shop-page"
       class={`studio-page${visible ? " is-visible" : ""}${active ? " is-active" : ""}`}
       aria-hidden={!visible}
+      style={{ maxWidth: "980px" }}
     >
       {/* Top Bar */}
-      <div class="studio-topbar">
+      <div class="studio-topbar" style={{ marginBottom: "14px" }}>
         <div class="studio-brand">
           <i class="fa-solid fa-cookie-bite"></i>
-          <span>cookie coin shop · one-time targeted trolls</span>
+          <span>cookie shop</span>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
           <div
             class="studio-tab-btn active"
             style={{ cursor: "default", fontWeight: 600 }}
           >
             <i class="fa-solid fa-coins"></i>
-            <span>{coins} cookie coins</span>
+            <span>{coins} coins</span>
           </div>
 
           <button
@@ -451,135 +454,168 @@ export default function ShopPage() {
               (window as any).showStudioMenu?.();
             }}
           >
-            <i class="fa-solid fa-wand-magic-sparkles"></i>
-            <span>earn coins in game studio</span>
+            <i class="fa-solid fa-gamepad"></i>
+            <span>earn in studio</span>
           </button>
         </div>
       </div>
 
-      {/* Target User Picker Banner */}
-      <div class="apps-custom-launcher">
-        <div class="apps-custom-launcher-label">
-          <i class="fa-solid fa-crosshairs"></i>
-          <span>1. choose online user to troll (executes once per purchase):</span>
+      {/* Target & Filter Bar */}
+      <div
+        class="apps-custom-launcher"
+        style={{
+          flexDirection: "column",
+          alignItems: "stretch",
+          gap: "12px",
+          padding: "14px 16px",
+          marginBottom: "18px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "10px",
+            flexWrap: "wrap",
+          }}
+        >
+          <div class="apps-custom-launcher-label" style={{ gap: "8px" }}>
+            <i class="fa-solid fa-crosshairs"></i>
+            <span>target: @{activeTarget}</span>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              flexWrap: "wrap",
+            }}
+          >
+            <select
+              class="studio-select"
+              value={selectedTarget}
+              onChange={(e) => {
+                setSelectedTarget(e.currentTarget.value);
+                setCustomTargetInput("");
+              }}
+            >
+              {onlineTargets.map((u) => {
+                const clean = u.username.replace(" (you)", "");
+                return (
+                  <option key={u.id} value={clean}>
+                    online: @{u.username}
+                  </option>
+                );
+              })}
+            </select>
+
+            <input
+              type="text"
+              class="apps-custom-input"
+              style={{ width: "170px", padding: "7px 11px", fontSize: "12.5px" }}
+              placeholder="or type username..."
+              value={customTargetInput}
+              onInput={(e) => setCustomTargetInput(e.currentTarget.value)}
+            />
+
+            <button
+              type="button"
+              class="studio-tab-btn"
+              onClick={fetchOnlineUsers}
+              title="Refresh online users"
+              style={{ padding: "7px 10px" }}
+            >
+              <i class="fa-solid fa-rotate"></i>
+            </button>
+          </div>
         </div>
 
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "8px",
+            justifyContent: "space-between",
+            gap: "10px",
             flexWrap: "wrap",
-            flex: 1,
-            justifyContent: "flex-end",
+            borderTop: "1px solid var(--bg-surface-10)",
+            paddingTop: "10px",
           }}
         >
-          <select
-            class="studio-select"
-            value={selectedTarget}
-            onChange={(e) => {
-              setSelectedTarget(e.currentTarget.value);
-              setCustomTargetInput("");
-            }}
-          >
-            {onlineTargets.map((u) => {
-              const clean = u.username.replace(" (you)", "");
-              return (
-                <option key={u.id} value={clean}>
-                  online: @{u.username}
-                </option>
-              );
-            })}
-          </select>
+          <div class="apps-category-pills">
+            {(
+              [
+                { id: "all", label: "all", icon: "fa-layer-group" },
+                { id: "sound", label: "sounds", icon: "fa-volume-high" },
+                { id: "visual", label: "visuals", icon: "fa-display" },
+                { id: "voice", label: "tts voice", icon: "fa-microphone-lines" },
+              ] as const
+            ).map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                class={`apps-cat-pill ${filterCat === c.id ? "active" : ""}`}
+                onClick={() => setFilterCat(c.id)}
+              >
+                <i class={`fa-solid ${c.icon}`}></i>
+                <span>{c.label}</span>
+              </button>
+            ))}
+          </div>
 
-          <input
-            type="text"
-            class="apps-custom-input"
-            style={{ maxWidth: "200px" }}
-            placeholder="or type username..."
-            value={customTargetInput}
-            onInput={(e) => setCustomTargetInput(e.currentTarget.value)}
-          />
-
-          <button
-            type="button"
-            class="studio-tab-btn"
-            onClick={fetchOnlineUsers}
-            title="Refresh online users"
-          >
-            <i class="fa-solid fa-rotate"></i>
-          </button>
-        </div>
-      </div>
-
-      {/* Category Filter Pills & TTS Custom Message Input */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "12px",
-          flexWrap: "wrap",
-        }}
-      >
-        <div class="apps-category-pills">
-          {(
-            [
-              { id: "all", label: "all trolls", icon: "fa-layer-group" },
-              { id: "sound", label: "speaker sounds", icon: "fa-volume-high" },
-              { id: "visual", label: "screen effects", icon: "fa-display" },
-              { id: "voice", label: "tts voice", icon: "fa-microphone-lines" },
-            ] as const
-          ).map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              class={`apps-cat-pill ${filterCat === c.id ? "active" : ""}`}
-              onClick={() => setFilterCat(c.id)}
-            >
-              <i class={`fa-solid ${c.icon}`}></i>
-              <span>{c.label}</span>
-            </button>
-          ))}
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <span style={{ fontSize: "12px", color: "var(--color-sublabel)" }}>
-            tts text:
-          </span>
-          <input
-            type="text"
-            class="studio-input"
-            style={{ width: "220px" }}
-            maxLength={120}
-            value={ttsMessage}
-            onInput={(e) => setTtsMessage(e.currentTarget.value)}
-            placeholder="message for TTS troll..."
-          />
+          {(filterCat === "all" || filterCat === "voice") && (
+            <input
+              type="text"
+              class="studio-input"
+              style={{ width: "210px", padding: "6px 10px", fontSize: "12.5px" }}
+              maxLength={120}
+              value={ttsMessage}
+              onInput={(e) => setTtsMessage(e.currentTarget.value)}
+              placeholder="tts message..."
+            />
+          )}
         </div>
       </div>
 
       {/* Shop Items Grid */}
-      <div class="studio-community-grid">
+      <div
+        class="studio-community-grid"
+        style={{
+          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+          gap: "12px",
+        }}
+      >
         {filteredItems.map((item) => {
           const canAfford = coins >= item.cost;
+          const isSending = sendingId === item.id;
           return (
-            <article key={item.id} class="studio-game-card">
-              <div>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    marginBottom: "10px",
-                  }}
-                >
+            <article
+              key={item.id}
+              class="studio-game-card"
+              style={{
+                padding: "14px",
+                gap: "10px",
+                background: "var(--bg-surface-3)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "10px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
                   <div
                     class="app-icon-box"
                     style={{
-                      width: "40px",
-                      height: "40px",
-                      fontSize: "17px",
+                      width: "34px",
+                      height: "34px",
+                      borderRadius: "9px",
+                      fontSize: "14px",
+                      flexShrink: 0,
                       background: "var(--bg-surface-5)",
                       color: "var(--text-primary)",
                       boxShadow: "none",
@@ -588,37 +624,59 @@ export default function ShopPage() {
                   >
                     <i class={`fa-solid ${item.icon}`}></i>
                   </div>
-                  <span class="chat-unread-badge" style={{ fontSize: "11px", padding: "3px 9px" }}>
-                    <i class="fa-solid fa-cookie-bite"></i> {item.cost} coins
-                  </span>
+                  <h3
+                    class="app-card-title"
+                    style={{
+                      fontSize: "14px",
+                      margin: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {item.name}
+                  </h3>
                 </div>
-
-                <h3 class="app-card-title" style={{ marginBottom: "5px" }}>
-                  {item.name}
-                </h3>
-                <p class="app-card-desc">{item.desc}</p>
+                <span
+                  style={{
+                    fontSize: "11.5px",
+                    fontWeight: 600,
+                    color: canAfford ? "var(--text-primary)" : "var(--color-sublabel)",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {item.cost}c
+                </span>
               </div>
+
+              <p
+                class="app-card-desc"
+                style={{
+                  fontSize: "12px",
+                  lineHeight: 1.4,
+                  margin: 0,
+                  color: "var(--color-sublabel)",
+                }}
+              >
+                {item.desc}
+              </p>
 
               <button
                 type="button"
-                class="apps-custom-btn"
+                class="studio-tab-btn"
                 style={{
                   width: "100%",
                   justifyContent: "center",
-                  opacity: canAfford ? 1 : 0.5,
+                  padding: "7px 10px",
+                  fontSize: "12px",
+                  opacity: canAfford ? 1 : 0.45,
+                  background: "var(--bg-surface-5)",
                 }}
-                disabled={sendingId === item.id}
+                disabled={isSending}
                 onClick={() => handleBuyTroll(item)}
               >
                 <i class="fa-solid fa-bolt"></i>
-                <span>
-                  {sendingId === item.id
-                    ? "sending..."
-                    : `send 1x to @${(customTargetInput.trim() || selectedTarget || "user").replace(
-                        " (you)",
-                        ""
-                      )}`}
-                </span>
+                <span>{isSending ? "sending..." : `send 1x (${item.cost} coins)`}</span>
               </button>
             </article>
           );

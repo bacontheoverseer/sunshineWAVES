@@ -443,7 +443,10 @@ body.browser-view .main-nav {
 
 .icon-btn {
     align-items: center;
-    background-color: var(--bg-surface-3);
+    background-color: var(--bg-surface-4);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--bg-surface-10);
     border-radius: 50%;
     color: var(--text-white);
     cursor: pointer;
@@ -515,7 +518,10 @@ body.browser-view .main-nav {
 
 .text-icon-btn {
     align-items: center;
-    background-color: var(--bg-surface-3);
+    background-color: var(--bg-surface-4);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--bg-surface-10);
     border-radius: 20px;
     box-sizing: content-box;
     color: var(--text-white);

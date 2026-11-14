@@ -1325,11 +1325,11 @@ export function initLiveClient(): void {
     // EventSource automatically retries connection
   };
 
-  // Setup periodic heartbeat every 4 seconds so online status & game playtime stay live
+  // Setup periodic heartbeat every 12 seconds so online status & game playtime stay live without overloading Raspberry Pi
   if (heartbeatInterval) window.clearInterval(heartbeatInterval);
   heartbeatInterval = window.setInterval(() => {
-    sendHeartbeat();
-  }, 4000);
+    if (!document.hidden) sendHeartbeat();
+  }, 12000);
 
   // Send initial heartbeat
   sendHeartbeat();
