@@ -749,6 +749,9 @@ export class CloudSync {
                             <p style="font-size: 11.5px; color: #ff5555; margin-top: 10px; max-width: 85%; margin-left: auto; margin-right: auto;">
                                 save your password somewhere safe! all data will be forever lost if you forget your password
                             </p>
+                            <p style="font-size: 11px; color: var(--text-muted); margin-top: 8px; max-width: 90%; margin-left: auto; margin-right: auto;">
+                                by signing up, you agree to our <a href="/terms" target="_blank" rel="noopener noreferrer" class="cloudsync-legal-link" data-doc="terms" style="color: var(--text-white); text-decoration: underline;">terms of service</a> &amp; <a href="/privacy" target="_blank" rel="noopener noreferrer" class="cloudsync-legal-link" data-doc="privacy" style="color: var(--text-white); text-decoration: underline;">privacy policy</a>
+                            </p>
                         </div>
                     </form>
 
@@ -794,6 +797,17 @@ export class CloudSync {
     );
     const loginForm = modal.querySelector<HTMLFormElement>("#login-form")!;
     const regForm = modal.querySelector<HTMLFormElement>("#register-form")!;
+    modal.querySelectorAll<HTMLAnchorElement>(".cloudsync-legal-link").forEach((link) => {
+      link.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        const doc = link.dataset.doc === "privacy" ? "privacy" : "terms";
+        document.dispatchEvent(
+          new CustomEvent("openSettingsLegal", {
+            detail: { doc, fullscreen: true },
+          }),
+        );
+      });
+    });
 
     const regUsername = modal.querySelector<HTMLInputElement>("#reg-username")!;
     const regUsernameFeedback = modal.querySelector<HTMLElement>(

@@ -551,6 +551,47 @@ export default function CookieMasterPage() {
             >
               checkout via ko-fi · synced with cloudsync
             </div>
+
+            <div
+              style={{
+                fontSize: "10.5px",
+                color: "var(--color-sublabel)",
+                textAlign: "center",
+                textTransform: "lowercase",
+                lineHeight: 1.4,
+              }}
+            >
+              by subscribing or activating, you agree to our{" "}
+              <a
+                href="/terms"
+                onClick={(e) => {
+                  e.preventDefault();
+                  document.dispatchEvent(
+                    new CustomEvent("openSettingsLegal", {
+                      detail: { doc: "terms", fullscreen: true },
+                    })
+                  );
+                }}
+                style={{ color: "var(--text-primary)", textDecoration: "underline" }}
+              >
+                terms
+              </a>{" "}
+              &amp;{" "}
+              <a
+                href="/privacy"
+                onClick={(e) => {
+                  e.preventDefault();
+                  document.dispatchEvent(
+                    new CustomEvent("openSettingsLegal", {
+                      detail: { doc: "privacy", fullscreen: true },
+                    })
+                  );
+                }}
+                style={{ color: "var(--text-primary)", textDecoration: "underline" }}
+              >
+                privacy policy
+              </a>
+            </div>
           </div>
         </div>
 

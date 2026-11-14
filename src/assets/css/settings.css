@@ -452,3 +452,130 @@ input[type="checkbox"]:checked:hover::before {
 .settings-item .data-action-btn:last-child {
   margin-bottom: 0;
 }
+
+.legal-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.legal-subtabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legal-pill-btn {
+  background-color: var(--bg-surface-5);
+  border: 1px solid var(--border-transparent);
+  color: var(--color-sublabel);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+  text-transform: lowercase;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.legal-pill-btn:hover {
+  background-color: var(--bg-surface-active);
+  color: var(--text-primary);
+}
+
+.legal-pill-btn.active {
+  background-color: var(--border-focus);
+  color: var(--text-black);
+}
+
+.legal-meta {
+  font-size: 11px;
+  color: var(--color-version);
+  margin: 0 0 10px;
+  text-align: left;
+  text-transform: lowercase;
+}
+
+.legal-sections-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.legal-card {
+  background-color: var(--bg-surface-4);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 12px;
+  padding: 12px;
+  text-align: left;
+}
+
+.legal-card h4 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+#settings-menu .legal-card p,
+.legal-card p {
+  margin: 0 0 7px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--color-sublabel);
+  text-align: left;
+}
+
+#settings-menu .legal-card p:last-child,
+.legal-card p:last-child {
+  margin-bottom: 0;
+}
+
+.legal-full-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 12, 0.85);
+  z-index: 1000001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.legal-full-modal {
+  width: min(860px, 100%);
+  max-height: 88vh;
+  background-color: var(--bg-body);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 16px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--text-primary);
+}
+
+.legal-full-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--bg-surface-10);
+}
+
+.legal-full-body {
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}

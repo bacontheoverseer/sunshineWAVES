@@ -1,4 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "preact/hooks";
+import {
+  LEGAL_LAST_UPDATED,
+  PRIVACY_SECTIONS,
+  TERMS_SECTIONS,
+} from "../core/legalDocs.js";
 
 interface SelectorProps {
   label: string;
@@ -86,6 +91,8 @@ export default function SettingsMenu() {
   const [isOpen, setIsOpen] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
   const [activeTab, setActiveTab] = useState("preferences");
+  const [legalDoc, setLegalDoc] = useState<"terms" | "privacy">("terms");
+  const [legalFullscreen, setLegalFullscreen] = useState(false);
   const [openSelector, setOpenSelector] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -138,6 +145,7 @@ export default function SettingsMenu() {
     if (isClosing) return;
 
     if (isOpen) {
+      setLegalFullscreen(false);
       setIsClosing(true);
       const icon = document.querySelector("#settings i.settings");
       if (icon) icon.classList.remove("active-icon");
@@ -194,11 +202,40 @@ export default function SettingsMenu() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen && !isClosing) toggleMenu();
+      if (e.key === "Escape") {
+        if (legalFullscreen) {
+          setLegalFullscreen(false);
+          return;
+        }
+        if (isOpen && !isClosing) toggleMenu();
+      }
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [isOpen, isClosing, toggleMenu]);
+  }, [isOpen, isClosing, legalFullscreen, toggleMenu]);
+
+  useEffect(() => {
+    const onOpenLegal = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const requested = typeof detail === "string" ? detail : detail?.doc;
+      const useFullscreen = typeof detail === "object" && detail?.fullscreen === true;
+      setLegalDoc(requested === "privacy" ? "privacy" : "terms");
+      if (useFullscreen) {
+        setLegalFullscreen(true);
+        return;
+      }
+      setActiveTab("legal");
+      if (!isOpen && !isClosing) {
+        setIsOpen(true);
+        const icon = document.querySelector("#settings i.settings");
+        if (icon) icon.classList.add("active-icon");
+        const overlay = document.getElementById("overlay");
+        if (overlay) overlay.classList.add("show");
+      }
+    };
+    document.addEventListener("openSettingsLegal", onOpenLegal);
+    return () => document.removeEventListener("openSettingsLegal", onOpenLegal);
+  }, [isOpen, isClosing]);
 
   const save = (key: string, value: string) => {
     localStorage.setItem(key, value);
@@ -319,6 +356,7 @@ export default function SettingsMenu() {
     { id: "appearance", icon: "fa-palette", label: "appearance" },
     { id: "cloaking", icon: "fa-ghost", label: "cloaking" },
     { id: "advanced", icon: "fa-server", label: "advanced" },
+    { id: "legal", icon: "fa-scale-balanced", label: "legal" },
     { id: "about", icon: "fa-heart", label: "credits" },
   ];
 
@@ -362,17 +400,23 @@ export default function SettingsMenu() {
     "sakura",
   ];
 
-  if (!isOpen) return <div id="settings-menu" class="settings-menu" />;
+  const activeLegalSections = legalDoc === "privacy" ? PRIVACY_SECTIONS : TERMS_SECTIONS;
+  const activeLegalTitle = legalDoc === "privacy" ? "privacy policy" : "terms of service";
+  const activeLegalPath = legalDoc === "privacy" ? "/privacy" : "/terms";
+
+  if (!isOpen && !legalFullscreen) return <div id="settings-menu" class="settings-menu" />;
 
   const menuClass = `settings-menu${isOpen ? " open" : ""}${isClosing ? " close" : ""}`;
 
   return (
-    <div
-      id="settings-menu"
-      class={menuClass}
-      ref={menuRef}
-      onAnimationEnd={onAnimEnd}
-    >
+    <>
+      {isOpen && (
+      <div
+        id="settings-menu"
+        class={menuClass}
+        ref={menuRef}
+        onAnimationEnd={onAnimEnd}
+      >
       <h2>settings</h2>
       <div class="settings-container">
         <div class="settings-tabs">
@@ -530,6 +574,66 @@ export default function SettingsMenu() {
             </div>
           </div>
 
+          <div class={`tab-content${activeTab === "legal" ? " active" : ""}`}>
+            <div class="settings-item">
+              <div class="legal-controls">
+                <div class="legal-subtabs">
+                  <button
+                    type="button"
+                    class={`legal-pill-btn${legalDoc === "terms" ? " active" : ""}`}
+                    onClick={() => setLegalDoc("terms")}
+                  >
+                    <i class="fa-solid fa-file-contract" />
+                    <span>terms of service</span>
+                  </button>
+                  <button
+                    type="button"
+                    class={`legal-pill-btn${legalDoc === "privacy" ? " active" : ""}`}
+                    onClick={() => setLegalDoc("privacy")}
+                  >
+                    <i class="fa-solid fa-user-shield" />
+                    <span>privacy policy</span>
+                  </button>
+                </div>
+
+                <div class="legal-subtabs">
+                  <button
+                    type="button"
+                    class="legal-pill-btn"
+                    onClick={() => setLegalFullscreen(true)}
+                  >
+                    <i class="fa-solid fa-expand" />
+                    <span>expand</span>
+                  </button>
+                  <a
+                    href={activeLegalPath}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="legal-pill-btn"
+                  >
+                    <i class="fa-solid fa-arrow-up-right-from-square" />
+                    <span>page</span>
+                  </a>
+                </div>
+              </div>
+
+              <div class="legal-meta">
+                {activeLegalTitle} · last updated {LEGAL_LAST_UPDATED}
+              </div>
+
+              <div class="legal-sections-list">
+                {activeLegalSections.map((sec) => (
+                  <div key={sec.title} class="legal-card">
+                    <h4>{sec.title}</h4>
+                    {sec.body.map((p, idx) => (
+                      <p key={idx}>{p}</p>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div class={`tab-content${activeTab === "about" ? " active" : ""}`}>
             <div class="settings-item">
               <label>credits</label>
@@ -552,5 +656,73 @@ export default function SettingsMenu() {
         <i class="fa-solid fa-xmark" />
       </button>
     </div>
+      )}
+
+    {legalFullscreen && (
+      <div
+        class="legal-full-backdrop"
+        onClick={(e: MouseEvent) => {
+          if (e.target === e.currentTarget) setLegalFullscreen(false);
+        }}
+      >
+        <div class="legal-full-modal">
+          <div class="legal-full-header">
+            <div>
+              <strong style={{ fontSize: "16px", textTransform: "lowercase" }}>
+                operation cookie — {activeLegalTitle}
+              </strong>
+              <div class="legal-meta" style={{ margin: "3px 0 0" }}>
+                last updated {LEGAL_LAST_UPDATED}
+              </div>
+            </div>
+
+            <div class="legal-subtabs">
+              <button
+                type="button"
+                class={`legal-pill-btn${legalDoc === "terms" ? " active" : ""}`}
+                onClick={() => setLegalDoc("terms")}
+              >
+                terms of service
+              </button>
+              <button
+                type="button"
+                class={`legal-pill-btn${legalDoc === "privacy" ? " active" : ""}`}
+                onClick={() => setLegalDoc("privacy")}
+              >
+                privacy policy
+              </button>
+              <a
+                href={activeLegalPath}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="legal-pill-btn"
+              >
+                open url
+              </a>
+              <button
+                type="button"
+                class="legal-pill-btn"
+                onClick={() => setLegalFullscreen(false)}
+              >
+                <i class="fa-solid fa-xmark" />
+                <span>close</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="legal-full-body">
+            {activeLegalSections.map((sec) => (
+              <div key={sec.title} class="legal-card">
+                <h4>{sec.title}</h4>
+                {sec.body.map((p, idx) => (
+                  <p key={idx}>{p}</p>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

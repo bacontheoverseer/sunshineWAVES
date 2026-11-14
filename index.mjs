@@ -14,6 +14,7 @@ import { LRUCache } from "lru-cache";
 import rateLimit from "express-rate-limit";
 import cookieParser from "cookie-parser";
 import { server as wisp } from "@mercuryworkshop/wisp-js";
+import { renderStandaloneLegalHtml } from "./src/assets/scripts/core/legalDocs.js";
 
 let shuttingDown = false;
 
@@ -3681,6 +3682,21 @@ app.get("/", async (req, res) => {
     }
   }
   res.sendFile(fp);
+});
+
+const cachedTermsHtml = renderStandaloneLegalHtml("terms");
+const cachedPrivacyHtml = renderStandaloneLegalHtml("privacy");
+
+app.get(["/terms", "/terms-of-service"], (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.send(cachedTermsHtml);
+});
+
+app.get(["/privacy", "/privacy-policy"], (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.send(cachedPrivacyHtml);
 });
 
 app.use((_req, res) => {
