@@ -807,6 +807,9 @@ app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
 });
 
 // --- Chat, Direct Messaging, OpenAI Moderation (Excluding Swears), & Voice Signaling ---
+// Supply your OpenAI API key here in the code (or via OPENAI_API_KEY in .env):
+const OPENAI_MODERATION_API_KEY = process.env.OPENAI_API_KEY || "YOUR_OPENAI_API_KEY_HERE";
+
 const chatHistory = [];
 const voiceRooms = new Map(); // roomId -> Map<peerId, { peerId, username, muted, deafened }>
 
@@ -834,14 +837,15 @@ const SEVERE_MODERATION_RULES = [
   },
 ];
 
-async function moderateTextWithOpenAI(text, customApiKey) {
+async function moderateTextWithOpenAI(text) {
   const clean = (text || "").trim();
-  if (!clean) return { flagged: false };
+  if (!clean) return { blocked: false, flagged: false };
 
   // 1. Check local severe moderation rules first (never blocks normal swear words)
   for (const rule of SEVERE_MODERATION_RULES) {
     if (rule.regex.test(clean)) {
       return {
+        blocked: true,
         flagged: true,
         category: rule.category,
         reason: rule.reason,
@@ -850,8 +854,8 @@ async function moderateTextWithOpenAI(text, customApiKey) {
     }
   }
 
-  // 2. If OPENAI_API_KEY is available, call OpenAI omni-moderation-latest
-  const apiKey = customApiKey || process.env.OPENAI_API_KEY;
+  // 2. Call OpenAI omni-moderation-latest using the key configured in code
+  const apiKey = OPENAI_MODERATION_API_KEY;
   if (apiKey && apiKey.startsWith("sk-")) {
     try {
       const response = await fetch("https://api.openai.com/v1/moderations", {
@@ -887,6 +891,7 @@ async function moderateTextWithOpenAI(text, customApiKey) {
           const triggered = strictCategories.filter((cat) => result.categories[cat] === true);
           if (triggered.length > 0) {
             return {
+              blocked: true,
               flagged: true,
               category: triggered[0],
               reason: `flagged by openai moderation (${triggered.join(", ")}).`,
@@ -900,16 +905,16 @@ async function moderateTextWithOpenAI(text, customApiKey) {
     }
   }
 
-  return { flagged: false, provider: apiKey ? "openai" : "local-moderation" };
+  return { blocked: false, flagged: false, provider: apiKey.startsWith("sk-") ? "openai" : "local-moderation" };
 }
 
 app.post("/api/chat/moderate", async (req, res) => {
   try {
-    const { text, apiKey } = req.body || {};
-    const result = await moderateTextWithOpenAI(text, apiKey);
+    const { text } = req.body || {};
+    const result = await moderateTextWithOpenAI(text);
     res.json({ success: true, ...result });
   } catch (err) {
-    res.status(500).json({ success: false, flagged: false, error: err.message });
+    res.status(500).json({ success: false, blocked: false, flagged: false, error: err.message });
   }
 });
 
@@ -942,12 +947,12 @@ app.get("/api/chat/state", (req, res) => {
 
 app.post("/api/chat/send", async (req, res) => {
   try {
-    const { message, apiKey } = req.body || {};
+    const { message } = req.body || {};
     if (!message || !message.text || !message.author || !message.channel) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
-    const mod = await moderateTextWithOpenAI(message.text, apiKey);
+    const mod = await moderateTextWithOpenAI(message.text);
     if (mod.flagged) {
       return res.status(400).json({
         success: false,

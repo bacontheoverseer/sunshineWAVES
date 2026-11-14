@@ -149,16 +149,6 @@ export default function ChatModal() {
   const [isSending, setIsSending] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
 
-  // OpenAI Moderation configuration
-  const [showModConfig, setShowModConfig] = useState(false);
-  const [openAiKey, setOpenAiKey] = useState<string>(() => {
-    try {
-      return localStorage.getItem("cookie_openai_mod_key") || "";
-    } catch {
-      return "";
-    }
-  });
-
   // CloudSync user state
   const [cloudUser, setCloudUser] = useState<string | null>(() => {
     try {
@@ -892,19 +882,6 @@ export default function ChatModal() {
     }
   }, [messages, isOpen, activeChannel]);
 
-  const handleSaveModKey = () => {
-    try {
-      localStorage.setItem("cookie_openai_mod_key", openAiKey.trim());
-    } catch {}
-    setShowModConfig(false);
-    notifyToast(
-      openAiKey.trim()
-        ? "openai moderation key saved (swear words allowed)"
-        : "using built-in openai moderation policy (swear words allowed)",
-      "success"
-    );
-  };
-
   const handleSendMessage = async (e?: Event) => {
     if (e) e.preventDefault();
     if (!cloudUser || isSending) return;
@@ -922,7 +899,7 @@ export default function ChatModal() {
 
     setIsSending(true);
     try {
-      const modResult = await moderateChatMessage(text, openAiKey);
+      const modResult = await moderateChatMessage(text);
       if (modResult.blocked) {
         notifyToast(modResult.reason || "message blocked by openai moderation", "error");
         setIsSending(false);
@@ -955,12 +932,7 @@ export default function ChatModal() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          author: cloudUser,
-          avatarColor: newMsg.avatarColor,
-          text,
-          channel: activeChannel,
-          recipient,
-          apiKey: openAiKey || undefined,
+          message: newMsg,
         }),
       }).catch(() => {});
     } finally {
@@ -1086,15 +1058,6 @@ export default function ChatModal() {
               <i class="fa-solid fa-comments"></i>
               <span>chatroom</span>
             </div>
-            <button
-              type="button"
-              class={`chat-mod-pill ${showModConfig ? "active" : ""}`}
-              title="OpenAI Moderation settings (swear words allowed)"
-              onClick={() => setShowModConfig((p) => !p)}
-            >
-              <i class="fa-solid fa-shield-halved"></i>
-              <span>ai mod</span>
-            </button>
           </div>
 
           <div class="chat-sidebar-scroll">
@@ -1497,35 +1460,6 @@ export default function ChatModal() {
               </button>
             </div>
           </div>
-
-          {/* OpenAI Moderation Popover Bar */}
-          {showModConfig && (
-            <div class="chat-mod-config-bar">
-              <div class="chat-mod-config-text">
-                <i class="fa-solid fa-shield-halved"></i>
-                <span>
-                  openai moderation active (blocks hate, self-harm, threats, nsfw & malware ·{" "}
-                  <strong>swear words allowed</strong>)
-                </span>
-              </div>
-              <div class="chat-mod-config-inputs">
-                <input
-                  type="password"
-                  class="chat-mod-input"
-                  placeholder="optional openai key (sk-...)"
-                  value={openAiKey}
-                  onInput={(e) => setOpenAiKey((e.target as HTMLInputElement).value)}
-                />
-                <button
-                  type="button"
-                  class="chat-header-btn"
-                  onClick={handleSaveModKey}
-                >
-                  save
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* Voice Stage (shown when viewing a voice channel or an active DM call) */}
           {stageVoiceRoomId && (

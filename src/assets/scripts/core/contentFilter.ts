@@ -5,6 +5,9 @@
  * excluding casual swear words / profanity in chat.
  */
 
+// Supply your OpenAI API key here in the code (or in index.mjs / OPENAI_API_KEY env var):
+const OPENAI_MODERATION_API_KEY = "YOUR_OPENAI_API_KEY_HERE";
+
 // Blocked domain signatures (pornography & adult entertainment)
 const ADULT_PATTERNS = [
   "pornhub",
@@ -194,10 +197,7 @@ export function checkContent(input: string): FilterResult {
  * Explicitly allows casual swear words (fuck, shit, bitch, ass, damn, hell, etc.) while
  * blocking hate speech, self-harm, violent threats, sexual content, gambling, and malware.
  */
-export async function moderateChatMessage(
-  text: string,
-  openAiKey?: string
-): Promise<FilterResult> {
+export async function moderateChatMessage(text: string): Promise<FilterResult> {
   if (!text || !text.trim()) return { blocked: false };
 
   // 1. Fast local check for Adult / Gambling / Malware links
@@ -220,23 +220,26 @@ export async function moderateChatMessage(
     }
   }
 
-  // 3. Try server-side /api/chat/moderate endpoint
+  // 3. Try server-side /api/chat/moderate endpoint (uses server's OPENAI_MODERATION_API_KEY)
   try {
     const res = await fetch("/api/chat/moderate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, apiKey: openAiKey || undefined }),
+      body: JSON.stringify({ text }),
     });
     if (res.ok) {
       const data = await res.json();
       if (typeof data?.blocked === "boolean") {
         return data as FilterResult;
       }
+      if (typeof data?.flagged === "boolean") {
+        return { blocked: data.flagged, category: data.category, reason: data.reason };
+      }
     }
   } catch {}
 
-  // 4. Direct client-side OpenAI Moderation API call if user configured an API key
-  const key = (openAiKey || "").trim();
+  // 4. Fallback client-side OpenAI Moderation API call if OPENAI_MODERATION_API_KEY is set in code
+  const key = OPENAI_MODERATION_API_KEY.trim();
   if (key.startsWith("sk-")) {
     try {
       const res = await fetch("https://api.openai.com/v1/moderations", {
