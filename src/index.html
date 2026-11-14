@@ -314,9 +314,11 @@
       if (window.__wrapSunshineAclib) window.__wrapSunshineAclib();
     </script>
     <script type="text/javascript">
+      if (typeof aclib !== "undefined" && typeof aclib.runAutoTag === "function") {
         aclib.runAutoTag({
             zoneId: 'rqxro9on74',
         });
+      }
     </script>
   </head>
   <body>

@@ -162,11 +162,26 @@ export function navigateIframeTo(iframe: HTMLIFrameElement, url: string): void {
     iframeExt.__usableTimeout = null;
   }
 
+  const navSeq = String(Number(iframe.dataset.navSeq || "0") + 1);
+  iframe.dataset.navSeq = navSeq;
+  if (iframe.dataset.retryTimer) {
+    window.clearTimeout(Number(iframe.dataset.retryTimer));
+    delete iframe.dataset.retryTimer;
+  }
+
   const isProxyUrl = url.startsWith("/b/s/") || url.startsWith("/b/u/");
-  if (isProxyUrl && window.sunshineApp?.waitForTransport) {
+  if (
+    isProxyUrl &&
+    (window.sunshineApp?.waitForTransport || window.sunshineApp?.ensureProxyReady)
+  ) {
     (async () => {
       try {
-        await (window.sunshineApp.waitForTransport as (timeout: number) => Promise<void>)(8000);
+        if (typeof window.sunshineApp.ensureProxyReady === "function") {
+          await (window.sunshineApp.ensureProxyReady as () => Promise<unknown>)();
+        }
+        if (typeof window.sunshineApp.waitForTransport === "function") {
+          await (window.sunshineApp.waitForTransport as (timeout: number) => Promise<void>)(10000);
+        }
       } catch (e: unknown) {
         console.warn(
           "navigateIframeTo: transport not ready, attempting recovery...",
@@ -177,13 +192,17 @@ export function navigateIframeTo(iframe: HTMLIFrameElement, url: string): void {
         if (conn?.recoverOnWake) {
           try {
             await conn.recoverOnWake();
-            await (window.sunshineApp.waitForTransport as (timeout: number) => Promise<void>)(6000);
+            if (typeof window.sunshineApp.waitForTransport === "function") {
+              await (window.sunshineApp.waitForTransport as (timeout: number) => Promise<void>)(6000);
+            }
           } catch {
             console.warn("navigateIframeTo: recovery failed, navigating anyway");
           }
         }
       }
-      iframe.src = url;
+      if (iframe.dataset.navSeq === navSeq) {
+        iframe.src = url;
+      }
     })();
   } else {
     iframe.src = url;
@@ -387,28 +406,42 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
       tabToUpdate.title === "Scramjet" ||
       tabToUpdate.title === "Error"
     ) {
-      const MAX_RELOADS = 120;
-      const MIN_INTERVAL_MS = 400;
-      let reloadCount = parseInt(iframe.dataset.reloadCount || "0", 10);
+      const MAX_RELOADS = tabToUpdate.title === "404" ? 10 : 5;
+      const MIN_INTERVAL_MS = tabToUpdate.title === "404" ? 450 : 750;
+      const reloadCount = parseInt(iframe.dataset.reloadCount || "0", 10);
       const lastReloadAt = parseInt(iframe.dataset.lastReloadAt || "0", 10);
       const now = Date.now();
-      const cooldownReached =
-        !lastReloadAt || now - lastReloadAt > MIN_INTERVAL_MS;
+      const elapsed = lastReloadAt ? now - lastReloadAt : MIN_INTERVAL_MS;
       const isActiveTab = document.body.classList.contains("split-view")
         ? tabToUpdate.id === (window.sunshineApp as any)?.splitPair?.left ||
           tabToUpdate.id === (window.sunshineApp as any)?.splitPair?.right ||
           tabToUpdate.id === (window.sunshineApp as any)?.getActiveTab?.()?.id
         : tabToUpdate.id === (window.sunshineApp as any)?.getActiveTab?.()?.id;
-      if (reloadCount < MAX_RELOADS && cooldownReached && isActiveTab) {
+      if (reloadCount < MAX_RELOADS && isActiveTab) {
         iframe.dataset.reloadCount = (reloadCount + 1).toString();
-        iframe.dataset.lastReloadAt = now.toString();
         isReloading = true;
+        tabToUpdate.title =
+          prevTitle && prevTitle !== "404" && prevTitle !== "Scramjet"
+            ? prevTitle
+            : "fetching data...";
         iframe.parentElement?.classList.remove("loaded");
 
         const currentUrl = iframe.dataset.manualUrl || iframe.src;
-        navigateIframeTo(iframe, currentUrl);
+        const delayMs = elapsed >= MIN_INTERVAL_MS ? 0 : MIN_INTERVAL_MS - elapsed;
+        if (iframe.dataset.retryTimer) {
+          window.clearTimeout(Number(iframe.dataset.retryTimer));
+        }
+        const timerId = window.setTimeout(() => {
+          delete iframe.dataset.retryTimer;
+          iframe.dataset.lastReloadAt = Date.now().toString();
+          navigateIframeTo(iframe, currentUrl);
+        }, delayMs);
+        iframe.dataset.retryTimer = String(timerId);
         return;
       }
+    } else if (newTitle) {
+      delete iframe.dataset.reloadCount;
+      delete iframe.dataset.lastReloadAt;
     }
     const iconLink = doc.querySelector("link[rel*='icon']");
     if (!tabToUpdate.fixedFavicon) {

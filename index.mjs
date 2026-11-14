@@ -573,6 +573,66 @@ for (const [id, filePath] of Object.entries(bMap)) {
   } catch { }
 }
 
+const IMMUTABLE_CC = "public, max-age=31536000, immutable";
+const NO_CACHE_CC = "public, max-age=0, must-revalidate";
+
+if (NODE_ENV === "production") {
+  const COMPRESSIBLE = /\.(js|css|mjs|json|svg|xml|wasm)$/i;
+  const ENCODING_MAP = [
+    { ext: ".br", encoding: "br" },
+    { ext: ".gz", encoding: "gzip" },
+  ];
+
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
+    if (!COMPRESSIBLE.test(req.path)) return next();
+    if (
+      req.path.startsWith("/api/") ||
+      req.url.startsWith("/!!/") ||
+      req.url.startsWith("/!cover!/")
+    )
+      return next();
+
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(req.path).replace(/\\/g, "/");
+    } catch {
+      return next();
+    }
+    if (decodedPath.includes("..")) return next();
+
+    const accept = req.headers["accept-encoding"] || "";
+    for (const { ext, encoding } of ENCODING_MAP) {
+      if (!accept.includes(encoding)) continue;
+
+      const candidates = [
+        path.join(srcPath, decodedPath + ext),
+        path.join(publicPath, decodedPath + ext),
+      ];
+
+      for (const filePath of candidates) {
+        const buf = cachedRead(filePath);
+        if (buf) {
+          const fileExt = path.extname(req.path).toLowerCase();
+          res.setHeader("Content-Encoding", encoding);
+          res.setHeader(
+            "Content-Type",
+            MIME_TYPES[fileExt] || "application/octet-stream",
+          );
+          res.setHeader(
+            "Cache-Control",
+            req.path.startsWith("/assets/data") ? NO_CACHE_CC : IMMUTABLE_CC,
+          );
+          res.setHeader("Vary", "Accept-Encoding");
+          res.setHeader("X-File-Cache", "HIT");
+          return res.send(buf);
+        }
+      }
+    }
+    next();
+  });
+}
+
 app.get("/b/all.js", (req, res) => {
   const fp = path.join(srcPath, "b", "all.js");
   if (sendCached(res, fp, "public, max-age=31536000, immutable")) return;
@@ -639,9 +699,6 @@ if (NODE_ENV === "development") {
     }
   });
 }
-
-const IMMUTABLE_CC = "public, max-age=31536000, immutable";
-const NO_CACHE_CC = "public, max-age=0, must-revalidate";
 
 app.use(
   compression({
@@ -751,60 +808,6 @@ app.use((req, res, next) => {
   };
   next();
 });
-
-if (NODE_ENV === "production") {
-  const COMPRESSIBLE = /\.(js|css|html|mjs|json|svg|xml)$/i;
-  const ENCODING_MAP = [
-    { ext: ".br", encoding: "br" },
-    { ext: ".gz", encoding: "gzip" },
-  ];
-
-  app.use((req, res, next) => {
-    if (req.method !== "GET" && req.method !== "HEAD") return next();
-    if (!COMPRESSIBLE.test(req.path)) return next();
-    if (
-      req.path.startsWith("/api/") ||
-      req.url.startsWith("/!!/") ||
-      req.url.startsWith("/!cover!/")
-    )
-      return next();
-
-    let decodedPath;
-    try {
-      decodedPath = decodeURIComponent(req.path).replace(/\\/g, "/");
-    } catch {
-      return next();
-    }
-    if (decodedPath.includes("..")) return next();
-
-    const accept = req.headers["accept-encoding"] || "";
-    for (const { ext, encoding } of ENCODING_MAP) {
-      if (!accept.includes(encoding)) continue;
-
-      const candidates = [
-        path.join(srcPath, decodedPath + ext),
-        path.join(publicPath, decodedPath + ext),
-      ];
-
-      for (const filePath of candidates) {
-        const buf = cachedRead(filePath);
-        if (buf) {
-          const fileExt = path.extname(req.path).toLowerCase();
-          res.setHeader("Content-Encoding", encoding);
-          res.setHeader(
-            "Content-Type",
-            MIME_TYPES[fileExt] || "application/octet-stream",
-          );
-          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-          res.setHeader("Vary", "Accept-Encoding");
-          res.setHeader("X-File-Cache", "HIT");
-          return res.send(buf);
-        }
-      }
-    }
-    next();
-  });
-}
 
 app.get("/api/stuff", (_req, res) => {
   if (!packageData) return res.status(500).json({ error: "stuff error" });

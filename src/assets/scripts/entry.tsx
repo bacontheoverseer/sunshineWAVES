@@ -77,6 +77,38 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("cloudsync-restored", syncAdFreeDomClass);
   store.setupWindowsunshineApp();
 
+  // Begin proxy/service-worker bootstrap immediately and expose ensureProxyReady +
+  // waitForTransport before any user interaction so early app/URL clicks wait instead of hitting 404.
+  let realWaitForTransport: ((timeoutMs?: number) => Promise<void>) | null = null;
+  const proxyBootstrapPromise = Promise.all([
+    import("./core/register.ts").then(() => {
+      const fn = (window.sunshineApp as Record<string, unknown>).waitForTransport;
+      if (typeof fn === "function" && fn !== stubWaitForTransport) {
+        realWaitForTransport = fn as (timeoutMs?: number) => Promise<void>;
+      }
+    }),
+    import("./core/load.ts").then((module) => {
+      module.initializeLoad();
+    }),
+  ]);
+  async function stubWaitForTransport(timeoutMs = 10000): Promise<void> {
+    await proxyBootstrapPromise;
+    const fn =
+      realWaitForTransport ||
+      ((window.sunshineApp as Record<string, unknown>).waitForTransport as
+        | ((ms?: number) => Promise<void>)
+        | undefined);
+    if (fn && fn !== stubWaitForTransport) {
+      return fn(timeoutMs);
+    }
+  }
+  (window.sunshineApp as Record<string, unknown>).ensureProxyReady = () =>
+    proxyBootstrapPromise;
+  if (typeof (window.sunshineApp as Record<string, unknown>).waitForTransport !== "function") {
+    (window.sunshineApp as Record<string, unknown>).waitForTransport =
+      stubWaitForTransport;
+  }
+
   document.addEventListener(
     "toggleAuthModal",
     (event: Event) => {
@@ -107,10 +139,6 @@ document.addEventListener("DOMContentLoaded", () => {
     void import("../css/bookmarks.css");
     void import("../css/newtab.css");
     void import("../css/toast.css");
-    void import("./core/register.ts");
-    void import("./core/load.ts").then((module) => {
-      module.initializeLoad();
-    });
     void import("./features/settings.ts");
     void import("./features/toast.ts");
     void import("./core/liveClient.ts").then((module) => {

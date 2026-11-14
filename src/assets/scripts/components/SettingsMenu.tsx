@@ -100,7 +100,7 @@ export default function SettingsMenu() {
     () => localStorage.getItem("backend") || "scramjet",
   );
   const [transport, setTransport] = useState(
-    () => localStorage.getItem("transport") || "epoxy",
+    () => localStorage.getItem("transport") || "libcurl",
   );
   const [searchEngine, setSearchEngine] = useState(
     () => localStorage.getItem("searchEngine") || "duckduckgo",

@@ -83,7 +83,7 @@ class sunshineConnectionManager {
 
   constructor() {
     this.state = STATES.IDLE;
-    this.appConfig = { backend: "scramjet", transport: "epoxy" };
+    this.appConfig = { backend: "scramjet", transport: "libcurl" };
     this.bareMuxConnection = null;
     this.currentWispUrl = "";
     this.healthCheckInterval = null;
@@ -173,7 +173,7 @@ class sunshineConnectionManager {
   loadConfig(): void {
     try {
       this.appConfig.backend = localStorage.getItem("backend") || "scramjet";
-      this.appConfig.transport = localStorage.getItem("transport") || "epoxy";
+      this.appConfig.transport = localStorage.getItem("transport") || "libcurl";
     } catch {
       this.updateStatus("could not access localStorage! using defaults...", "error");
     }
@@ -297,18 +297,33 @@ class sunshineConnectionManager {
       if (!scope) throw new Error(`unknown backend: ${this.appConfig.backend}`);
 
       const registration = await navigator.serviceWorker.register("./b/sw.js", { scope });
-      const pendingSw = registration.installing || registration.waiting;
-      if (pendingSw && pendingSw.state !== "activated") {
-        await new Promise<void>((resolve) => {
-          const onStateChange = (e: Event) => {
-            if ((e.target as ServiceWorker | null)?.state === "activated") {
+      if (registration.active?.state !== "activated") {
+        const pendingSw = registration.installing || registration.waiting || registration.active;
+        if (pendingSw && pendingSw.state !== "activated") {
+          await new Promise<void>((resolve) => {
+            const onStateChange = () => {
+              if (registration.active?.state === "activated" || pendingSw.state === "activated") {
+                pendingSw.removeEventListener("statechange", onStateChange);
+                resolve();
+              }
+            };
+            pendingSw.addEventListener("statechange", onStateChange);
+            setTimeout(() => {
               pendingSw.removeEventListener("statechange", onStateChange);
               resolve();
-            }
-          };
-          pendingSw.addEventListener("statechange", onStateChange);
-          setTimeout(resolve, 8000);
-        });
+            }, 10000);
+          });
+        }
+      }
+
+      if (this.appConfig.backend === "scramjet") {
+        const scramjetReady = (window as unknown as Record<string, unknown>)["scramjetReady"];
+        if (scramjetReady && typeof (scramjetReady as Promise<unknown>).then === "function") {
+          await Promise.race([
+            scramjetReady as Promise<unknown>,
+            new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+          ]);
+        }
       }
 
       const transportModule = TRANSPORT_MAP[this.appConfig.transport];
@@ -463,7 +478,7 @@ class sunshineConnectionManager {
   }
 
   setupEventListeners(): void {
-    window.addEventListener("message", (ev: MessageEvent) => {
+    window.addEventListener("message", async (ev: MessageEvent) => {
       if (ev.origin !== window.location.origin) return;
       const data = ev.data as { type?: string; url?: string } | null;
       if (!data || data.type !== "sunshine-prefetch-bridge") return;
@@ -475,7 +490,14 @@ class sunshineConnectionManager {
       } catch {
         return;
       }
-      const ctrl = navigator.serviceWorker.controller;
+      let ctrl = navigator.serviceWorker.controller;
+      if (!ctrl) {
+        const scope = SCOPE_MAP[this.appConfig.backend];
+        if (scope) {
+          const reg = await navigator.serviceWorker.getRegistration(scope);
+          ctrl = reg?.active || null;
+        }
+      }
       if (!ctrl) return;
       try {
         ctrl.postMessage({ type: "sunshine-prefetch", url: data.url });

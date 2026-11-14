@@ -85,6 +85,11 @@ function generateSearchUrl(query: string): string {
 
 async function getUrl(url: string): Promise<string> {
   const selectedBackend = localStorage.getItem("backend") ?? "scramjet";
+  if ((window as any).sunshineApp?.ensureProxyReady) {
+    try {
+      await (window as any).sunshineApp.ensureProxyReady();
+    } catch {}
+  }
   if (
     selectedBackend === "ultraviolet" &&
     (window as any)["__uv$config"]?.encodeUrl
