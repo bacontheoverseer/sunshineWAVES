@@ -1107,6 +1107,135 @@ app.post("/api/studio/games/:id/stat", (req, res) => {
   res.json({ success: true, game: found || null });
 });
 
+// --- Custom User Game Studios API ---
+const customStudios = [];
+
+app.get("/api/studio/studios", (_req, res) => {
+  res.json({ success: true, studios: customStudios });
+});
+
+app.post("/api/studio/studios", async (req, res) => {
+  try {
+    const { studio } = req.body || {};
+    if (!studio || !studio.name || !studio.owner) {
+      return res.status(400).json({ success: false, error: "Missing studio name or owner" });
+    }
+    const modCheck = await moderateTextWithOpenAI(`${studio.name} ${studio.tagline || ""}`);
+    if (modCheck.blocked) {
+      return res.status(400).json({
+        success: false,
+        error: modCheck.reason || "Studio name blocked by moderation",
+      });
+    }
+    const idx = customStudios.findIndex(
+      (s) => s.id === studio.id || s.owner.toLowerCase() === studio.owner.toLowerCase()
+    );
+    if (idx >= 0) {
+      customStudios[idx] = { ...customStudios[idx], ...studio };
+      return res.json({ success: true, studio: customStudios[idx] });
+    }
+    customStudios.unshift(studio);
+    res.json({ success: true, studio });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Per-Game Playtime & Score Leaderboards API ---
+const gameLeaderboards = new Map(); // gameKey -> Map<usernameLower, { username, seconds, plays, highScore, lastPlayed }>
+
+app.get("/api/games/leaderboard", (req, res) => {
+  const gameKey = ((req.query.game || "global") + "").trim().toLowerCase();
+  const board = gameLeaderboards.get(gameKey);
+  const entries = board
+    ? Array.from(board.values()).sort((a, b) => b.seconds - a.seconds || b.plays - a.plays)
+    : [];
+  const activePlayers = Array.from(liveClients.values())
+    .filter((c) => (c.game || "").toLowerCase() === gameKey)
+    .map((c) => c.username);
+  res.json({ success: true, game: gameKey, entries: entries.slice(0, 50), activePlayers });
+});
+
+app.post("/api/games/leaderboard", (req, res) => {
+  try {
+    const { game, username, addSeconds, addPlay, score } = req.body || {};
+    const gameKey = ((game || "global") + "").trim().toLowerCase();
+    const cleanUser = ((username || "guest") + "").trim();
+    const userKey = cleanUser.toLowerCase();
+
+    if (!gameLeaderboards.has(gameKey)) {
+      gameLeaderboards.set(gameKey, new Map());
+    }
+    const board = gameLeaderboards.get(gameKey);
+    const current = board.get(userKey) || {
+      username: cleanUser,
+      seconds: 0,
+      plays: 0,
+      highScore: 0,
+      lastPlayed: new Date().toISOString(),
+    };
+    current.username = cleanUser;
+    current.seconds += Math.max(0, Number(addSeconds) || 0);
+    current.plays += Math.max(0, Number(addPlay) || 0);
+    if (typeof score === "number" && score > current.highScore) {
+      current.highScore = score;
+    }
+    current.lastPlayed = new Date().toISOString();
+    board.set(userKey, current);
+
+    const entries = Array.from(board.values()).sort(
+      (a, b) => b.seconds - a.seconds || b.plays - a.plays
+    );
+    res.json({ success: true, entries: entries.slice(0, 50) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Cookie Coins Shop: One-Time Targeted User Troll API ---
+app.post("/api/shop/troll", async (req, res) => {
+  try {
+    const { targetClientId, targetUsername, action, data, sender } = req.body || {};
+    if (!action || (!targetClientId && !targetUsername)) {
+      return res.status(400).json({ success: false, error: "Missing target user or troll action" });
+    }
+    if (action === "tts" && data?.text) {
+      const mod = await moderateTextWithOpenAI(data.text);
+      if (mod.blocked) {
+        return res.status(400).json({
+          success: false,
+          error: mod.reason || "TTS message blocked by moderation",
+        });
+      }
+    }
+
+    const payload = {
+      type: "admin-chaos",
+      action,
+      data: { ...(data || {}), fromShopUser: sender || "Someone" },
+      timestamp: Date.now(),
+    };
+
+    let delivered = 0;
+    for (const [id, client] of liveClients.entries()) {
+      const matchId = targetClientId && id === targetClientId;
+      const matchUser =
+        targetUsername &&
+        (client.username || "").toLowerCase() === targetUsername.trim().toLowerCase();
+      if (matchId || matchUser) {
+        try {
+          client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+          delivered++;
+        } catch {}
+      }
+    }
+
+    res.json({ success: true, delivered });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 function getBuiltModuleEntryPath() {
   if (NODE_ENV !== "production") return null;
   try {

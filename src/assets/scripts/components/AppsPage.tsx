@@ -303,6 +303,9 @@ export default function AppsPage() {
     if (document.body.classList.contains("studio-view") && (window as any).hideStudioMenu) {
       (window as any).hideStudioMenu();
     }
+    if (document.body.classList.contains("shop-view") && (window as any).hideShopMenu) {
+      (window as any).hideShopMenu();
+    }
 
     showHomeView();
     document.body.classList.add("apps-view");

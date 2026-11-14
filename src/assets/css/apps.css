@@ -1,7 +1,8 @@
 /* Operation Cookie - Apps Hub & Game Studio Styles (Theme-Aware) */
 
 body.apps-view,
-body.studio-view {
+body.studio-view,
+body.shop-view {
   overflow-y: auto;
   overscroll-behavior: contain;
   background-color: var(--bg-body);
@@ -10,7 +11,8 @@ body.studio-view {
 }
 
 body.apps-view .meow,
-body.studio-view .meow {
+body.studio-view .meow,
+body.shop-view .meow {
   overflow-y: auto;
   overscroll-behavior: contain;
   scroll-behavior: smooth;
@@ -22,7 +24,10 @@ body.apps-view #bookmarks-container,
 body.apps-view #arrow-pointer,
 body.studio-view .main-container,
 body.studio-view #bookmarks-container,
-body.studio-view #arrow-pointer {
+body.studio-view #arrow-pointer,
+body.shop-view .main-container,
+body.shop-view #bookmarks-container,
+body.shop-view #arrow-pointer {
   display: none !important;
 }
 

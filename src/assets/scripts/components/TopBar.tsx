@@ -1,12 +1,23 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
+import { getCookieCoins } from "../core/cookieCoins.ts";
 
 export default function TopBar() {
+  const [coins, setCoins] = useState<number>(() => getCookieCoins());
+
   useEffect(() => {
     const user = JSON.parse(localStorage.getItem("auth_user") || "{}");
     if (user.username) {
       const statusEl = document.getElementById("auth-status");
       if (statusEl) statusEl.textContent = user.username;
     }
+
+    const onCoins = () => setCoins(getCookieCoins());
+    window.addEventListener("cookie-coins-updated", onCoins);
+    window.addEventListener("storage", onCoins);
+    return () => {
+      window.removeEventListener("cookie-coins-updated", onCoins);
+      window.removeEventListener("storage", onCoins);
+    };
   }, []);
 
   return (
@@ -50,11 +61,21 @@ export default function TopBar() {
           href="#"
           id="studio-btn"
           class="text-icon-btn"
-          title="Game Studio — Create & Publish Games"
+          title="Game Studio — Play & Create Community Games"
           style={{ fontSize: "13px", padding: "10px 14px" }}
         >
           <i class="fa-solid fa-wand-magic-sparkles"></i>
           <span>game studio</span>
+        </a>
+        <a
+          href="#"
+          id="shop-btn"
+          class="text-icon-btn"
+          title="Cookie Shop — Spend Cookie Coins on 1x Targeted Trolls"
+          style={{ fontSize: "13px", padding: "10px 14px" }}
+        >
+          <i class="fa-solid fa-cookie-bite"></i>
+          <span>shop · {coins}</span>
         </a>
       </div>
       <div id="top-right-stuff">

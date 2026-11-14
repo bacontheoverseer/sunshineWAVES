@@ -182,6 +182,12 @@ export default function GamesPage() {
     ) {
       (window as any).hideStudioMenu();
     }
+    if (
+      document.body.classList.contains("shop-view") &&
+      (window as any).hideShopMenu
+    ) {
+      (window as any).hideShopMenu();
+    }
 
     showHomeView();
     document.body.classList.add("games-view");

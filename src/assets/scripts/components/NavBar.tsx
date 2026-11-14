@@ -264,6 +264,36 @@ export default function NavBar() {
         <div id="suggestions-container-nav" class="suggestions-box"></div>
       </div>
       <div class="window-controls">
+        <a
+          id="gameLeaderboardBtn"
+          href="#"
+          title="Game Leaderboard (Most Played)"
+          onClick={(e) => {
+            e.preventDefault();
+            document.dispatchEvent(
+              new CustomEvent("toggleGameSpaceModal", {
+                detail: { tab: "leaderboard" },
+              }),
+            );
+          }}
+        >
+          <i class="fa-solid fa-trophy"></i>
+        </a>
+        <a
+          id="gameSpaceBtn"
+          href="#"
+          title="Game Space (Private Group Chat & Voice Chat for this Game)"
+          onClick={(e) => {
+            e.preventDefault();
+            document.dispatchEvent(
+              new CustomEvent("toggleGameSpaceModal", {
+                detail: { tab: "space" },
+              }),
+            );
+          }}
+        >
+          <i class="fa-solid fa-users-rectangle"></i>
+        </a>
         <a id="home-btn" href="/" onClick={handleHome}>
           <i class="fa-solid fa-house"></i>
         </a>

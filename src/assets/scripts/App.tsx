@@ -10,6 +10,8 @@ const loadGamesPage = () => import("./components/GamesPage.tsx");
 const GamesPage = lazy(loadGamesPage);
 const AppsPage = lazy(() => import("./components/AppsPage.tsx"));
 const GameStudioPage = lazy(() => import("./components/GameStudioPage.tsx"));
+const ShopPage = lazy(() => import("./components/ShopPage.tsx"));
+const GameSpaceModal = lazy(() => import("./components/GameSpaceModal.tsx"));
 const NewTabModal = lazy(() => import("./components/NewTabModal.tsx"));
 const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
 const ChatModal = lazy(() => import("./components/ChatModal.tsx"));
@@ -36,6 +38,9 @@ export default function App() {
         <Suspense fallback={null}>
           <GameStudioPage />
         </Suspense>
+        <Suspense fallback={null}>
+          <ShopPage />
+        </Suspense>
         <div id="iframe-container">
           <div id="iframe-resize-divider"></div>
         </div>
@@ -49,6 +54,9 @@ export default function App() {
       </Suspense>
       <Suspense fallback={null}>
         <ChatModal />
+      </Suspense>
+      <Suspense fallback={null}>
+        <GameSpaceModal />
       </Suspense>
       <Suspense fallback={null}>
         <AdminPanel />

@@ -1,6 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from "preact/hooks";
+import { useState, useEffect, useRef, useCallback, useMemo } from "preact/hooks";
 import { showHomeView, store } from "../state/store.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
+import {
+  getCookieCoins,
+  addCookieCoins,
+  getUserStudio,
+  saveUserStudio,
+  recordGameActivity,
+  type StudioProfile,
+} from "../core/cookieCoins.ts";
 
 export type GameMode = "platformer" | "topdown" | "shooter" | "flappy";
 
@@ -9,8 +17,10 @@ export interface StudioGameProject {
   title: string;
   description: string;
   author: string;
+  studioName?: string;
+  studioColor?: string;
   mode: GameMode;
-  grid: number[][]; // 12 rows x 20 cols: 0=empty, 1=wall, 2=player, 3=coin, 4=hazard, 5=enemy, 6=bounce, 7=goal
+  grid: number[][];
   gravity: number;
   jumpForce: number;
   moveSpeed: number;
@@ -27,8 +37,6 @@ const ROWS = 12;
 const COLS = 20;
 const TILE_SIZE = 34; // 680 x 408 canvas
 
-// Tile IDs
-// 0 = empty, 1 = wall, 2 = player, 3 = coin, 4 = spike/lava, 5 = enemy, 6 = bounce pad, 7 = goal flag
 const BRUSH_TOOLS = [
   { id: 1, name: "wall block", color: "#3b82f6", icon: "fa-square" },
   { id: 2, name: "player spawn", color: "#22c55e", icon: "fa-user-astronaut" },
@@ -40,6 +48,17 @@ const BRUSH_TOOLS = [
   { id: 0, name: "eraser", color: "#64748b", icon: "fa-eraser" },
 ];
 
+const STUDIO_ICONS = [
+  "fa-rocket",
+  "fa-dragon",
+  "fa-bolt",
+  "fa-crown",
+  "fa-gamepad",
+  "fa-fire",
+  "fa-wand-magic-sparkles",
+  "fa-ghost",
+];
+
 function createEmptyGrid(): number[][] {
   return Array.from({ length: ROWS }, () => Array(COLS).fill(0));
 }
@@ -48,11 +67,9 @@ function makePresetGrid(preset: "platformer" | "topdown" | "shooter" | "flappy")
   const g = createEmptyGrid();
   if (preset === "platformer") {
     for (let c = 0; c < COLS; c++) g[ROWS - 1][c] = 1;
-    // Lava pit in middle
     g[ROWS - 1][8] = 4;
     g[ROWS - 1][9] = 4;
     g[ROWS - 1][10] = 4;
-    // Platforms
     g[8][4] = 1;
     g[8][5] = 1;
     g[8][6] = 1;
@@ -62,18 +79,13 @@ function makePresetGrid(preset: "platformer" | "topdown" | "shooter" | "flappy")
     g[5][13] = 1;
     g[5][14] = 1;
     g[5][15] = 1;
-    // Bounce pad
     g[ROWS - 2][7] = 6;
-    // Player
     g[ROWS - 2][2] = 2;
-    // Coins
     g[7][5] = 3;
     g[5][9] = 3;
     g[4][14] = 3;
     g[ROWS - 2][12] = 3;
-    // Enemy
     g[ROWS - 2][14] = 5;
-    // Goal
     g[4][18] = 7;
     g[5][18] = 1;
     g[5][17] = 1;
@@ -85,20 +97,20 @@ function makePresetGrid(preset: "platformer" | "topdown" | "shooter" | "flappy")
     }
     for (let r = 2; r < 9; r++) g[r][6] = 1;
     for (let r = 3; r < 11; r++) g[r][13] = 1;
-    g[2][2] = 2; // Player
+    g[2][2] = 2;
     g[2][9] = 3;
     g[6][3] = 3;
     g[9][9] = 3;
     g[5][10] = 5;
     g[8][15] = 5;
     g[4][9] = 4;
-    g[9][17] = 7; // Goal
+    g[9][17] = 7;
   } else if (preset === "shooter") {
     for (let c = 0; c < COLS; c++) {
       g[0][c] = 1;
       g[ROWS - 1][c] = 1;
     }
-    g[6][2] = 2; // Player ship
+    g[6][2] = 2;
     g[3][14] = 5;
     g[6][15] = 5;
     g[9][14] = 5;
@@ -113,7 +125,6 @@ function makePresetGrid(preset: "platformer" | "topdown" | "shooter" | "flappy")
       g[ROWS - 1][c] = 4;
     }
     g[5][2] = 2;
-    // Pillars
     for (let r = 1; r <= 4; r++) g[r][7] = 1;
     for (let r = 8; r <= 10; r++) g[r][7] = 1;
     g[6][7] = 3;
@@ -137,6 +148,8 @@ const STARTER_COMMUNITY_GAMES: StudioGameProject[] = [
     title: "neon cyber parkour",
     description: "leap across neon rooftops, hit the cyan bounce pad, stomp the patrol bot, and reach the flag!",
     author: "cookie_dev",
+    studioName: "neon wave interactive",
+    studioColor: "#3b82f6",
     mode: "platformer",
     grid: makePresetGrid("platformer"),
     gravity: 0.55,
@@ -145,7 +158,7 @@ const STARTER_COMMUNITY_GAMES: StudioGameProject[] = [
     playerColor: "#22c55e",
     bgColor: "#090d16",
     wallColor: "#3b82f6",
-    customScript: "// Called every frame: onTick(ctx, state)\n",
+    customScript: "// Called every frame: onTick(ctx, state, player)\n",
     likes: 24,
     plays: 142,
     createdAt: "2026-11-10T12:00:00Z",
@@ -155,6 +168,8 @@ const STARTER_COMMUNITY_GAMES: StudioGameProject[] = [
     title: "shadow maze runner",
     description: "top-down labyrinth! collect all golden coins, dodge the purple ghosts, and escape through the portal.",
     author: "sunshine",
+    studioName: "sunshine Forge",
+    studioColor: "#a855f7",
     mode: "topdown",
     grid: makePresetGrid("topdown"),
     gravity: 0,
@@ -173,6 +188,8 @@ const STARTER_COMMUNITY_GAMES: StudioGameProject[] = [
     title: "starfighter arena",
     description: "move with WASD/arrows and press SPACE to fire plasma bolts at incoming alien drones!",
     author: "nova_pilot",
+    studioName: "orbital studios",
+    studioColor: "#f43f5e",
     mode: "shooter",
     grid: makePresetGrid("shooter"),
     gravity: 0,
@@ -191,6 +208,8 @@ const STARTER_COMMUNITY_GAMES: StudioGameProject[] = [
     title: "flappy neon dash",
     description: "tap SPACE or click to flap through tight laser pillars and reach the finish line!",
     author: "arcade_king",
+    studioName: "pixel crown games",
+    studioColor: "#10b981",
     mode: "flappy",
     grid: makePresetGrid("flappy"),
     gravity: 0.42,
@@ -213,17 +232,13 @@ function notifyToast(message: string, type: "success" | "error" | "info" = "info
   }
 }
 
-/**
- * Generates a standalone HTML document for a StudioGameProject so it can also be opened
- * in a full browser tab!
- */
 function buildStandaloneGameHtml(project: StudioGameProject): string {
   const serialized = JSON.stringify(project);
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
-<title>${project.title} — Operation Cookie Game Studio</title>
+<title>${project.title} — ${project.studioName || project.author}</title>
 <style>
   body { margin: 0; background: #070a12; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
   .hud { display: flex; gap: 20px; align-items: center; margin-bottom: 10px; font-size: 14px; background: rgba(255,255,255,0.06); padding: 8px 18px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.12); }
@@ -234,7 +249,7 @@ function buildStandaloneGameHtml(project: StudioGameProject): string {
 <body>
   <div class="hud">
     <strong>${project.title}</strong>
-    <span>by @${project.author}</span>
+    <span>studio: ${project.studioName || project.author}</span>
     <span id="score">score: 0</span>
     <span id="status">playing</span>
   </div>
@@ -358,7 +373,20 @@ requestAnimationFrame(loop);
 export default function GameStudioPage() {
   const [visible, setVisible] = useState(false);
   const [active, setActive] = useState(false);
-  const [subTab, setSubTab] = useState<"community" | "editor">("editor");
+  // Default page is OTHER PEOPLE'S GAMES ("community") as requested!
+  const [subTab, setSubTab] = useState<"community" | "mystudio" | "editor">("community");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [modeFilter, setModeFilter] = useState<"all" | GameMode>("all");
+
+  // User's Custom Named Game Studio & Cookie Coins
+  const [userStudio, setUserStudio] = useState<StudioProfile>(() => getUserStudio());
+  const [coins, setCoins] = useState<number>(() => getCookieCoins());
+
+  // Studio edit form state
+  const [studioNameInput, setStudioNameInput] = useState(userStudio.name);
+  const [studioTaglineInput, setStudioTaglineInput] = useState(userStudio.tagline);
+  const [studioColorInput, setStudioColorInput] = useState(userStudio.color);
+  const [studioIconInput, setStudioIconInput] = useState(userStudio.icon);
 
   // Community published games state
   const [communityGames, setCommunityGames] = useState<StudioGameProject[]>(() => {
@@ -399,11 +427,11 @@ export default function GameStudioPage() {
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const broadcastRef = useRef<BroadcastChannel | null>(null);
 
-  // Refs for 60fps game loop access
   const keysRef = useRef<Record<string, boolean>>({});
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
   const projectStateRef = useRef({
+    title,
     mode,
     grid,
     gravity,
@@ -415,6 +443,7 @@ export default function GameStudioPage() {
     customScript,
   });
   projectStateRef.current = {
+    title,
     mode,
     grid,
     gravity,
@@ -426,7 +455,6 @@ export default function GameStudioPage() {
     customScript,
   };
 
-  // Runtime simulation entities ref
   const simRef = useRef<{
     player: {
       x: number;
@@ -445,13 +473,14 @@ export default function GameStudioPage() {
     particles: { x: number; y: number; vx: number; vy: number; color: string; life: number }[];
     score: number;
     status: "playing" | "won" | "lost";
+    rewardedWin?: boolean;
   } | null>(null);
 
   const initSimulation = useCallback(() => {
     const p = projectStateRef.current;
     let spawnX = 68;
     let spawnY = 200;
-    const coins: { x: number; y: number; w: number; h: number; taken: boolean }[] = [];
+    const coinsList: { x: number; y: number; w: number; h: number; taken: boolean }[] = [];
     const enemies: { x: number; y: number; w: number; h: number; vx: number; alive: boolean }[] = [];
 
     for (let r = 0; r < ROWS; r++) {
@@ -461,7 +490,7 @@ export default function GameStudioPage() {
           spawnX = c * TILE_SIZE + 5;
           spawnY = r * TILE_SIZE + 5;
         } else if (cell === 3) {
-          coins.push({
+          coinsList.push({
             x: c * TILE_SIZE + 9,
             y: r * TILE_SIZE + 9,
             w: 16,
@@ -492,12 +521,13 @@ export default function GameStudioPage() {
         grounded: false,
         shootCd: 0,
       },
-      coins,
+      coins: coinsList,
       enemies,
       bullets: [],
       particles: [],
       score: 0,
       status: "playing",
+      rewardedWin: false,
     };
     setLiveScore(0);
     setGameStatus("playing");
@@ -535,10 +565,16 @@ export default function GameStudioPage() {
     if (document.body.classList.contains("apps-view") && (window as any).hideAppsMenu) {
       (window as any).hideAppsMenu();
     }
+    if (document.body.classList.contains("shop-view") && (window as any).hideShopMenu) {
+      (window as any).hideShopMenu();
+    }
 
     showHomeView();
     document.body.classList.add("studio-view");
     setVisible(true);
+    setCoins(getCookieCoins());
+    const st = getUserStudio();
+    setUserStudio(st);
 
     requestAnimationFrame(() => {
       setActive(true);
@@ -550,7 +586,6 @@ export default function GameStudioPage() {
     else show();
   }, [show, hide]);
 
-  // Register TopBar button & global helpers
   useEffect(() => {
     (window as any).showStudioMenu = show;
     (window as any).hideStudioMenu = hide;
@@ -573,13 +608,16 @@ export default function GameStudioPage() {
     if (studioBtn) studioBtn.addEventListener("click", onStudioClick);
     if (brand) brand.addEventListener("click", onBrandClick);
 
+    const onCoins = () => setCoins(getCookieCoins());
+    window.addEventListener("cookie-coins-updated", onCoins);
+
     return () => {
       if (studioBtn) studioBtn.removeEventListener("click", onStudioClick);
       if (brand) brand.removeEventListener("click", onBrandClick);
+      window.removeEventListener("cookie-coins-updated", onCoins);
     };
   }, [show, hide, toggle]);
 
-  // Sync published games from server & SSE & BroadcastChannel
   const mergePublishedGame = useCallback((incoming: StudioGameProject) => {
     if (!incoming || !incoming.id) return;
     setCommunityGames((prev) => {
@@ -627,7 +665,6 @@ export default function GameStudioPage() {
     };
   }, [visible, mergePublishedGame]);
 
-  // Keyboard listener for play-testing
   useEffect(() => {
     if (!visible) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -696,7 +733,6 @@ export default function GameStudioPage() {
       ctx.fillStyle = cfg.bgColor;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Draw subtle grid lines when editing
       if (!isPlayingRef.current) {
         ctx.strokeStyle = "rgba(255,255,255,0.05)";
         ctx.lineWidth = 1;
@@ -714,7 +750,6 @@ export default function GameStudioPage() {
         }
       }
 
-      // Update physics if playing
       const sim = simRef.current;
       if (isPlayingRef.current && sim && sim.status === "playing") {
         const keys = keysRef.current;
@@ -755,7 +790,6 @@ export default function GameStudioPage() {
           pl.vy += cfg.gravity;
         }
 
-        // Horizontal move & wall collision
         pl.x += pl.vx;
         if (pl.x < 0) pl.x = 0;
         if (pl.x + pl.w > COLS * TILE_SIZE) {
@@ -783,7 +817,6 @@ export default function GameStudioPage() {
           }
         }
 
-        // Vertical move & tile interactions
         pl.y += pl.vy;
         pl.grounded = false;
         if (pl.y > ROWS * TILE_SIZE) {
@@ -819,11 +852,15 @@ export default function GameStudioPage() {
               spawnParticles(pl.x + 12, pl.y + 12, "#10b981");
               sim.status = "won";
               setGameStatus("won");
+              if (!sim.rewardedWin) {
+                sim.rewardedWin = true;
+                addCookieCoins(20, `beat ${cfg.title}`);
+                recordGameActivity(cfg.title, 20, 1, sim.score);
+              }
             }
           }
         }
 
-        // Coins
         for (const coin of sim.coins) {
           if (!coin.taken && overlap(pl, coin)) {
             coin.taken = true;
@@ -833,7 +870,6 @@ export default function GameStudioPage() {
           }
         }
 
-        // Bullets
         for (const b of sim.bullets) {
           b.x += b.vx;
           for (const en of sim.enemies) {
@@ -847,7 +883,6 @@ export default function GameStudioPage() {
           }
         }
 
-        // Enemies
         for (const en of sim.enemies) {
           if (!en.alive) continue;
           en.x += en.vx;
@@ -879,7 +914,6 @@ export default function GameStudioPage() {
           }
         }
 
-        // Optional user custom JS script hook
         if (cfg.customScript && cfg.customScript.trim()) {
           try {
             const fn = new Function("ctx", "state", "player", cfg.customScript);
@@ -888,7 +922,6 @@ export default function GameStudioPage() {
         }
       }
 
-      // Draw static tiles
       for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
           const id = cfg.grid[r][c];
@@ -933,7 +966,6 @@ export default function GameStudioPage() {
         }
       }
 
-      // Draw dynamic entities when playing
       if (isPlayingRef.current && sim) {
         ctx.fillStyle = "#eab308";
         for (const coin of sim.coins) {
@@ -968,11 +1000,9 @@ export default function GameStudioPage() {
           if (pt.life <= 0) sim.particles.splice(i, 1);
         }
 
-        // Player
         ctx.fillStyle = cfg.playerColor;
         ctx.fillRect(sim.player.x, sim.player.y, sim.player.w, sim.player.h);
 
-        // Win / Loss Overlay
         if (sim.status !== "playing") {
           ctx.fillStyle = "rgba(0, 0, 0, 0.68)";
           ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -980,7 +1010,7 @@ export default function GameStudioPage() {
           ctx.font = "bold 26px Lexend, sans-serif";
           ctx.textAlign = "center";
           ctx.fillText(
-            sim.status === "won" ? "LEVEL COMPLETE!" : "GAME OVER",
+            sim.status === "won" ? "LEVEL COMPLETE! (+20 COINS)" : "GAME OVER",
             canvas.width / 2,
             canvas.height / 2 - 10
           );
@@ -1001,7 +1031,6 @@ export default function GameStudioPage() {
     return () => cancelAnimationFrame(rafId);
   }, [visible, subTab]);
 
-  // Paint tile on canvas click / drag
   const handleCanvasPaint = (e: MouseEvent) => {
     if (isPlaying || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1013,7 +1042,6 @@ export default function GameStudioPage() {
 
     setGrid((prev) => {
       const copy = prev.map((r) => [...r]);
-      // Only allow 1 player spawn at a time
       if (selectedBrush === 2) {
         for (let r = 0; r < ROWS; r++) {
           for (let c = 0; c < COLS; c++) {
@@ -1071,6 +1099,47 @@ export default function GameStudioPage() {
     return "guest_creator";
   };
 
+  const handleSaveStudioProfile = async (e: Event) => {
+    e.preventDefault();
+    const cleanName = studioNameInput.trim();
+    if (!cleanName) {
+      notifyToast("enter a name for your game studio", "error");
+      return;
+    }
+    const mod = await moderateChatMessage(`${cleanName} ${studioTaglineInput}`);
+    if (mod.blocked) {
+      notifyToast(mod.reason || "studio name blocked by moderation", "error");
+      return;
+    }
+    const updated: StudioProfile = {
+      ...userStudio,
+      name: cleanName,
+      tagline: studioTaglineInput.trim() || "independent game studio",
+      color: studioColorInput,
+      icon: studioIconInput,
+      owner: getActiveAuthor(),
+    };
+    saveUserStudio(updated);
+    setUserStudio(updated);
+    notifyToast(`saved studio "${cleanName}"!`, "success");
+  };
+
+  const handleClaimStudioEarnings = () => {
+    if (userStudio.unclaimedCoins <= 0) {
+      notifyToast("publish games or get plays to earn more studio royalties!", "info");
+      return;
+    }
+    const amount = userStudio.unclaimedCoins;
+    addCookieCoins(amount, `studio royalties from ${userStudio.name}`);
+    const updated: StudioProfile = {
+      ...userStudio,
+      coinsEarned: (userStudio.coinsEarned || 0) + amount,
+      unclaimedCoins: 0,
+    };
+    saveUserStudio(updated);
+    setUserStudio(updated);
+  };
+
   const handlePublishGame = async (e: Event) => {
     e.preventDefault();
     if (isPublishing) return;
@@ -1092,8 +1161,10 @@ export default function GameStudioPage() {
       const newGame: StudioGameProject = {
         id: `game_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         title: cleanTitle,
-        description: description.trim() || "custom game built in operation cookie game studio",
+        description: description.trim() || `built by ${userStudio.name}`,
         author: getActiveAuthor(),
+        studioName: userStudio.name,
+        studioColor: userStudio.color,
         mode,
         grid: grid.map((r) => [...r]),
         gravity,
@@ -1119,7 +1190,16 @@ export default function GameStudioPage() {
         body: JSON.stringify({ game: newGame }),
       }).catch(() => {});
 
-      notifyToast(`published "${cleanTitle}" to community games!`, "success");
+      // Award +50 Cookie Coins launch bonus + +25 Studio treasury royalty
+      addCookieCoins(50, `published "${cleanTitle}" under ${userStudio.name}`);
+      const updatedStudio: StudioProfile = {
+        ...userStudio,
+        coinsEarned: (userStudio.coinsEarned || 0) + 50,
+        unclaimedCoins: (userStudio.unclaimedCoins || 0) + 25,
+      };
+      saveUserStudio(updatedStudio);
+      setUserStudio(updatedStudio);
+
       setSubTab("community");
     } finally {
       setIsPublishing(false);
@@ -1143,6 +1223,21 @@ export default function GameStudioPage() {
     setCommunityGames((prev) =>
       prev.map((item) => (item.id === g.id ? { ...item, plays: (item.plays || 0) + 1 } : item))
     );
+    recordGameActivity(g.title, 10, 1);
+
+    // If this game belongs to the user's Studio, add +10 unclaimed studio royalty coins
+    if (
+      g.studioName?.toLowerCase() === userStudio.name.toLowerCase() ||
+      g.author.toLowerCase() === getActiveAuthor().toLowerCase()
+    ) {
+      const updatedStudio = {
+        ...userStudio,
+        unclaimedCoins: (userStudio.unclaimedCoins || 0) + 10,
+      };
+      saveUserStudio(updatedStudio);
+      setUserStudio(updatedStudio);
+    }
+
     fetch(`/api/studio/games/${encodeURIComponent(g.id)}/stat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1161,6 +1256,7 @@ export default function GameStudioPage() {
   };
 
   const openGameInBrowserTab = (g: StudioGameProject) => {
+    recordGameActivity(g.title, 15, 1);
     const html = buildStandaloneGameHtml(g);
     const blob = new Blob([html], { type: "text/html" });
     const blobUrl = URL.createObjectURL(blob);
@@ -1171,6 +1267,38 @@ export default function GameStudioPage() {
     document.body.classList.add("browser-view");
     store.notify();
   };
+
+  const openLeaderboardOrSpace = (gameName: string, tab: "leaderboard" | "space") => {
+    document.dispatchEvent(
+      new CustomEvent("toggleGameSpaceModal", {
+        detail: { gameName, tab },
+      })
+    );
+  };
+
+  const filteredCommunityGames = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    return communityGames.filter((g) => {
+      if (modeFilter !== "all" && g.mode !== modeFilter) return false;
+      if (!q) return true;
+      return (
+        g.title.toLowerCase().includes(q) ||
+        g.author.toLowerCase().includes(q) ||
+        (g.studioName || "").toLowerCase().includes(q) ||
+        g.description.toLowerCase().includes(q)
+      );
+    });
+  }, [communityGames, searchQuery, modeFilter]);
+
+  const myStudioGames = useMemo(
+    () =>
+      communityGames.filter(
+        (g) =>
+          (g.studioName || "").toLowerCase() === userStudio.name.toLowerCase() ||
+          g.author.toLowerCase() === getActiveAuthor().toLowerCase()
+      ),
+    [communityGames, userStudio.name]
+  );
 
   if (!visible) return null;
 
@@ -1183,19 +1311,11 @@ export default function GameStudioPage() {
       {/* Studio Topbar */}
       <div class="studio-topbar">
         <div class="studio-brand">
-          <i class="fa-solid fa-wand-magic-sparkles"></i>
-          <span>cookie game engine & community arcade</span>
+          <i class={`fa-solid ${userStudio.icon}`} style={{ color: userStudio.color }}></i>
+          <span>game studio · {userStudio.name}</span>
         </div>
 
         <div class="studio-tabs">
-          <button
-            type="button"
-            class={`studio-tab-btn ${subTab === "editor" ? "active" : ""}`}
-            onClick={() => setSubTab("editor")}
-          >
-            <i class="fa-solid fa-hammer"></i>
-            <span>create & publish</span>
-          </button>
           <button
             type="button"
             class={`studio-tab-btn ${subTab === "community" ? "active" : ""}`}
@@ -1205,17 +1325,507 @@ export default function GameStudioPage() {
             }}
           >
             <i class="fa-solid fa-earth-americas"></i>
-            <span>published games ({communityGames.length})</span>
+            <span>discover games ({communityGames.length})</span>
+          </button>
+
+          <button
+            type="button"
+            class={`studio-tab-btn ${subTab === "mystudio" ? "active" : ""}`}
+            onClick={() => {
+              setIsPlaying(false);
+              setSubTab("mystudio");
+            }}
+          >
+            <i class="fa-solid fa-building-user"></i>
+            <span>my studio & earnings</span>
+            {userStudio.unclaimedCoins > 0 && (
+              <span class="chat-unread-badge">+{userStudio.unclaimedCoins}</span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            class={`studio-tab-btn ${subTab === "editor" ? "active" : ""}`}
+            onClick={() => setSubTab("editor")}
+          >
+            <i class="fa-solid fa-hammer"></i>
+            <span>game maker engine</span>
+          </button>
+
+          <button
+            type="button"
+            class="studio-tab-btn"
+            onClick={() => {
+              hide();
+              (window as any).showShopMenu?.();
+            }}
+            title="Open Cookie Shop"
+          >
+            <i class="fa-solid fa-cookie-bite"></i>
+            <span>{coins} coins</span>
           </button>
         </div>
       </div>
 
-      {subTab === "editor" ? (
+      {/* TAB 1 (DEFAULT): OTHER PEOPLE'S GAMES / COMMUNITY ARCADE */}
+      {subTab === "community" && (
+        <>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "12px",
+              flexWrap: "wrap",
+            }}
+          >
+            <div class="apps-category-pills">
+              {(
+                [
+                  { id: "all", label: "all games", icon: "fa-layer-group" },
+                  { id: "platformer", label: "platformers", icon: "fa-person-running" },
+                  { id: "topdown", label: "top-down", icon: "fa-compass" },
+                  { id: "shooter", label: "shooters", icon: "fa-jet-fighter" },
+                  { id: "flappy", label: "flappy / dash", icon: "fa-dove" },
+                ] as const
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  class={`apps-cat-pill ${modeFilter === m.id ? "active" : ""}`}
+                  onClick={() => setModeFilter(m.id)}
+                >
+                  <i class={`fa-solid ${m.icon}`}></i>
+                  <span>{m.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <input
+                type="text"
+                class="studio-input"
+                style={{ width: "240px" }}
+                placeholder="search games or studios..."
+                value={searchQuery}
+                onInput={(e) => setSearchQuery(e.currentTarget.value)}
+              />
+              <button
+                type="button"
+                class="apps-custom-btn"
+                onClick={() => setSubTab("editor")}
+              >
+                <i class="fa-solid fa-plus"></i>
+                <span>make a game (+50 coins)</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="studio-community-grid">
+            {filteredCommunityGames.map((g) => (
+              <article key={g.id} class="studio-game-card">
+                <div>
+                  <div
+                    class="studio-game-preview-banner"
+                    style={{ backgroundColor: g.bgColor }}
+                  >
+                    <div
+                      style={{
+                        width: "30px",
+                        height: "30px",
+                        borderRadius: "6px",
+                        backgroundColor: g.playerColor,
+                        boxShadow: `0 0 18px ${g.playerColor}`,
+                      }}
+                    />
+                    <span class="studio-game-mode-badge">{g.mode}</span>
+                    {g.studioName && (
+                      <span
+                        style={{
+                          position: "absolute",
+                          bottom: "8px",
+                          left: "8px",
+                          backgroundColor: "rgba(0,0,0,0.72)",
+                          border: `1px solid ${g.studioColor || "#3b82f6"}`,
+                          color: "#fff",
+                          fontSize: "10px",
+                          padding: "2px 8px",
+                          borderRadius: "8px",
+                          textTransform: "lowercase",
+                        }}
+                      >
+                        <i class="fa-solid fa-building"></i> {g.studioName}
+                      </span>
+                    )}
+                  </div>
+
+                  <h3
+                    style={{
+                      fontSize: "15px",
+                      fontWeight: 600,
+                      margin: "12px 0 4px",
+                      color: "var(--text-primary)",
+                      textTransform: "lowercase",
+                    }}
+                  >
+                    {g.title}
+                  </h3>
+                  <div
+                    style={{
+                      fontSize: "11.5px",
+                      color: "var(--color-sublabel)",
+                      marginBottom: "8px",
+                    }}
+                  >
+                    by @{g.author} · {g.plays || 0} plays · {g.likes || 0} likes
+                  </div>
+                  <p
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--color-sublabel)",
+                      margin: 0,
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {g.description}
+                  </p>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <div class="studio-game-actions">
+                    <button
+                      type="button"
+                      class="apps-custom-btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => loadGameIntoEngine(g, true)}
+                    >
+                      <i class="fa-solid fa-play"></i>
+                      <span>play</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      title="Open in full browser tab"
+                      onClick={() => openGameInBrowserTab(g)}
+                    >
+                      <i class="fa-solid fa-up-right-from-square"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      title="Remix in Game Engine"
+                      onClick={() => loadGameIntoEngine(g, false)}
+                    >
+                      <i class="fa-solid fa-code-branch"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      title="Like game (+15 coins to studio)"
+                      onClick={() => {
+                        setCommunityGames((prev) =>
+                          prev.map((item) =>
+                            item.id === g.id
+                              ? { ...item, likes: (item.likes || 0) + 1 }
+                              : item
+                          )
+                        );
+                        addCookieCoins(2, `liked ${g.title}`);
+                        fetch(`/api/studio/games/${encodeURIComponent(g.id)}/stat`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ field: "likes" }),
+                        }).catch(() => {});
+                      }}
+                    >
+                      <i class="fa-solid fa-heart" style={{ color: "#f43f5e" }}></i>
+                    </button>
+                  </div>
+
+                  {/* Per-Game Leaderboard & Private Space Buttons */}
+                  <div class="studio-game-actions">
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => openLeaderboardOrSpace(g.title, "leaderboard")}
+                    >
+                      <i class="fa-solid fa-trophy"></i>
+                      <span>leaderboard</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      style={{ flex: 1, justifyContent: "center" }}
+                      onClick={() => openLeaderboardOrSpace(g.title, "space")}
+                    >
+                      <i class="fa-solid fa-users-rectangle"></i>
+                      <span>game space</span>
+                    </button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* TAB 2: MY GAME STUDIO & COOKIE COIN EARNINGS */}
+      {subTab === "mystudio" && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "340px 1fr",
+            gap: "16px",
+            alignItems: "start",
+          }}
+        >
+          {/* Customize Studio Profile */}
+          <form class="studio-panel" onSubmit={handleSaveStudioProfile}>
+            <h3 class="studio-panel-title">
+              <span>customize your game studio</span>
+              <i class="fa-solid fa-building-user"></i>
+            </h3>
+
+            <div class="studio-field">
+              <label>studio name</label>
+              <input
+                type="text"
+                class="studio-input"
+                value={studioNameInput}
+                onInput={(e) => setStudioNameInput(e.currentTarget.value)}
+                maxLength={40}
+                placeholder="e.g. neon wave studios"
+                required
+              />
+            </div>
+
+            <div class="studio-field">
+              <label>studio tagline</label>
+              <input
+                type="text"
+                class="studio-input"
+                value={studioTaglineInput}
+                onInput={(e) => setStudioTaglineInput(e.currentTarget.value)}
+                maxLength={90}
+                placeholder="what kind of games do you build?"
+              />
+            </div>
+
+            <div class="studio-field">
+              <label>studio badge color</label>
+              <input
+                type="color"
+                value={studioColorInput}
+                onInput={(e) => setStudioColorInput(e.currentTarget.value)}
+                style={{ width: "100%", height: "34px", border: "none", borderRadius: "8px" }}
+              />
+            </div>
+
+            <div class="studio-field">
+              <label>studio emblem icon</label>
+              <div class="studio-tool-grid">
+                {STUDIO_ICONS.map((ic) => (
+                  <button
+                    key={ic}
+                    type="button"
+                    class={`studio-tool-btn ${studioIconInput === ic ? "active" : ""}`}
+                    onClick={() => setStudioIconInput(ic)}
+                    style={{ justifyContent: "center" }}
+                  >
+                    <i class={`fa-solid ${ic}`}></i>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              class="apps-custom-btn"
+              style={{ justifyContent: "center", width: "100%", marginTop: "4px" }}
+            >
+              <i class="fa-solid fa-floppy-disk"></i>
+              <span>save studio identity</span>
+            </button>
+          </form>
+
+          {/* Studio Revenue Dashboard & Studio Games */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+            <div class="studio-panel">
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: "12px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <div
+                    class="app-icon-box"
+                    style={{
+                      backgroundColor: userStudio.color,
+                      width: "48px",
+                      height: "48px",
+                    }}
+                  >
+                    <i class={`fa-solid ${userStudio.icon}`}></i>
+                  </div>
+                  <div>
+                    <h2 style={{ margin: 0, fontSize: "17px", textTransform: "lowercase" }}>
+                      {userStudio.name}
+                    </h2>
+                    <p
+                      style={{
+                        margin: "3px 0 0",
+                        fontSize: "12px",
+                        color: "var(--color-sublabel)",
+                      }}
+                    >
+                      {userStudio.tagline} · owner: @{userStudio.owner}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  class="apps-custom-btn"
+                  onClick={handleClaimStudioEarnings}
+                >
+                  <i class="fa-solid fa-coins"></i>
+                  <span>
+                    claim studio royalties (+{userStudio.unclaimedCoins} cookie coins)
+                  </span>
+                </button>
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                  gap: "10px",
+                  marginTop: "8px",
+                }}
+              >
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-surface-4)",
+                    padding: "12px",
+                    borderRadius: "11px",
+                    border: "1px solid var(--bg-surface-10)",
+                  }}
+                >
+                  <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                    published studio games
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, marginTop: "4px" }}>
+                    {myStudioGames.length}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-surface-4)",
+                    padding: "12px",
+                    borderRadius: "11px",
+                    border: "1px solid var(--bg-surface-10)",
+                  }}
+                >
+                  <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                    total studio plays
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, marginTop: "4px" }}>
+                    {myStudioGames.reduce((acc, g) => acc + (g.plays || 0), 0)}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    backgroundColor: "var(--bg-surface-4)",
+                    padding: "12px",
+                    borderRadius: "11px",
+                    border: "1px solid var(--bg-surface-10)",
+                  }}
+                >
+                  <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                    total coins earned
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, marginTop: "4px" }}>
+                    {userStudio.coinsEarned} 🍪
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="studio-panel">
+              <div class="studio-panel-title">
+                <span>games published by {userStudio.name}</span>
+                <button
+                  type="button"
+                  class="studio-tool-btn"
+                  onClick={() => setSubTab("editor")}
+                >
+                  <i class="fa-solid fa-plus"></i> new studio game
+                </button>
+              </div>
+
+              {myStudioGames.length === 0 ? (
+                <div
+                  style={{
+                    padding: "24px",
+                    textAlign: "center",
+                    color: "var(--color-sublabel)",
+                    fontSize: "13px",
+                  }}
+                >
+                  your studio hasn't published any games yet — open the{" "}
+                  <strong>game maker engine</strong> tab to publish your first game and earn +50
+                  cookie coins!
+                </div>
+              ) : (
+                <div class="studio-community-grid">
+                  {myStudioGames.map((g) => (
+                    <div key={g.id} class="studio-game-card">
+                      <div>
+                        <h4 style={{ margin: "0 0 4px", fontSize: "14px" }}>{g.title}</h4>
+                        <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                          {g.plays || 0} plays · {g.likes || 0} likes · {g.mode}
+                        </div>
+                      </div>
+                      <div class="studio-game-actions">
+                        <button
+                          type="button"
+                          class="apps-custom-btn"
+                          style={{ flex: 1, justifyContent: "center" }}
+                          onClick={() => loadGameIntoEngine(g, true)}
+                        >
+                          <i class="fa-solid fa-play"></i> play
+                        </button>
+                        <button
+                          type="button"
+                          class="studio-tool-btn"
+                          onClick={() => loadGameIntoEngine(g, false)}
+                        >
+                          <i class="fa-solid fa-pen"></i> edit
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: POLISHED 2D GAME MAKER ENGINE */}
+      {subTab === "editor" && (
         <div class="studio-workspace">
           {/* LEFT PANEL: Game Modes, Templates & Tile Brushes */}
           <div class="studio-panel">
             <h3 class="studio-panel-title">
-              <span>1. game mode & template</span>
+              <span>1. game mode & preset</span>
               <i class="fa-solid fa-gamepad"></i>
             </h3>
             <div class="studio-tool-grid">
@@ -1288,7 +1898,7 @@ export default function GameStudioPage() {
                   onClick={handleTogglePlayTest}
                 >
                   <i class={`fa-solid ${isPlaying ? "fa-stop" : "fa-play"}`}></i>
-                  <span>{isPlaying ? "stop testing" : "test game"}</span>
+                  <span>{isPlaying ? "stop playing" : "test / play game"}</span>
                 </button>
 
                 {isPlaying && (
@@ -1318,33 +1928,55 @@ export default function GameStudioPage() {
                 <span>mode: {mode}</span>
               </div>
 
-              <button
-                type="button"
-                class="studio-tool-btn"
-                onClick={() =>
-                  openGameInBrowserTab({
-                    id: "preview",
-                    title: title || "preview game",
-                    description,
-                    author: getActiveAuthor(),
-                    mode,
-                    grid,
-                    gravity,
-                    jumpForce,
-                    moveSpeed,
-                    playerColor,
-                    bgColor,
-                    wallColor,
-                    customScript,
-                    likes: 0,
-                    plays: 0,
-                    createdAt: new Date().toISOString(),
-                  })
-                }
-              >
-                <i class="fa-solid fa-up-right-from-square"></i>
-                <span>launch in tab</span>
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <button
+                  type="button"
+                  class="studio-tool-btn"
+                  title="View Leaderboard for this Game"
+                  onClick={() => openLeaderboardOrSpace(title, "leaderboard")}
+                >
+                  <i class="fa-solid fa-trophy"></i>
+                  <span>leaderboard</span>
+                </button>
+                <button
+                  type="button"
+                  class="studio-tool-btn"
+                  title="Open Private Game Space (Group Chat & Voice)"
+                  onClick={() => openLeaderboardOrSpace(title, "space")}
+                >
+                  <i class="fa-solid fa-users-rectangle"></i>
+                  <span>game space</span>
+                </button>
+                <button
+                  type="button"
+                  class="studio-tool-btn"
+                  title="Launch in Full Browser Tab"
+                  onClick={() =>
+                    openGameInBrowserTab({
+                      id: "preview",
+                      title: title || "preview game",
+                      description,
+                      author: getActiveAuthor(),
+                      studioName: userStudio.name,
+                      studioColor: userStudio.color,
+                      mode,
+                      grid,
+                      gravity,
+                      jumpForce,
+                      moveSpeed,
+                      playerColor,
+                      bgColor,
+                      wallColor,
+                      customScript,
+                      likes: 0,
+                      plays: 0,
+                      createdAt: new Date().toISOString(),
+                    })
+                  }
+                >
+                  <i class="fa-solid fa-up-right-from-square"></i>
+                </button>
+              </div>
             </div>
 
             <div class="studio-canvas-wrap">
@@ -1371,12 +2003,12 @@ export default function GameStudioPage() {
 
             <div style={{ fontSize: "11.5px", color: "var(--color-sublabel)" }}>
               {isPlaying
-                ? "controls: WASD or Arrow Keys to move · SPACE to jump / flap / shoot lasers · R to restart"
-                : "click or drag on the grid above to place tiles, then click 'test game' to play!"}
+                ? "controls: WASD / Arrows to move · SPACE to jump / flap / shoot · beat the goal flag for +20 cookie coins!"
+                : "click or drag on the grid above to paint tiles, then click 'test / play game'!"}
             </div>
           </div>
 
-          {/* RIGHT PANEL: Physics, Colors, Script & Publish */}
+          {/* RIGHT PANEL: Physics, Colors, Script & Studio Publish */}
           <form class="studio-panel" onSubmit={handlePublishGame}>
             <h3 class="studio-panel-title">
               <span>3. physics & visuals</span>
@@ -1473,9 +2105,40 @@ export default function GameStudioPage() {
             </div>
 
             <h3 class="studio-panel-title" style={{ marginTop: "4px" }}>
-              <span>4. publish game</span>
+              <span>4. publish under your studio</span>
               <i class="fa-solid fa-cloud-arrow-up"></i>
             </h3>
+
+            <div
+              style={{
+                fontSize: "11.5px",
+                color: "var(--color-sublabel)",
+                backgroundColor: "var(--bg-surface-4)",
+                padding: "7px 10px",
+                borderRadius: "8px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <span>
+                studio: <strong style={{ color: "var(--text-primary)" }}>{userStudio.name}</strong>
+              </span>
+              <button
+                type="button"
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-primary)",
+                  fontSize: "11px",
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                }}
+                onClick={() => setSubTab("mystudio")}
+              >
+                rename
+              </button>
+            </div>
 
             <div class="studio-field">
               <label>game title</label>
@@ -1507,113 +2170,11 @@ export default function GameStudioPage() {
               disabled={isPublishing}
             >
               <i class="fa-solid fa-rocket"></i>
-              <span>{isPublishing ? "publishing..." : "publish to community"}</span>
+              <span>
+                {isPublishing ? "publishing..." : "publish game (+50 cookie coins)"}
+              </span>
             </button>
           </form>
-        </div>
-      ) : (
-        /* COMMUNITY PUBLISHED GAMES HUB */
-        <div class="studio-community-grid">
-          {communityGames.map((g) => (
-            <article key={g.id} class="studio-game-card">
-              <div>
-                <div
-                  class="studio-game-preview-banner"
-                  style={{ backgroundColor: g.bgColor }}
-                >
-                  <div
-                    style={{
-                      width: "30px",
-                      height: "30px",
-                      borderRadius: "6px",
-                      backgroundColor: g.playerColor,
-                      boxShadow: `0 0 18px ${g.playerColor}`,
-                    }}
-                  />
-                  <span class="studio-game-mode-badge">{g.mode}</span>
-                </div>
-
-                <h3
-                  style={{
-                    fontSize: "15px",
-                    fontWeight: 600,
-                    margin: "12px 0 4px",
-                    color: "var(--text-primary)",
-                    textTransform: "lowercase",
-                  }}
-                >
-                  {g.title}
-                </h3>
-                <div
-                  style={{
-                    fontSize: "11.5px",
-                    color: "var(--color-sublabel)",
-                    marginBottom: "8px",
-                  }}
-                >
-                  by @{g.author} · {g.plays || 0} plays · {g.likes || 0} likes
-                </div>
-                <p
-                  style={{
-                    fontSize: "12px",
-                    color: "var(--color-sublabel)",
-                    margin: 0,
-                    lineHeight: 1.4,
-                  }}
-                >
-                  {g.description}
-                </p>
-              </div>
-
-              <div class="studio-game-actions">
-                <button
-                  type="button"
-                  class="apps-custom-btn"
-                  style={{ flex: 1, justifyContent: "center" }}
-                  onClick={() => loadGameIntoEngine(g, true)}
-                >
-                  <i class="fa-solid fa-play"></i>
-                  <span>play</span>
-                </button>
-                <button
-                  type="button"
-                  class="studio-tool-btn"
-                  title="Open in full browser tab"
-                  onClick={() => openGameInBrowserTab(g)}
-                >
-                  <i class="fa-solid fa-up-right-from-square"></i>
-                </button>
-                <button
-                  type="button"
-                  class="studio-tool-btn"
-                  title="Remix in Game Engine"
-                  onClick={() => loadGameIntoEngine(g, false)}
-                >
-                  <i class="fa-solid fa-code-branch"></i>
-                  <span>remix</span>
-                </button>
-                <button
-                  type="button"
-                  class="studio-tool-btn"
-                  title="Like game"
-                  onClick={() => {
-                    setCommunityGames((prev) =>
-                      prev.map((item) =>
-                        item.id === g.id ? { ...item, likes: (item.likes || 0) + 1 } : item
-                      )
-                    );
-                    fetch(`/api/studio/games/${encodeURIComponent(g.id)}/stat`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ field: "likes" }),
-                    }).catch(() => {});
-                  }}
-                >
-                  <i class="fa-solid fa-heart" style={{ color: "#f43f5e" }}></i>
-                </button>
-              </div>
-            </article>
-          ))}
         </div>
       )}
     </section>

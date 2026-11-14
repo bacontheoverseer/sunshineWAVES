@@ -1003,4 +1003,31 @@ export function initLiveClient(): void {
   window.addEventListener("game-switched", ((e: CustomEvent) => {
     sendHeartbeat(undefined, e.detail?.gameTitle);
   }) as EventListener);
+
+  // Listen for targeted shop trolls over BroadcastChannel as a fast multi-tab fallback
+  try {
+    const trollBc = new BroadcastChannel("cookie_live_troll_channel");
+    trollBc.onmessage = (ev) => {
+      const msg = ev.data;
+      if (!msg || msg.type !== "SHOP_TROLL") return;
+      const myId = getClientId();
+      const myUser = getActiveUsername().toLowerCase();
+      const matchId = msg.targetClientId && msg.targetClientId === myId;
+      const matchUser =
+        msg.targetUsername && msg.targetUsername.trim().toLowerCase() === myUser;
+      if (!matchId && !matchUser) return;
+
+      if (msg.action === "sfx") {
+        if (msg.data?.url) {
+          playAudioUrl(msg.data.url, msg.data?.volume);
+        } else {
+          playSfxByName(msg.data?.sound || "vine-boom", msg.data?.volume);
+        }
+      } else if (msg.action === "tts") {
+        speakTts(msg.data?.text || "Hello!", msg.data?.pitch, msg.data?.rate, msg.data?.volume);
+      } else if (msg.action === "effect") {
+        applyChaosEffect(msg.data?.effect, msg.data);
+      }
+    };
+  } catch {}
 }
