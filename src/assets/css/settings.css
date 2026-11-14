@@ -255,9 +255,9 @@ input[type="checkbox"] {
   appearance: none;
   width: 64px;
   height: 30px;
-  margin-left: -343px;
+  flex-shrink: 0;
+  margin: 0;
   background-color: var(--checkbox-bg);
-  margin-bottom: 5px;
   border-radius: 30px;
   position: relative;
   outline: none;

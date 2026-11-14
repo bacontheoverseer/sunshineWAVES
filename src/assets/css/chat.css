@@ -423,8 +423,8 @@
 }
 
 .chat-main-header {
-  height: 54px;
-  padding: 0 18px;
+  min-height: 54px;
+  padding: 8px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -439,6 +439,7 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1;
 }
 
 .chat-main-channel-name {
@@ -449,6 +450,14 @@
   align-items: center;
   gap: 7px;
   text-transform: lowercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 240px;
+}
+
+.chat-main-channel-name span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-main-channel-desc {
@@ -460,12 +469,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   text-transform: lowercase;
+  min-width: 0;
 }
 
 .chat-main-header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .chat-header-btn {
@@ -481,6 +492,8 @@
   gap: 6px;
   transition: all 0.15s ease;
   text-transform: lowercase;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chat-header-btn:hover {

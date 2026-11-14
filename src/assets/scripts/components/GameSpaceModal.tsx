@@ -1920,21 +1920,24 @@ export default function GameSpaceModal() {
                         style={{
                           display: "flex",
                           alignItems: "center",
-                          gap: "8px",
+                          gap: "10px",
                           padding: "8px 10px",
                           borderRadius: "10px",
                           backgroundColor: "var(--bg-surface-6)",
                           cursor: "pointer",
                           fontSize: "12px",
+                          lineHeight: 1.4,
                           color: "var(--text-primary)",
+                          overflow: "hidden",
                         }}
                       >
                         <input
                           type="checkbox"
                           checked={remapGuestWasd}
+                          style={{ marginLeft: 0, flexShrink: 0 }}
                           onChange={(e) => setRemapGuestWasd(e.currentTarget.checked)}
                         />
-                        <span>
+                        <span style={{ flex: 1, minWidth: 0 }}>
                           let friend press <strong>WASD</strong> on their keyboard (op cookie converts it to <strong>arrow keys</strong>)
                         </span>
                       </label>
@@ -1981,15 +1984,17 @@ export default function GameSpaceModal() {
                       <input
                         type="text"
                         class="admin-input"
-                        placeholder="enter 6-digit party code (e.g. 7K4M9X)..."
+                        placeholder="enter 6-char party code (e.g. 7K4M9X)"
                         value={joinCodeInput}
                         maxLength={8}
                         style={{
+                          width: "100%",
+                          boxSizing: "border-box",
                           textAlign: "center",
-                          fontSize: "18px",
-                          fontWeight: 700,
-                          letterSpacing: "3px",
-                          textTransform: "uppercase",
+                          fontSize: joinCodeInput ? "18px" : "13px",
+                          fontWeight: joinCodeInput ? 700 : 500,
+                          letterSpacing: joinCodeInput ? "3px" : "0.5px",
+                          textTransform: joinCodeInput ? "uppercase" : "lowercase",
                         }}
                         onInput={(e) =>
                           setJoinCodeInput((e.target as HTMLInputElement).value.toUpperCase())
