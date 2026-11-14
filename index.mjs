@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { createServer, request } from "http";
 import { Database } from "bun:sqlite";
 import express from "express";
@@ -225,7 +226,7 @@ app.use((req, res, next) => {
   req.pipe(proxyReq);
 });
 
-// Dev-only proxy: nuru + cloudsync
+// Dev-only proxy: nuru
 app.use((req, res, next) => {
   if (NODE_ENV !== "development") return next();
   if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') return next();
@@ -236,12 +237,6 @@ app.use((req, res, next) => {
   if (req.url.startsWith("/w/")) {
     targetPort = 8080;
     label = "nuru";
-  } else if (
-    req.url.startsWith("/api/auth") ||
-    req.url.startsWith("/api/sync")
-  ) {
-    targetPort = 5000;
-    label = "cloudsync";
   }
 
   if (!targetPort) return next();
@@ -536,6 +531,451 @@ const liveClients = new Map();
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
 const userProfiles = new Map(); // usernameLower -> { bio, statusText, updatedAt }
 
+const CLOUDSYNC_JWT_SECRET =
+  process.env.JWT_SECRET || "dev_jwt_secret_cookie_super_safe_key_123";
+
+function getCloudSyncDbFilePath() {
+  if (process.env.CLOUDSYNC_DB_PATH) return process.env.CLOUDSYNC_DB_PATH;
+  const csDir = path.join(__dirname, "cloudsync");
+  if (!fs.existsSync(csDir)) {
+    try {
+      fs.mkdirSync(csDir, { recursive: true });
+    } catch {}
+  }
+  return path.join(csDir, ".db");
+}
+
+let cloudSyncDbInitialized = false;
+function openCloudSyncDb(readonly = false) {
+  const dbFile = getCloudSyncDbFilePath();
+  if (!cloudSyncDbInitialized) {
+    try {
+      const initDb = new Database(dbFile);
+      initDb.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA busy_timeout = 10000;
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          token_version INTEGER DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS sync_data (
+          user_id INTEGER PRIMARY KEY,
+          data_blob BLOB NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS sync_json (
+          user_id INTEGER PRIMARY KEY,
+          payload_json TEXT NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+      `);
+      initDb.close();
+      cloudSyncDbInitialized = true;
+    } catch (e) {
+      console.warn("CloudSync DB init warning:", e.message);
+    }
+  }
+  return new Database(dbFile, readonly ? { readonly: true } : undefined);
+}
+
+function base64UrlEncode(input) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), "utf-8");
+  return buf
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function base64UrlDecode(str) {
+  const pad = 4 - (str.length % 4);
+  const b64 = (str + (pad < 4 ? "=".repeat(pad) : ""))
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  return Buffer.from(b64, "base64").toString("utf-8");
+}
+
+function signCloudSyncJwt(claims) {
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = base64UrlEncode(JSON.stringify(claims));
+  const sig = crypto
+    .createHmac("sha256", CLOUDSYNC_JWT_SECRET)
+    .update(`${header}.${payload}`)
+    .digest();
+  return `${header}.${payload}.${base64UrlEncode(sig)}`;
+}
+
+function verifyCloudSyncJwt(token) {
+  if (!token || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [header, payload, sig] = parts;
+  const expected = base64UrlEncode(
+    crypto
+      .createHmac("sha256", CLOUDSYNC_JWT_SECRET)
+      .update(`${header}.${payload}`)
+      .digest()
+  );
+  if (sig !== expected) return null;
+  try {
+    const data = JSON.parse(base64UrlDecode(payload));
+    if (data.exp && Math.floor(Date.now() / 1000) > data.exp) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function setCloudSyncAuthCookie(res, token, req) {
+  const isHttps =
+    req?.secure ||
+    req?.headers?.["x-forwarded-proto"] === "https";
+  const maxAge = 7 * 24 * 60 * 60;
+  const cookieParts = [
+    `token=${token}`,
+    "Path=/",
+    "HttpOnly",
+    `Max-Age=${maxAge}`,
+    isHttps ? "SameSite=Strict; Secure" : "SameSite=Lax",
+  ];
+  res.setHeader("Set-Cookie", cookieParts.join("; "));
+}
+
+function clearCloudSyncAuthCookie(res) {
+  res.setHeader(
+    "Set-Cookie",
+    "token=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax"
+  );
+}
+
+function getAuthenticatedCloudSyncUser(req) {
+  const cookieToken = req.cookies?.token;
+  const headerToken = req.headers["x-cloudsync-token"] ||
+    (req.headers.authorization?.startsWith("Bearer ")
+      ? req.headers.authorization.slice(7).trim()
+      : null);
+  const rawToken = cookieToken || headerToken;
+  const claims = verifyCloudSyncJwt(rawToken);
+  if (!claims || !claims.id) return null;
+
+  try {
+    const db = openCloudSyncDb(true);
+    try {
+      const row = db
+        .query("SELECT id, username, token_version FROM users WHERE id = ?")
+        .get(Number(claims.id));
+      if (!row) return null;
+      if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
+      return { id: Number(row.id), username: String(row.username) };
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+// --- Native CloudSync Auth & Sync Endpoints (/api/auth/* & /api/sync/*) ---
+app.post("/api/auth/register", (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+
+    if (username.length < 3 || username.length > 20) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "username must be 3-20 chars" });
+    }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "username must be alphanumeric" });
+    }
+    if (password.length < 8) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "password too short (min 8 chars)" });
+    }
+    if (password.length > 128) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "password too long" });
+    }
+
+    const db = openCloudSyncDb(false);
+    let userId = 0;
+    try {
+      const existing = db
+        .query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)")
+        .get(username);
+      if (existing) {
+        return res
+          .status(409)
+          .json({ success: false, user: null, error: "username taken!" });
+      }
+      const hashed = Bun.password.hashSync(password, {
+        algorithm: "bcrypt",
+        cost: 10,
+      });
+      const result = db
+        .query("INSERT INTO users (username, password_hash, token_version) VALUES (?, ?, 1)")
+        .run(username, hashed);
+      userId = Number(result.lastInsertRowid);
+    } finally {
+      db.close();
+    }
+
+    const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const token = signCloudSyncJwt({ id: userId, username, v: 1, exp });
+    setCloudSyncAuthCookie(res, token, req);
+    touchKnownUser(username);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+
+    return res.status(201).json({
+      success: true,
+      token,
+      user: { id: userId, username },
+      error: null,
+    });
+  } catch (err) {
+    console.error("CloudSync register error:", err);
+    return res
+      .status(500)
+      .json({ success: false, user: null, error: "internal error" });
+  }
+});
+
+app.post("/api/auth/login", (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+    if (!username || !password) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "missing username or password" });
+    }
+    if (password.length > 128) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "password too long" });
+    }
+
+    const db = openCloudSyncDb(true);
+    let row = null;
+    try {
+      row = db
+        .query(
+          "SELECT id, username, password_hash, token_version FROM users WHERE LOWER(username) = LOWER(?)"
+        )
+        .get(username);
+    } finally {
+      db.close();
+    }
+
+    if (!row || !Bun.password.verifySync(password, String(row.password_hash))) {
+      return res
+        .status(401)
+        .json({ success: false, user: null, error: "invalid credentials!" });
+    }
+
+    const userId = Number(row.id);
+    const canonicalUsername = String(row.username);
+    const tokenVersion = Number(row.token_version || 1);
+    const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const token = signCloudSyncJwt({
+      id: userId,
+      username: canonicalUsername,
+      v: tokenVersion,
+      exp,
+    });
+    setCloudSyncAuthCookie(res, token, req);
+    touchKnownUser(canonicalUsername);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+
+    return res.status(200).json({
+      success: true,
+      token,
+      user: { id: userId, username: canonicalUsername },
+      error: null,
+    });
+  } catch (err) {
+    console.error("CloudSync login error:", err);
+    return res
+      .status(500)
+      .json({ success: false, user: null, error: "internal error" });
+  }
+});
+
+app.post("/api/auth/logout", (_req, res) => {
+  clearCloudSyncAuthCookie(res);
+  res.json({ success: true, user: null, error: null });
+});
+
+app.get("/api/auth/me", (req, res) => {
+  const user = getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res
+      .status(401)
+      .json({ success: false, user: null, error: "unauthorized" });
+  }
+  res.json({ success: true, user, error: null });
+});
+
+app.delete("/api/auth/me", (req, res) => {
+  const user = getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res
+      .status(401)
+      .json({ success: false, user: null, error: "unauthorized" });
+  }
+  try {
+    const db = openCloudSyncDb(false);
+    try {
+      db.query("DELETE FROM sync_json WHERE user_id = ?").run(user.id);
+      db.query("DELETE FROM sync_data WHERE user_id = ?").run(user.id);
+      db.query("DELETE FROM users WHERE id = ?").run(user.id);
+    } finally {
+      db.close();
+    }
+    knownUsers.delete(user.username.toLowerCase());
+    clearCloudSyncAuthCookie(res);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    return res.json({ success: true, user: null, error: "account deleted!" });
+  } catch {
+    return res
+      .status(500)
+      .json({ success: false, user: null, error: "failed to delete account" });
+  }
+});
+
+app.get("/api/sync/meta", (req, res) => {
+  const user = getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res
+      .status(401)
+      .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
+  }
+  try {
+    const db = openCloudSyncDb(true);
+    try {
+      const row =
+        db.query("SELECT updated_at FROM sync_json WHERE user_id = ?").get(user.id) ||
+        db.query("SELECT updated_at FROM sync_data WHERE user_id = ?").get(user.id);
+      return res.json({
+        success: true,
+        data: null,
+        updated_at: row?.updated_at ? String(row.updated_at) : "",
+        error: null,
+      });
+    } finally {
+      db.close();
+    }
+  } catch {
+    return res.json({ success: true, data: null, updated_at: "", error: null });
+  }
+});
+
+app.post("/api/sync/upload", (req, res) => {
+  const user = getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res
+      .status(401)
+      .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
+  }
+  try {
+    const payload = req.body || {};
+    const db = openCloudSyncDb(false);
+    let updatedAt = new Date().toISOString();
+    try {
+      let finalPayload = payload;
+      if (payload._delta) {
+        const existingRow = db
+          .query("SELECT payload_json FROM sync_json WHERE user_id = ?")
+          .get(user.id);
+        let baseObj = { localStorage: {}, indexedDB: {} };
+        if (existingRow?.payload_json) {
+          try {
+            baseObj = JSON.parse(String(existingRow.payload_json));
+          } catch {}
+        }
+        if (payload.localStorage && typeof payload.localStorage === "object") {
+          baseObj.localStorage = baseObj.localStorage || {};
+          for (const [k, v] of Object.entries(payload.localStorage)) {
+            if (v === null) delete baseObj.localStorage[k];
+            else baseObj.localStorage[k] = v;
+          }
+        }
+        if (payload.indexedDB && typeof payload.indexedDB === "object") {
+          baseObj.indexedDB = { ...(baseObj.indexedDB || {}), ...payload.indexedDB };
+        }
+        finalPayload = baseObj;
+      }
+
+      db.query(
+        "INSERT OR REPLACE INTO sync_json (user_id, payload_json, updated_at) VALUES (?, ?, ?)"
+      ).run(user.id, JSON.stringify(finalPayload), updatedAt);
+    } finally {
+      db.close();
+    }
+    return res.json({
+      success: true,
+      data: null,
+      updated_at: updatedAt,
+      error: null,
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ success: false, data: null, updated_at: null, error: err.message });
+  }
+});
+
+app.get("/api/sync/download", (req, res) => {
+  const user = getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res
+      .status(401)
+      .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
+  }
+  try {
+    const db = openCloudSyncDb(true);
+    try {
+      const row = db
+        .query("SELECT payload_json, updated_at FROM sync_json WHERE user_id = ?")
+        .get(user.id);
+      if (!row || !row.payload_json) {
+        return res.json({
+          success: true,
+          data: { localStorage: {}, indexedDB: {} },
+          updated_at: "",
+          error: null,
+        });
+      }
+      return res.json({
+        success: true,
+        data: JSON.parse(String(row.payload_json)),
+        updated_at: String(row.updated_at || ""),
+        error: null,
+      });
+    } finally {
+      db.close();
+    }
+  } catch {
+    return res.json({
+      success: true,
+      data: { localStorage: {}, indexedDB: {} },
+      updated_at: "",
+      error: null,
+    });
+  }
+});
+
 function isTemporaryGuestName(name) {
   if (!name) return true;
   const lower = String(name).trim().toLowerCase();
@@ -545,37 +985,27 @@ function isTemporaryGuestName(name) {
 
 function getCloudSyncUsersMap() {
   const map = new Map();
-  const candidates = [
-    process.env.CLOUDSYNC_DB_PATH,
-    path.join(__dirname, "cloudsync", ".db"),
-    path.join(__dirname, ".db"),
-  ].filter(Boolean);
-
-  for (const dbFile of candidates) {
+  try {
+    const db = openCloudSyncDb(true);
     try {
-      if (!fs.existsSync(dbFile)) continue;
-      const db = new Database(dbFile, { readonly: true });
-      try {
-        const rows = db
-          .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
-          .all();
-        for (const r of rows) {
-          if (r && r.username) {
-            const clean = String(r.username).trim();
-            map.set(clean.toLowerCase(), {
-              id: Number(r.id),
-              username: clean,
-              createdAt: r.created_at || null,
-            });
-          }
+      const rows = db
+        .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
+        .all();
+      for (const r of rows) {
+        if (r && r.username) {
+          const clean = String(r.username).trim();
+          map.set(clean.toLowerCase(), {
+            id: Number(r.id),
+            username: clean,
+            createdAt: r.created_at || null,
+          });
         }
-      } finally {
-        db.close();
       }
-      if (map.size > 0) break;
-    } catch {
-      // ignore if DB not initialized yet
+    } finally {
+      db.close();
     }
+  } catch {
+    // ignore if DB not initialized yet
   }
   return map;
 }
@@ -887,6 +1317,31 @@ app.get("/api/live/audio-proxy", async (req, res) => {
   }
 });
 
+function writeSoundBufferToDirs(safeFilename, buffer) {
+  const dirs = [
+    path.join(publicPath, "assets", "sounds"),
+    path.join(__dirname, "dist", "assets", "sounds"),
+  ];
+  for (const dir of dirs) {
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(path.join(dir, safeFilename), buffer);
+    } catch {}
+  }
+}
+
+function decodeHtmlEntities(str) {
+  return String(str || "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
 app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
   try {
     const { name, filename, data } = req.body || {};
@@ -894,19 +1349,13 @@ app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
       return res.status(400).json({ success: false, error: "Missing sound file data" });
     }
 
-    const soundDir = path.join(publicPath, "assets", "sounds");
-    if (!fs.existsSync(soundDir)) {
-      fs.mkdirSync(soundDir, { recursive: true });
-    }
-
     const ext = path.extname(filename).toLowerCase() || ".mp3";
     const baseClean = path.basename(filename, ext).replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 32);
     const safeFilename = `upload_${Date.now()}_${baseClean}${ext}`;
-    const targetPath = path.join(soundDir, safeFilename);
 
     const cleanBase64 = data.replace(/^data:[^;]+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
-    fs.writeFileSync(targetPath, buffer);
+    writeSoundBufferToDirs(safeFilename, buffer);
 
     const soundUrl = `/assets/sounds/${safeFilename}`;
     res.json({
@@ -921,49 +1370,93 @@ app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
   }
 });
 
-app.get("/api/admin/myinstants-search", verifyAdmin, async (req, res) => {
+app.get("/api/admin/myinstants-search", async (req, res) => {
   try {
     const query = (req.query.query || "").toString().trim();
-    if (!query) {
-      return res.json({ success: true, results: [] });
-    }
-
-    const searchUrl = `https://www.myinstants.com/en/search/?name=${encodeURIComponent(query)}`;
-    const response = await fetch(searchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    });
-
-    if (!response.ok) {
-      return res.status(response.status).json({ success: false, error: "MyInstants returned " + response.status });
-    }
-
-    const html = await response.text();
-    const regex = /<button class="small-button" onclick="play\('([^']+)'[^>]*title="Play ([^"]+) sound"/g;
     const results = [];
-    let match;
-    while ((match = regex.exec(html)) !== null && results.length < 30) {
-      const soundPath = match[1];
-      const soundName = match[2].trim();
-      const fullUrl = soundPath.startsWith("http") ? soundPath : `https://www.myinstants.com${soundPath}`;
+    const seenUrls = new Set();
+
+    const addResult = (rawName, rawSoundUrl) => {
+      if (!rawSoundUrl) return;
+      const fullUrl = rawSoundUrl.startsWith("http")
+        ? rawSoundUrl
+        : `https://www.myinstants.com${rawSoundUrl.startsWith("/") ? "" : "/"}${rawSoundUrl}`;
+      if (seenUrls.has(fullUrl)) return;
+      seenUrls.add(fullUrl);
+      const cleanName = decodeHtmlEntities(rawName || "myinstants sound");
       results.push({
-        name: soundName,
+        name: cleanName,
         url: `/api/live/audio-proxy?url=${encodeURIComponent(fullUrl)}`,
         rawUrl: fullUrl,
         source: "myinstants",
       });
+    };
+
+    // 1. Query MyInstants Official JSON REST API v1 first (fastest & most reliable)
+    try {
+      const apiUrl = query
+        ? `https://www.myinstants.com/api/v1/instants/?format=json&name=${encodeURIComponent(query)}`
+        : `https://www.myinstants.com/api/v1/instants/?format=json`;
+      const apiRes = await fetch(apiUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          Accept: "application/json,text/plain,*/*",
+        },
+      });
+      if (apiRes.ok) {
+        const apiData = await apiRes.json();
+        const items = Array.isArray(apiData?.results) ? apiData.results : [];
+        for (const item of items) {
+          if (results.length >= 40) break;
+          if (item?.sound) {
+            addResult(item.name || item.slug || "sound", item.sound);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("MyInstants JSON API fallback notice:", e.message);
+    }
+
+    // 2. Also scrape HTML search page if we need more results
+    if (results.length < 15) {
+      try {
+        const searchUrl = query
+          ? `https://www.myinstants.com/en/search/?name=${encodeURIComponent(query)}`
+          : `https://www.myinstants.com/en/index/us/`;
+        const response = await fetch(searchUrl, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+        });
+
+        if (response.ok) {
+          const html = await response.text();
+          const btnRegex = /<button[^>]*onclick="play\('([^']+)'[^"]*"[^>]*>/gi;
+          let match;
+          while ((match = btnRegex.exec(html)) !== null && results.length < 40) {
+            const tag = match[0];
+            const soundPath = match[1];
+            const titleMatch = tag.match(/title="Play\s+(.+?)\s+sound"/i) || tag.match(/title="([^"]+)"/i);
+            const soundName = titleMatch ? titleMatch[1] : path.basename(soundPath, ".mp3").replace(/[-_]/g, " ");
+            addResult(soundName, soundPath);
+          }
+        }
+      } catch (e) {
+        console.warn("MyInstants HTML scrape fallback notice:", e.message);
+      }
     }
 
     res.json({ success: true, results });
   } catch (err) {
     console.error("MyInstants search error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: err.message, results: [] });
   }
 });
 
-app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
+app.post("/api/admin/resolve-sound", async (req, res) => {
   try {
     const rawUrl = (req.body?.url || "").toString().trim();
     if (!rawUrl) {
@@ -983,15 +1476,13 @@ app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
       }
     }
 
-    // Download and cache into /assets/sounds/ so it works 100% same-origin
+    // Download and cache into /assets/sounds/ (both public and dist) so it works 100% same-origin
     try {
-      const soundDir = path.join(publicPath, "assets", "sounds");
-      if (!fs.existsSync(soundDir)) fs.mkdirSync(soundDir, { recursive: true });
       const audioRes = await fetch(resolvedMp3, { headers: { "User-Agent": "Mozilla/5.0" } });
       if (audioRes.ok) {
         const buf = Buffer.from(await audioRes.arrayBuffer());
-        const safeFilename = `cached_${Date.now()}.mp3`;
-        fs.writeFileSync(path.join(soundDir, safeFilename), buf);
+        const safeFilename = `cached_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`;
+        writeSoundBufferToDirs(safeFilename, buf);
         return res.json({ success: true, url: `/assets/sounds/${safeFilename}` });
       }
     } catch {}
@@ -1000,6 +1491,308 @@ app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
       ? `/api/live/audio-proxy?url=${encodeURIComponent(resolvedMp3)}`
       : resolvedMp3;
     res.json({ success: true, url: proxied });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- CloudPlay: 2-Player Co-Op Party & Remote Keybind / Stream Engine ---
+const cloudPlayParties = new Map(); // code (uppercase 6 chars) -> PartyObject
+
+function generatePartyCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  for (let attempt = 0; attempt < 20; attempt++) {
+    let code = "";
+    for (let i = 0; i < 6; i++) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    if (!cloudPlayParties.has(code)) return code;
+  }
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+function normalizePartyCode(raw) {
+  return String(raw || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 6);
+}
+
+function broadcastToParty(party, payload, excludeClientId = null) {
+  if (!party) return 0;
+  const msg = `data: ${JSON.stringify({
+    type: "cloudplay-event",
+    code: party.code,
+    ...payload,
+  })}\n\n`;
+
+  const targets = [party.host, party.guest].filter(Boolean);
+  let sent = 0;
+  for (const member of targets) {
+    if (excludeClientId && member.clientId === excludeClientId) continue;
+    for (const [cid, client] of liveClients.entries()) {
+      const matchId = member.clientId && cid === member.clientId;
+      const matchUser =
+        member.username &&
+        (client.username || "").toLowerCase() === member.username.toLowerCase();
+      if (matchId || matchUser) {
+        try {
+          client.res.write(msg);
+          sent++;
+        } catch {}
+      }
+    }
+  }
+  return sent;
+}
+
+// Cleanup inactive CloudPlay parties older than 2 hours
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, party] of cloudPlayParties.entries()) {
+    if (now - (party.lastActiveAt || party.createdAt || 0) > 2 * 60 * 60 * 1000) {
+      cloudPlayParties.delete(code);
+    }
+  }
+}, 60000);
+
+app.post("/api/cloudplay/create", (req, res) => {
+  try {
+    const {
+      clientId,
+      username,
+      gameTitle,
+      gameUrl,
+      hostRole = "wasd",
+      guestRole = "arrows",
+      remapGuestWasdToArrows = false,
+    } = req.body || {};
+
+    const cleanUser = String(username || "").trim();
+    if (!cleanUser || isTemporaryGuestName(cleanUser)) {
+      return res.status(401).json({
+        success: false,
+        error: "sign in to cloudsync first to create a cloudplay party",
+      });
+    }
+
+    // Close any previous party hosted by this user
+    for (const [oldCode, p] of cloudPlayParties.entries()) {
+      if (p.host?.username?.toLowerCase() === cleanUser.toLowerCase()) {
+        broadcastToParty(p, { eventType: "PARTY_CLOSED", reason: "host created a new party" });
+        cloudPlayParties.delete(oldCode);
+      }
+    }
+
+    const code = generatePartyCode();
+    const party = {
+      code,
+      gameTitle: String(gameTitle || "2-player game").trim(),
+      gameUrl: String(gameUrl || "").trim(),
+      host: {
+        clientId: String(clientId || ""),
+        username: cleanUser,
+        role: hostRole,
+      },
+      guest: null,
+      settings: {
+        hostRole: hostRole || "wasd",
+        guestRole: guestRole || "arrows",
+        remapGuestWasdToArrows: Boolean(remapGuestWasdToArrows),
+      },
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+    };
+
+    cloudPlayParties.set(code, party);
+    res.json({ success: true, party });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/cloudplay/join", (req, res) => {
+  try {
+    const { code: rawCode, clientId, username } = req.body || {};
+    const code = normalizePartyCode(rawCode);
+    const cleanUser = String(username || "").trim();
+
+    if (!code || code.length < 4) {
+      return res.status(400).json({ success: false, error: "enter a valid 6-character party code" });
+    }
+    if (!cleanUser || isTemporaryGuestName(cleanUser)) {
+      return res.status(401).json({
+        success: false,
+        error: "sign in to cloudsync first to join a cloudplay party",
+      });
+    }
+
+    const party = cloudPlayParties.get(code);
+    if (!party) {
+      return res.status(404).json({
+        success: false,
+        error: `party "${code}" not found or has ended`,
+      });
+    }
+
+    const isHostRejoining =
+      party.host.username.toLowerCase() === cleanUser.toLowerCase() &&
+      party.host.clientId === String(clientId || "");
+
+    if (isHostRejoining) {
+      party.lastActiveAt = Date.now();
+      return res.json({ success: true, party, role: "host" });
+    }
+
+    // Max of 2 players in a party!
+    if (
+      party.guest &&
+      party.guest.username.toLowerCase() !== cleanUser.toLowerCase() &&
+      party.guest.clientId !== String(clientId || "")
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "this party is already full (max 2 players)",
+      });
+    }
+
+    party.guest = {
+      clientId: String(clientId || ""),
+      username: cleanUser,
+      role: party.settings.guestRole || "arrows",
+      joinedAt: Date.now(),
+    };
+    party.lastActiveAt = Date.now();
+
+    broadcastToParty(party, {
+      eventType: "PARTY_UPDATED",
+      party,
+      joinedUser: cleanUser,
+    });
+
+    res.json({ success: true, party, role: "guest" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/cloudplay/party", (req, res) => {
+  const code = normalizePartyCode(req.query.code);
+  if (!code) {
+    return res.status(400).json({ success: false, error: "missing party code" });
+  }
+  const party = cloudPlayParties.get(code);
+  if (!party) {
+    return res.status(404).json({ success: false, error: "party not found" });
+  }
+  res.json({ success: true, party });
+});
+
+app.post("/api/cloudplay/config", (req, res) => {
+  try {
+    const {
+      code: rawCode,
+      gameTitle,
+      gameUrl,
+      hostRole,
+      guestRole,
+      remapGuestWasdToArrows,
+    } = req.body || {};
+    const code = normalizePartyCode(rawCode);
+    const party = cloudPlayParties.get(code);
+    if (!party) {
+      return res.status(404).json({ success: false, error: "party not found" });
+    }
+
+    if (typeof gameTitle === "string" && gameTitle.trim()) {
+      party.gameTitle = gameTitle.trim();
+    }
+    if (typeof gameUrl === "string") {
+      party.gameUrl = gameUrl.trim();
+    }
+    if (hostRole) {
+      party.settings.hostRole = hostRole;
+      party.host.role = hostRole;
+    }
+    if (guestRole) {
+      party.settings.guestRole = guestRole;
+      if (party.guest) party.guest.role = guestRole;
+    }
+    if (typeof remapGuestWasdToArrows === "boolean") {
+      party.settings.remapGuestWasdToArrows = remapGuestWasdToArrows;
+    }
+    party.lastActiveAt = Date.now();
+
+    broadcastToParty(party, {
+      eventType: "PARTY_UPDATED",
+      party,
+    });
+
+    res.json({ success: true, party });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/cloudplay/leave", (req, res) => {
+  try {
+    const { code: rawCode, clientId, username } = req.body || {};
+    const code = normalizePartyCode(rawCode);
+    const party = cloudPlayParties.get(code);
+    if (!party) {
+      return res.json({ success: true });
+    }
+
+    const isHost =
+      (clientId && party.host.clientId === clientId) ||
+      (username && party.host.username.toLowerCase() === String(username).toLowerCase());
+
+    if (isHost) {
+      broadcastToParty(party, {
+        eventType: "PARTY_CLOSED",
+        reason: `host @${party.host.username} ended the cloudplay party`,
+      });
+      cloudPlayParties.delete(code);
+    } else if (party.guest) {
+      const leftUser = party.guest.username;
+      party.guest = null;
+      party.lastActiveAt = Date.now();
+      broadcastToParty(party, {
+        eventType: "GUEST_LEFT",
+        party,
+        leftUser,
+      });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/cloudplay/signal", (req, res) => {
+  try {
+    const { code: rawCode, fromClientId, signalType, data } = req.body || {};
+    const code = normalizePartyCode(rawCode);
+    const party = cloudPlayParties.get(code);
+    if (!party) {
+      return res.status(404).json({ success: false, error: "party not found" });
+    }
+    party.lastActiveAt = Date.now();
+
+    const delivered = broadcastToParty(
+      party,
+      {
+        eventType: "SIGNAL",
+        signalType,
+        fromClientId,
+        data,
+        party,
+      },
+      fromClientId
+    );
+
+    res.json({ success: true, delivered });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

@@ -294,6 +294,21 @@ export default function NavBar() {
         >
           <i class="fa-solid fa-users-rectangle"></i>
         </a>
+        <a
+          id="gameCloudPlayBtn"
+          href="#"
+          title="CloudPlay 2-Player Party (Play Local WASD + Arrow Key Games Across 2 Computers)"
+          onClick={(e) => {
+            e.preventDefault();
+            document.dispatchEvent(
+              new CustomEvent("toggleGameSpaceModal", {
+                detail: { tab: "cloudplay" },
+              }),
+            );
+          }}
+        >
+          <i class="fa-solid fa-tower-broadcast"></i>
+        </a>
         <a id="home-btn" href="/" onClick={handleHome}>
           <i class="fa-solid fa-house"></i>
         </a>

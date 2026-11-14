@@ -97,3 +97,13 @@
 #auth-logged-in p {
   font-weight: 400;
 }
+
+.cloudsync-gate-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 5, 5, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  z-index: 1000000;
+  pointer-events: all;
+}

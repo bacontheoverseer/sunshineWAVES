@@ -100,13 +100,15 @@ export default function AdminPanel() {
   });
 
   const [soundFilter, setSoundFilter] = useState("");
-  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isAddOpen, setIsAddOpen] = useState(true);
   const [addMode, setAddMode] = useState<"myinstants" | "upload" | "url">("myinstants");
   const [sfxVolume, setSfxVolume] = useState(1.0);
 
   // MyInstants Search State
   const [miQuery, setMiQuery] = useState("");
   const [miLoading, setMiLoading] = useState(false);
+  const [miSearchedOnce, setMiSearchedOnce] = useState(false);
+  const [miAddingUrl, setMiAddingUrl] = useState<string | null>(null);
   const [miResults, setMiResults] = useState<{ name: string; url: string; rawUrl?: string }[]>([]);
   const [miCustomName, setMiCustomName] = useState("");
 
@@ -286,59 +288,52 @@ export default function AdminPanel() {
     toast("success", "default sounds restored");
   };
 
-  // Search MyInstants (with automatic client-side CORS fallback if dev server wasn't restarted)
+  const runMyinstantsSearch = useCallback(
+    async (rawQuery: string) => {
+      const query = rawQuery.trim();
+      setMiLoading(true);
+      setMiSearchedOnce(true);
+      try {
+        const res = await fetch(
+          `/api/admin/myinstants-search?query=${encodeURIComponent(query)}`,
+          {
+            headers: adminKey ? { "x-admin-key": adminKey } : {},
+          }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data?.results)) {
+            setMiResults(data.results);
+            return;
+          }
+        }
+        toast("error", "failed to search myinstants");
+      } catch {
+        toast("error", "failed to search myinstants");
+      } finally {
+        setMiLoading(false);
+      }
+    },
+    [adminKey]
+  );
+
+  // Auto-load popular MyInstants sounds when the MyInstants add box is opened
+  useEffect(() => {
+    if (isOpen && isAuthenticated && isAddOpen && addMode === "myinstants" && !miSearchedOnce) {
+      void runMyinstantsSearch("");
+    }
+  }, [isOpen, isAuthenticated, isAddOpen, addMode, miSearchedOnce, runMyinstantsSearch]);
+
   const handleSearchMyinstants = async (e?: Event) => {
     if (e) e.preventDefault();
-    const query = miQuery.trim();
-    if (!query || !adminKey) return;
-    setMiLoading(true);
-    try {
-      const res = await fetch(`/api/admin/myinstants-search?query=${encodeURIComponent(query)}`, {
-        headers: { "x-admin-key": adminKey },
-      });
-      const ct = res.headers.get("content-type") || "";
-      if (res.ok && ct.includes("application/json")) {
-        const data = await res.json();
-        if (data.results) {
-          setMiResults(data.results);
-          setMiLoading(false);
-          return;
-        }
-      }
-
-      // Fallback to allorigins if backend route isn't loaded yet
-      const targetUrl = `https://www.myinstants.com/en/search/?name=${encodeURIComponent(query)}`;
-      const fallbackRes = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
-      if (fallbackRes.ok) {
-        const json = await fallbackRes.json();
-        const html = (json.contents || "") as string;
-        const regex = /<button class="small-button" onclick="play\('([^']+)'[^>]*title="Play ([^"]+) sound"/g;
-        const parsed: { name: string; url: string; rawUrl: string }[] = [];
-        let match;
-        while ((match = regex.exec(html)) !== null && parsed.length < 30) {
-          const soundPath = match[1];
-          const soundName = match[2].trim();
-          const fullUrl = soundPath.startsWith("http") ? soundPath : `https://www.myinstants.com${soundPath}`;
-          parsed.push({
-            name: soundName,
-            url: fullUrl,
-            rawUrl: fullUrl,
-          });
-        }
-        setMiResults(parsed);
-      } else {
-        toast("error", "failed to search myinstants");
-      }
-    } catch {
-      toast("error", "failed to search myinstants");
-    } finally {
-      setMiLoading(false);
-    }
+    await runMyinstantsSearch(miQuery);
   };
 
   const handleAddFromMyinstants = async (item: { name: string; url: string; rawUrl?: string }) => {
     const customTitle = (miCustomName.trim() || item.name).toLowerCase();
     let finalUrl = item.url;
+    const itemKey = item.rawUrl || item.url;
+    setMiAddingUrl(itemKey);
 
     // Cache locally via resolve-sound if available
     if (item.rawUrl) {
@@ -347,7 +342,7 @@ export default function AdminPanel() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-admin-key": adminKey,
+            ...(adminKey ? { "x-admin-key": adminKey } : {}),
           },
           body: JSON.stringify({ url: item.rawUrl }),
         });
@@ -367,7 +362,8 @@ export default function AdminPanel() {
     };
     setSounds((prev) => [newSound, ...prev]);
     setMiCustomName("");
-    toast("success", `added "${newSound.name}"`);
+    setMiAddingUrl(null);
+    toast("success", `added "${newSound.name}" to soundboard`);
   };
 
   const handleFileChange = (e: Event) => {
@@ -658,12 +654,12 @@ export default function AdminPanel() {
                             <input
                               type="text"
                               class="admin-input"
-                              placeholder="search myinstants (e.g. vine boom, fart, airhorn)..."
+                              placeholder="search myinstants (e.g. vine boom, fart, airhorn, goofy)..."
                               value={miQuery}
                               onInput={(e) => setMiQuery((e.target as HTMLInputElement).value)}
                             />
                             <button type="submit" class="admin-btn-primary" disabled={miLoading} style={{ flexShrink: 0 }}>
-                              {miLoading ? "..." : "search"}
+                              <i class="fa-solid fa-magnifying-glass" /> {miLoading ? "searching..." : "search"}
                             </button>
                           </form>
                           <input
@@ -673,32 +669,60 @@ export default function AdminPanel() {
                             value={miCustomName}
                             onInput={(e) => setMiCustomName((e.target as HTMLInputElement).value)}
                           />
-                          {miResults.length > 0 && (
-                            <div class="admin-search-results">
-                              {miResults.map((item, idx) => (
-                                <div key={idx} class="admin-search-row">
-                                  <span class="admin-search-name">{item.name.toLowerCase()}</span>
-                                  <div style={{ display: "flex", gap: "6px" }}>
-                                    <button
-                                      type="button"
-                                      class="admin-btn-secondary"
-                                      style={{ padding: "5px 10px", fontSize: "12px" }}
-                                      onClick={() => playAudioUrl(item.url, sfxVolume)}
-                                    >
-                                      test
-                                    </button>
-                                    <button
-                                      type="button"
-                                      class="admin-btn-primary"
-                                      style={{ padding: "5px 10px", fontSize: "12px" }}
-                                      onClick={() => handleAddFromMyinstants(item)}
-                                    >
-                                      add
-                                    </button>
-                                  </div>
-                                </div>
-                              ))}
+                          {miLoading ? (
+                            <div style={{ fontSize: "12px", color: "var(--color-sublabel)", marginTop: "10px", textAlign: "center" }}>
+                              searching myinstants...
                             </div>
+                          ) : miResults.length > 0 ? (
+                            <div class="admin-search-results">
+                              {miResults.map((item, idx) => {
+                                const isAddingThis = miAddingUrl === (item.rawUrl || item.url);
+                                return (
+                                  <div key={idx} class="admin-search-row">
+                                    <span class="admin-search-name" title={item.name}>{item.name.toLowerCase()}</span>
+                                    <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+                                      <button
+                                        type="button"
+                                        class="admin-btn-secondary"
+                                        style={{ padding: "5px 9px", fontSize: "11.5px" }}
+                                        onClick={() => playAudioUrl(item.url, sfxVolume)}
+                                      >
+                                        test
+                                      </button>
+                                      <button
+                                        type="button"
+                                        class="admin-btn-secondary"
+                                        style={{ padding: "5px 9px", fontSize: "11.5px" }}
+                                        onClick={() =>
+                                          void triggerRemote("sfx", {
+                                            url: item.url,
+                                            sound: item.name,
+                                            volume: sfxVolume,
+                                          })
+                                        }
+                                      >
+                                        play
+                                      </button>
+                                      <button
+                                        type="button"
+                                        class="admin-btn-primary"
+                                        style={{ padding: "5px 10px", fontSize: "11.5px" }}
+                                        disabled={isAddingThis}
+                                        onClick={() => handleAddFromMyinstants(item)}
+                                      >
+                                        {isAddingThis ? "..." : "add"}
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            miSearchedOnce && (
+                              <div style={{ fontSize: "12px", color: "var(--color-sublabel)", marginTop: "10px", textAlign: "center" }}>
+                                no myinstants sounds found for "{miQuery}"
+                              </div>
+                            )
                           )}
                         </div>
                       )}

@@ -82,9 +82,18 @@ function fetchWithTimeout(
 ): Promise<Response> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
+  const storedToken = localStorage.getItem("auth_token") || "";
+  const extraHeaders: Record<string, string> = {};
+  if (storedToken) {
+    extraHeaders["x-cloudsync-token"] = storedToken;
+  }
   return fetch(url, {
     credentials: "same-origin",
     ...options,
+    headers: {
+      ...extraHeaders,
+      ...((options.headers as Record<string, string>) || {}),
+    },
     signal: controller.signal,
   }).finally(() => clearTimeout(id));
 }
@@ -132,13 +141,40 @@ export class CloudSync {
     this.init();
   }
 
+  async enforceAuthGate(): Promise<void> {
+    if (this.isAuthenticated) {
+      const gate = document.getElementById("auth-gate-backdrop");
+      if (gate) gate.remove();
+      return;
+    }
+    if (!document.getElementById("auth-modal")) {
+      await this.createAuthModal();
+    }
+    let gate = document.getElementById("auth-gate-backdrop");
+    if (!gate) {
+      gate = document.createElement("div");
+      gate.id = "auth-gate-backdrop";
+      gate.className = "cloudsync-gate-backdrop";
+      document.body.appendChild(gate);
+    }
+    const modal = document.getElementById("auth-modal") as HTMLElement | null;
+    if (modal) {
+      modal.style.display = "flex";
+      modal.style.zIndex = "1000001";
+      modal.classList.remove("fade-out-prompt");
+      modal.classList.add("fade-in-prompt");
+    }
+    this.updateModalState();
+  }
+
   async init(): Promise<void> {
+    document.addEventListener("toggleAuthModal", () => this.toggleModal());
+    this.hookStorage();
+
     if (!this.user || Object.keys(this.user).length === 0) {
       this.isAuthenticated = false;
       this.updateModalState();
-
-      document.addEventListener("toggleAuthModal", () => this.toggleModal());
-      this.hookStorage();
+      await this.enforceAuthGate();
       return;
     }
 
@@ -156,12 +192,21 @@ export class CloudSync {
         this.user = data.user;
         this.isAuthenticated = true;
         localStorage.setItem("auth_user", JSON.stringify(this.user));
+        window.dispatchEvent(
+          new CustomEvent("cloudsync-auth-changed", { detail: this.user })
+        );
       } else {
         this.isAuthenticated = false;
         this.user = {};
         localStorage.removeItem("auth_user");
+        localStorage.removeItem("auth_token");
       }
       this.updateModalState();
+
+      if (!this.isAuthenticated) {
+        await this.enforceAuthGate();
+        return;
+      }
 
       if (this.isAuthenticated && metaRes.ok) {
         const metaData = await metaRes.json();
@@ -183,13 +228,13 @@ export class CloudSync {
       }
     } catch (e) {
       console.warn("[cloudsync] startup check failed", e);
+      if (!this.isAuthenticated) {
+        await this.enforceAuthGate();
+      }
     } finally {
       if (safetyTimer) clearTimeout(safetyTimer);
       if (needsLoadingScreen) this.hideLoadingScreen();
     }
-
-    document.addEventListener("toggleAuthModal", () => this.toggleModal());
-    this.hookStorage();
 
     if (this.isAuthenticated) {
       this.startPolling();
@@ -666,9 +711,12 @@ export class CloudSync {
     modal.id = "auth-modal";
     modal.className = "popup";
     modal.innerHTML = `
-                <h2 id="auth-title" style="text-align: center; margin-top: 0; margin-bottom: 15px;">login</h2>
+                <h2 id="auth-title" style="text-align: center; margin-top: 0; margin-bottom: 6px;">create account</h2>
+                <p id="auth-subtitle" style="text-align: center; font-size: 12px; color: var(--text-muted); margin-top: 0; margin-bottom: 16px;">
+                    sign up or log in with cloudsync to use operation cookie
+                </p>
                 <div id="auth-forms" class="input-container">
-                    <form id="login-form">
+                    <form id="login-form" style="display: none;">
                         <label>username</label>
                         <input type="text" id="login-username" placeholder="enter username" autocomplete="off">
 
@@ -679,11 +727,11 @@ export class CloudSync {
                         </div>
 
                         <div style="text-align: center;">
-                            <button type="submit" class="auth-action-btn" style="width: 50%; margin-top: 15px;">login</button>
+                            <button type="submit" class="auth-action-btn" style="width: 55%; margin-top: 15px;">login</button>
                         </div>
                     </form>
 
-                    <form id="register-form" style="display: none;">
+                    <form id="register-form" style="display: block;">
                         <label>username</label>
                         <input type="text" id="reg-username" placeholder="create username" autocomplete="off">
                         <div id="reg-username-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">3-20 chars, letters/numbers</div>
@@ -696,15 +744,15 @@ export class CloudSync {
                         <div id="reg-password-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">8+ chars, 1 number, 1 symbol</div>
 
                         <div style="text-align: center;">
-                            <button type="submit" class="auth-action-btn" style="width: 60%; margin-top: 15px;">create account</button>
-                            <p style="font-size: 11.5px; color: #ff5555; margin-top: 10px; max-width: 80%; margin-left: auto; margin-right: auto;">
+                            <button type="submit" class="auth-action-btn" style="width: 65%; margin-top: 15px;">sign up for cloudsync</button>
+                            <p style="font-size: 11.5px; color: #ff5555; margin-top: 10px; max-width: 85%; margin-left: auto; margin-right: auto;">
                                 save your password somewhere safe! all data will be forever lost if you forget your password
                             </p>
                         </div>
                     </form>
 
                     <div style="margin-top: 15px; margin-bottom: -20px; font-size: 13px; color: var(--text-muted); text-align: center;" id="auth-switch-container">
-                        <span id="auth-prompt-text">don't have an account?</span> <span id="auth-action-text" class="hover-link">create an account!</span>
+                        <span id="auth-prompt-text">already have an account?</span> <span id="auth-action-text" class="hover-link">login!</span>
                     </div>
                     <div id="auth-error" style="color: #ff5555; margin-top: 10px; font-size: 13px; min-height: 18px; text-align: center;"></div>
                 </div>
@@ -738,7 +786,10 @@ export class CloudSync {
   attachModalListeners(modal: HTMLElement): void {
     (modal.querySelector("#close-auth-modal") as HTMLElement).addEventListener(
       "click",
-      () => this.toggleModal(),
+      () => {
+        if (!this.isAuthenticated) return;
+        void this.toggleModal();
+      },
     );
     const loginForm = modal.querySelector<HTMLFormElement>("#login-form")!;
     const regForm = modal.querySelector<HTMLFormElement>("#register-form")!;
@@ -776,7 +827,7 @@ export class CloudSync {
       const val = regPassword.value;
       const len = val.length;
       const hasNum = /[0-9]/.test(val);
-      const hasSym = /[!@#$%^&*]/.test(val);
+      const hasSym = /[!@#$%^&*_\-+=?.]/.test(val);
 
       if (len === 0) {
         regPasswordFeedback.textContent = "8+ chars, 1 number, 1 symbol";
@@ -785,13 +836,13 @@ export class CloudSync {
         regPasswordFeedback.textContent = `${len}/8 chars`;
         regPasswordFeedback.style.color = "#ff5555";
       } else if (!hasNum) {
-        regPasswordFeedback.textContent = "needs a number";
-        regPasswordFeedback.style.color = "#ff5555";
+        regPasswordFeedback.textContent = "tip: add a number";
+        regPasswordFeedback.style.color = "#facc15";
       } else if (!hasSym) {
-        regPasswordFeedback.textContent = "needs a symbol (!@#$%^&*)";
-        regPasswordFeedback.style.color = "#ff5555";
+        regPasswordFeedback.textContent = "looks good (8+ chars)";
+        regPasswordFeedback.style.color = "#55ff55";
       } else {
-        regPasswordFeedback.textContent = "looks good";
+        regPasswordFeedback.textContent = "strong password - looks good";
         regPasswordFeedback.style.color = "#55ff55";
       }
     });
@@ -838,15 +889,17 @@ export class CloudSync {
     });
 
     document.addEventListener("click", (e) => {
+      if (!this.isAuthenticated) return;
       const overlay = document.getElementById("overlay");
       if (overlay && e.target === overlay && modal.style.display === "flex") {
-        this.toggleModal();
+        void this.toggleModal();
       }
     });
 
     document.addEventListener("keydown", (e) => {
+      if (!this.isAuthenticated) return;
       if (e.key === "Escape" && modal.style.display === "flex") {
-        this.toggleModal();
+        void this.toggleModal();
       }
     });
 
@@ -879,7 +932,12 @@ export class CloudSync {
     }
 
     const modal = document.getElementById("auth-modal") as HTMLElement;
-    const overlay = document.getElementById("overlay") as HTMLElement;
+    const overlay = document.getElementById("overlay") as HTMLElement | null;
+
+    if (!this.isAuthenticated) {
+      await this.enforceAuthGate();
+      return;
+    }
 
     if (
       modal.style.display === "flex" &&
@@ -887,7 +945,7 @@ export class CloudSync {
     ) {
       modal.classList.remove("fade-in-prompt");
       modal.classList.add("fade-out-prompt");
-      overlay.classList.remove("show");
+      overlay?.classList.remove("show");
       setTimeout(() => {
         modal.style.display = "none";
         modal.classList.remove("fade-out-prompt");
@@ -896,7 +954,7 @@ export class CloudSync {
       modal.style.display = "flex";
       modal.classList.remove("fade-out-prompt");
       modal.classList.add("fade-in-prompt");
-      overlay.classList.add("show");
+      overlay?.classList.add("show");
     }
   }
 
@@ -905,16 +963,28 @@ export class CloudSync {
     const formsView = document.getElementById("auth-forms");
     const userDisplay = document.getElementById("auth-user-display");
     const authTitle = document.getElementById("auth-title");
+    const authSubtitle = document.getElementById("auth-subtitle");
+    const closeBtn = document.getElementById("close-auth-modal");
+    const regForm = document.getElementById("register-form");
 
     if (this.isAuthenticated) {
       if (loggedInView) loggedInView.style.display = "block";
       if (formsView) formsView.style.display = "none";
       if (userDisplay) userDisplay.textContent = this.user.username ?? "";
       if (authTitle) authTitle.textContent = "cloud sync";
+      if (authSubtitle) authSubtitle.style.display = "none";
+      if (closeBtn) closeBtn.style.display = "inline-flex";
+      const gate = document.getElementById("auth-gate-backdrop");
+      if (gate) gate.remove();
     } else {
       if (loggedInView) loggedInView.style.display = "none";
       if (formsView) formsView.style.display = "block";
-      if (authTitle) authTitle.textContent = "login";
+      if (authTitle) {
+        authTitle.textContent =
+          regForm && regForm.style.display !== "none" ? "create account" : "login";
+      }
+      if (authSubtitle) authSubtitle.style.display = "block";
+      if (closeBtn) closeBtn.style.display = "none";
     }
 
     const statusEl = document.querySelector<HTMLElement>("#auth-status");
@@ -981,21 +1051,21 @@ export class CloudSync {
       if (res.ok) {
         if (toastController) toastController.hide();
         this.setSession(data as unknown as SessionData);
-        this.toggleModal();
+        await this.toggleModal();
         await this.restoreData();
       } else {
         if (toastController) toastController.hide();
         const msg = (data.error as string) || "login failed!";
+        this.showError(msg);
         if (window.showToast)
           window.showToast("error", msg, "warning");
-        else this.showError(msg);
       }
     } catch (err) {
       if (toastController) toastController.hide();
       const msg = err instanceof Error ? err.message : "connection error!";
+      this.showError(msg);
       if (window.showToast)
         window.showToast("error", msg, "warning");
-      else this.showError(msg);
       console.error(err);
     }
   }
@@ -1010,13 +1080,13 @@ export class CloudSync {
     ).value;
 
     if (!username || !password) {
+      this.showError("please fill in both fields!");
       if (window.showToast)
         window.showToast(
           "error",
           "please fill in both username and password!",
           "triangle-exclamation",
         );
-      else this.showError("please fill in both fields!");
       return;
     }
 
@@ -1047,7 +1117,7 @@ export class CloudSync {
       if (res.ok) {
         if (toastController) toastController.hide();
         this.setSession(data as unknown as SessionData);
-        this.toggleModal();
+        await this.toggleModal();
         this.syncMeta.dirty = true;
         this._dirtyKeys.clear();
         this.saveMeta();
@@ -1055,16 +1125,16 @@ export class CloudSync {
       } else {
         if (toastController) toastController.hide();
         const msg = (data.error as string) || "registration failed!";
+        this.showError(msg);
         if (window.showToast)
           window.showToast("error", msg, "warning");
-        else this.showError(msg);
       }
     } catch (err) {
       if (toastController) toastController.hide();
       const msg = err instanceof Error ? err.message : "connection error!";
+      this.showError(msg);
       if (window.showToast)
         window.showToast("error", msg, "warning");
-      else this.showError(msg);
     }
   }
 
@@ -1072,8 +1142,16 @@ export class CloudSync {
     this.isAuthenticated = true;
     this.user = data.user;
     localStorage.setItem("auth_user", JSON.stringify(this.user));
+    if (typeof data.token === "string" && data.token) {
+      localStorage.setItem("auth_token", data.token);
+    }
+    const gate = document.getElementById("auth-gate-backdrop");
+    if (gate) gate.remove();
     this.updateModalState();
     this.startPolling();
+    window.dispatchEvent(
+      new CustomEvent("cloudsync-auth-changed", { detail: this.user })
+    );
   }
 
   async logout(): Promise<void> {

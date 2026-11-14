@@ -28,6 +28,253 @@ interface SpaceVoiceMember {
   deafened: boolean;
 }
 
+interface CloudPlayParty {
+  code: string;
+  gameTitle: string;
+  gameUrl: string;
+  host: {
+    clientId: string;
+    username: string;
+    role: "wasd" | "arrows" | "all";
+  };
+  guest: {
+    clientId: string;
+    username: string;
+    role: "arrows" | "wasd" | "all";
+    joinedAt?: number;
+  } | null;
+  settings: {
+    hostRole: "wasd" | "arrows" | "all";
+    guestRole: "arrows" | "wasd" | "all";
+    remapGuestWasdToArrows: boolean;
+  };
+}
+
+interface RemoteKeyPayload {
+  action: "keydown" | "keyup";
+  key: string;
+  code: string;
+  keyCode: number;
+  label: string;
+}
+
+const KEY_CODE_TABLE: Record<string, { key: string; code: string; keyCode: number; label: string }> = {
+  KeyW: { key: "w", code: "KeyW", keyCode: 87, label: "W" },
+  KeyA: { key: "a", code: "KeyA", keyCode: 65, label: "A" },
+  KeyS: { key: "s", code: "KeyS", keyCode: 83, label: "S" },
+  KeyD: { key: "d", code: "KeyD", keyCode: 68, label: "D" },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38, label: "↑" },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40, label: "↓" },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, label: "←" },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39, label: "→" },
+  Space: { key: " ", code: "Space", keyCode: 32, label: "SPACE" },
+  Enter: { key: "Enter", code: "Enter", keyCode: 13, label: "ENTER" },
+  ShiftLeft: { key: "Shift", code: "ShiftLeft", keyCode: 16, label: "SHIFT" },
+  ShiftRight: { key: "Shift", code: "ShiftRight", keyCode: 16, label: "R-SHIFT" },
+  KeyE: { key: "e", code: "KeyE", keyCode: 69, label: "E" },
+  KeyQ: { key: "q", code: "KeyQ", keyCode: 81, label: "Q" },
+  KeyF: { key: "f", code: "KeyF", keyCode: 70, label: "F" },
+  KeyR: { key: "r", code: "KeyR", keyCode: 82, label: "R" },
+  KeyI: { key: "i", code: "KeyI", keyCode: 73, label: "I" },
+  KeyO: { key: "o", code: "KeyO", keyCode: 79, label: "O" },
+  KeyJ: { key: "j", code: "KeyJ", keyCode: 74, label: "J" },
+  KeyK: { key: "k", code: "KeyK", keyCode: 75, label: "K" },
+  KeyL: { key: "l", code: "KeyL", keyCode: 76, label: "L" },
+  KeyU: { key: "u", code: "KeyU", keyCode: 85, label: "U" },
+  KeyP: { key: "p", code: "KeyP", keyCode: 80, label: "P" },
+  KeyM: { key: "m", code: "KeyM", keyCode: 77, label: "M" },
+  KeyN: { key: "n", code: "KeyN", keyCode: 78, label: "N" },
+  Slash: { key: "/", code: "Slash", keyCode: 191, label: "/" },
+  Period: { key: ".", code: "Period", keyCode: 190, label: "." },
+  Comma: { key: ",", code: "Comma", keyCode: 188, label: "," },
+  Digit1: { key: "1", code: "Digit1", keyCode: 49, label: "1" },
+  Digit2: { key: "2", code: "Digit2", keyCode: 50, label: "2" },
+  Digit3: { key: "3", code: "Digit3", keyCode: 51, label: "3" },
+};
+
+const WASD_CODES = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyE", "KeyQ", "ShiftLeft", "KeyF", "KeyR", "Digit1", "Digit2"]);
+const ARROW_CODES = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Enter",
+  "ShiftRight",
+  "Slash",
+  "Period",
+  "Comma",
+  "KeyM",
+  "KeyN",
+  "KeyI",
+  "KeyO",
+  "KeyJ",
+  "KeyK",
+  "KeyL",
+  "KeyU",
+  "KeyP",
+]);
+
+function mapGuestKeyEvent(
+  e: KeyboardEvent,
+  guestRole: "arrows" | "wasd" | "all",
+  remapWasdToArrows: boolean
+): { key: string; code: string; keyCode: number; label: string } | null {
+  let code = e.code;
+  if (!code) {
+    const k = e.key.toLowerCase();
+    if (k === "w") code = "KeyW";
+    else if (k === "a") code = "KeyA";
+    else if (k === "s") code = "KeyS";
+    else if (k === "d") code = "KeyD";
+    else if (e.key === "ArrowUp") code = "ArrowUp";
+    else if (e.key === "ArrowDown") code = "ArrowDown";
+    else if (e.key === "ArrowLeft") code = "ArrowLeft";
+    else if (e.key === "ArrowRight") code = "ArrowRight";
+    else if (e.key === " ") code = "Space";
+    else if (e.key === "Enter") code = "Enter";
+  }
+
+  // If comfort remap is enabled, Guest pressing W/A/S/D gets sent as ArrowUp/Left/Down/Right!
+  if (remapWasdToArrows) {
+    if (code === "KeyW") return KEY_CODE_TABLE.ArrowUp;
+    if (code === "KeyA") return KEY_CODE_TABLE.ArrowLeft;
+    if (code === "KeyS") return KEY_CODE_TABLE.ArrowDown;
+    if (code === "KeyD") return KEY_CODE_TABLE.ArrowRight;
+    if (code === "Space") return KEY_CODE_TABLE.Enter;
+  }
+
+  if (guestRole === "arrows" && !ARROW_CODES.has(code)) return null;
+  if (guestRole === "wasd" && !WASD_CODES.has(code)) return null;
+
+  if (KEY_CODE_TABLE[code]) {
+    return KEY_CODE_TABLE[code];
+  }
+  if (guestRole === "all" && e.key && e.key.length <= 12) {
+    const kc = e.keyCode || e.which || e.key.toUpperCase().charCodeAt(0) || 0;
+    return {
+      key: e.key,
+      code: code || e.key,
+      keyCode: kc,
+      label: e.key === " " ? "SPACE" : e.key.toUpperCase(),
+    };
+  }
+  return null;
+}
+
+function getHostGameContexts(): {
+  windows: Window[];
+  documents: Document[];
+  canvases: HTMLCanvasElement[];
+} {
+  const windows: Window[] = [];
+  const documents: Document[] = [];
+  const canvases: HTMLCanvasElement[] = [];
+
+  const collectFromIframe = (iframe: HTMLIFrameElement | null, depth = 0) => {
+    if (!iframe || depth > 3) return;
+    try {
+      const win = iframe.contentWindow;
+      const doc = iframe.contentDocument || win?.document;
+      if (win && !windows.includes(win)) windows.push(win);
+      if (doc && !documents.includes(doc)) {
+        documents.push(doc);
+        const foundCanvases = Array.from(doc.querySelectorAll("canvas"));
+        for (const c of foundCanvases) {
+          if (c.width > 40 && c.height > 40 && !canvases.includes(c)) {
+            canvases.push(c);
+          }
+        }
+        const innerIframes = Array.from(doc.querySelectorAll("iframe"));
+        for (const inner of innerIframes) {
+          collectFromIframe(inner, depth + 1);
+        }
+      }
+    } catch {
+      // Cross-origin inner iframe if any
+    }
+  };
+
+  const activeTab = store.getActiveTab();
+  if (activeTab?.iframe) {
+    collectFromIframe(activeTab.iframe, 0);
+  }
+  const studioIframe = document.querySelector<HTMLIFrameElement>(
+    "#studio-play-iframe, .studio-play-iframe, #iframe-container iframe.active"
+  );
+  if (studioIframe) {
+    collectFromIframe(studioIframe, 0);
+  }
+
+  // Also check any studio canvas directly in document
+  const mainStudioCanvases = Array.from(
+    document.querySelectorAll<HTMLCanvasElement>(".studio-canvas-stage canvas, #studio-page canvas")
+  );
+  for (const c of mainStudioCanvases) {
+    if (c.width > 40 && c.height > 40 && !canvases.includes(c)) {
+      canvases.push(c);
+    }
+  }
+
+  canvases.sort((a, b) => b.width * b.height - a.width * a.height);
+  return { windows, documents, canvases };
+}
+
+function injectRemoteKeyIntoHostGame(
+  action: "keydown" | "keyup",
+  payload: { key: string; code: string; keyCode: number }
+) {
+  const { windows, documents, canvases } = getHostGameContexts();
+
+  const createSynthKeyEvent = (targetWin: Window) => {
+    const EventCtor = (targetWin as unknown as { KeyboardEvent?: typeof KeyboardEvent }).KeyboardEvent || KeyboardEvent;
+    const ev = new EventCtor(action, {
+      key: payload.key,
+      code: payload.code,
+      keyCode: payload.keyCode,
+      which: payload.keyCode,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: targetWin,
+    });
+    try {
+      Object.defineProperty(ev, "keyCode", { get: () => payload.keyCode });
+      Object.defineProperty(ev, "which", { get: () => payload.keyCode });
+      Object.defineProperty(ev, "charCode", { get: () => payload.keyCode });
+    } catch {}
+    return ev;
+  };
+
+  for (const canvas of canvases) {
+    try {
+      const win = canvas.ownerDocument?.defaultView || window;
+      canvas.dispatchEvent(createSynthKeyEvent(win));
+    } catch {}
+  }
+
+  for (const doc of documents) {
+    try {
+      const win = doc.defaultView || window;
+      if (doc.body) doc.body.dispatchEvent(createSynthKeyEvent(win));
+      doc.dispatchEvent(createSynthKeyEvent(win));
+    } catch {}
+  }
+
+  for (const win of windows) {
+    try {
+      win.dispatchEvent(createSynthKeyEvent(win));
+    } catch {}
+  }
+
+  // If no iframe targets found (e.g. Studio native canvas), also dispatch on main window
+  if (windows.length === 0 && documents.length === 0) {
+    try {
+      window.dispatchEvent(createSynthKeyEvent(window));
+      document.dispatchEvent(createSynthKeyEvent(window));
+    } catch {}
+  }
+}
+
 const PALETTE = [
   "#b45309",
   "#4338ca",
@@ -46,15 +293,15 @@ function stringToColor(str: string): string {
 }
 
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
-  const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
+  const w = window as unknown as { showToast?: (t: string, m?: string) => void };
   if (typeof w.showToast === "function") {
-    w.showToast(message, type);
+    w.showToast(type, message);
   }
 }
 
 export default function GameSpaceModal() {
   const [isOpen, setIsOpen] = useState(false);
-  const [activeTabMode, setActiveTabMode] = useState<"leaderboard" | "space">("leaderboard");
+  const [activeTabMode, setActiveTabMode] = useState<"leaderboard" | "space" | "cloudplay">("leaderboard");
   const [overrideGameName, setOverrideGameName] = useState<string | null>(null);
 
   const tabs = useStore((s) => s.tabs);
@@ -91,6 +338,45 @@ export default function GameSpaceModal() {
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
   const [voiceMembers, setVoiceMembers] = useState<SpaceVoiceMember[]>([]);
+
+  // --- CloudPlay 2-Player Party & Remote Keybind / Stream State ---
+  const [cloudParty, setCloudParty] = useState<CloudPlayParty | null>(null);
+  const [joinCodeInput, setJoinCodeInput] = useState("");
+  const [hostRolePref, setHostRolePref] = useState<"wasd" | "arrows" | "all">("wasd");
+  const [guestRolePref, setGuestRolePref] = useState<"arrows" | "wasd" | "all">("arrows");
+  const [remapGuestWasd, setRemapGuestWasd] = useState(false);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [guestStageFull, setGuestStageFull] = useState(false);
+  const [remoteVideoActive, setRemoteVideoActive] = useState(false);
+  const [latestFrameUrl, setLatestFrameUrl] = useState<string>("");
+  const [hostHeldKeys, setHostHeldKeys] = useState<string[]>([]);
+  const [guestHeldKeys, setGuestHeldKeys] = useState<string[]>([]);
+  const [p2pConnected, setP2pConnected] = useState(false);
+
+  const cloudPartyRef = useRef<CloudPlayParty | null>(null);
+  cloudPartyRef.current = cloudParty;
+  const cloudPcRef = useRef<RTCPeerConnection | null>(null);
+  const cloudDcRef = useRef<RTCDataChannel | null>(null);
+  const cloudBcRef = useRef<BroadcastChannel | null>(null);
+  const guestVideoRef = useRef<HTMLVideoElement | null>(null);
+  const guestRemoteStreamRef = useRef<MediaStream | null>(null);
+  const remoteHeldSetRef = useRef<Map<string, RemoteKeyPayload>>(new Map());
+  const localHeldSetRef = useRef<Set<string>>(new Set());
+  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const myUsername = getActiveUser();
+  const isCloudHost = Boolean(
+    cloudParty &&
+      (cloudParty.host.clientId === getClientId() ||
+        cloudParty.host.username.toLowerCase() === myUsername.toLowerCase())
+  );
+  const isCloudGuest = Boolean(
+    cloudParty &&
+      !isCloudHost &&
+      cloudParty.guest &&
+      (cloudParty.guest.clientId === getClientId() ||
+        cloudParty.guest.username.toLowerCase() === myUsername.toLowerCase())
+  );
 
   const inSpaceVoiceRef = useRef(false);
   const isMutedRef = useRef(false);
@@ -339,8 +625,14 @@ export default function GameSpaceModal() {
       } else {
         setOverrideGameName(null);
       }
-      if (detail?.tab === "space" || detail?.tab === "leaderboard") {
+      if (
+        detail?.tab === "space" ||
+        detail?.tab === "leaderboard" ||
+        detail?.tab === "cloudplay"
+      ) {
         setActiveTabMode(detail.tab);
+        setIsOpen(true);
+        return;
       }
       setIsOpen((prev) => !prev);
     };
@@ -626,59 +918,1380 @@ export default function GameSpaceModal() {
     notifyToast(`connected to ${activeGameTitle} space voice!`, "success");
   };
 
+  // --- CloudPlay Signaling, WebRTC Stream, & Remote Keybind Injection ---
+  const cleanupCloudRtc = useCallback(() => {
+    for (const keyPayload of remoteHeldSetRef.current.values()) {
+      injectRemoteKeyIntoHostGame("keyup", keyPayload);
+    }
+    remoteHeldSetRef.current.clear();
+    localHeldSetRef.current.clear();
+    setHostHeldKeys([]);
+    setGuestHeldKeys([]);
+    setP2pConnected(false);
+    setRemoteVideoActive(false);
+
+    if (cloudDcRef.current) {
+      try {
+        cloudDcRef.current.close();
+      } catch {}
+      cloudDcRef.current = null;
+    }
+    if (cloudPcRef.current) {
+      try {
+        cloudPcRef.current.close();
+      } catch {}
+      cloudPcRef.current = null;
+    }
+    guestRemoteStreamRef.current = null;
+  }, []);
+
+  const sendCloudSignal = useCallback(
+    (signalType: string, data: Record<string, unknown>, codeOverride?: string) => {
+      const code = codeOverride || cloudPartyRef.current?.code;
+      if (!code) return;
+      const fromClientId = getClientId();
+
+      // Send over fast DataChannel if open and it's a KEY or FRAME packet
+      if (
+        (signalType === "KEY" || signalType === "FRAME") &&
+        cloudDcRef.current &&
+        cloudDcRef.current.readyState === "open"
+      ) {
+        try {
+          cloudDcRef.current.send(
+            JSON.stringify({ type: "CLOUDPLAY_DC", signalType, fromClientId, data })
+          );
+          return;
+        } catch {}
+      }
+
+      // Broadcast over local channel for instant same-machine multi-tab testing
+      try {
+        cloudBcRef.current?.postMessage({
+          type: "cloudplay-event",
+          code,
+          eventType: "SIGNAL",
+          signalType,
+          fromClientId,
+          data,
+        });
+      } catch {}
+
+      // Relay over server SSE to the remote computer
+      fetch("/api/cloudplay/signal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, fromClientId, signalType, data }),
+      }).catch(() => {});
+    },
+    []
+  );
+
+  const handleIncomingKeyFromGuest = useCallback((payload: RemoteKeyPayload) => {
+    if (!payload || !payload.code) return;
+    if (payload.action === "keydown") {
+      remoteHeldSetRef.current.set(payload.code, payload);
+    } else {
+      remoteHeldSetRef.current.delete(payload.code);
+    }
+    setGuestHeldKeys(Array.from(remoteHeldSetRef.current.values()).map((k) => k.label));
+    injectRemoteKeyIntoHostGame(payload.action, payload);
+  }, []);
+
+  const setupCloudWebRtc = useCallback(
+    async (asHost: boolean, code: string) => {
+      cleanupCloudRtc();
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+        ],
+      });
+      cloudPcRef.current = pc;
+
+      pc.onicecandidate = (ev) => {
+        if (ev.candidate) {
+          sendCloudSignal("ICE", { candidate: ev.candidate.toJSON() }, code);
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const st = pc.connectionState;
+        setP2pConnected(st === "connected");
+      };
+
+      const bindDataChannel = (dc: RTCDataChannel) => {
+        cloudDcRef.current = dc;
+        dc.onopen = () => setP2pConnected(true);
+        dc.onclose = () => setP2pConnected(false);
+        dc.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg?.signalType === "KEY" && msg.data) {
+              handleIncomingKeyFromGuest(msg.data as RemoteKeyPayload);
+            } else if (msg?.signalType === "FRAME" && msg.data?.frame) {
+              setLatestFrameUrl(String(msg.data.frame));
+            }
+          } catch {}
+        };
+      };
+
+      if (asHost) {
+        const dc = pc.createDataChannel("cloudplay_io", { ordered: false, maxRetransmits: 0 });
+        bindDataChannel(dc);
+
+        // Attach live canvas video stream from the Host's single game instance if available
+        try {
+          const { canvases } = getHostGameContexts();
+          const primaryCanvas = canvases[0] as
+            | (HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream })
+            | undefined;
+          if (primaryCanvas && typeof primaryCanvas.captureStream === "function") {
+            const stream = primaryCanvas.captureStream(30);
+            for (const track of stream.getTracks()) {
+              pc.addTrack(track, stream);
+            }
+          }
+        } catch {}
+
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          if (pc.localDescription) {
+            sendCloudSignal("OFFER", { sdp: pc.localDescription.toJSON() }, code);
+          }
+        } catch {}
+      } else {
+        pc.ondatachannel = (ev) => bindDataChannel(ev.channel);
+        pc.ontrack = (ev) => {
+          const stream = ev.streams[0];
+          if (stream) {
+            guestRemoteStreamRef.current = stream;
+            setRemoteVideoActive(true);
+            if (guestVideoRef.current) {
+              guestVideoRef.current.srcObject = stream;
+              guestVideoRef.current.play().catch(() => {});
+            }
+          }
+        };
+      }
+
+      return pc;
+    },
+    [cleanupCloudRtc, handleIncomingKeyFromGuest, sendCloudSignal]
+  );
+
+  // Listen for CloudPlay SSE & BroadcastChannel events
+  useEffect(() => {
+    const handleCloudEvent = async (detail: Record<string, unknown>) => {
+      const current = cloudPartyRef.current;
+      if (!detail || !current) return;
+      if (String(detail.code || "").toUpperCase() !== current.code.toUpperCase()) return;
+
+      const myId = getClientId();
+      const myName = getActiveUser().toLowerCase();
+      const amHost =
+        current.host.clientId === myId || current.host.username.toLowerCase() === myName;
+
+      const eventType = String(detail.eventType || "");
+      if (eventType === "PARTY_UPDATED" && detail.party) {
+        const updated = detail.party as CloudPlayParty;
+        setCloudParty(updated);
+        setHostRolePref(updated.settings.hostRole);
+        setGuestRolePref(updated.settings.guestRole);
+        setRemapGuestWasd(updated.settings.remapGuestWasdToArrows);
+        if (detail.joinedUser && amHost) {
+          notifyToast(`@${detail.joinedUser} joined your cloudplay party!`, "success");
+          void setupCloudWebRtc(true, updated.code);
+        }
+      } else if (eventType === "GUEST_LEFT" && detail.party) {
+        setCloudParty(detail.party as CloudPlayParty);
+        cleanupCloudRtc();
+        notifyToast(`@${detail.leftUser || "player 2"} left the party`, "info");
+      } else if (eventType === "PARTY_CLOSED") {
+        cleanupCloudRtc();
+        setCloudParty(null);
+        setGuestStageFull(false);
+        notifyToast(String(detail.reason || "cloudplay party ended"), "info");
+      } else if (eventType === "SIGNAL") {
+        if (detail.fromClientId === myId) return;
+        const sigType = String(detail.signalType || "");
+        const sigData = (detail.data || {}) as Record<string, unknown>;
+
+        if (sigType === "KEY" && amHost) {
+          handleIncomingKeyFromGuest(sigData as unknown as RemoteKeyPayload);
+        } else if (sigType === "FRAME" && !amHost && sigData.frame) {
+          setLatestFrameUrl(String(sigData.frame));
+        } else if (sigType === "HOST_KEYS" && !amHost && Array.isArray(sigData.keys)) {
+          setHostHeldKeys(sigData.keys as string[]);
+        } else if (sigType === "GUEST_READY" && amHost) {
+          void setupCloudWebRtc(true, current.code);
+        } else if (sigType === "OFFER" && !amHost && sigData.sdp) {
+          try {
+            const pc = await setupCloudWebRtc(false, current.code);
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(sigData.sdp as RTCSessionDescriptionInit)
+            );
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            if (pc.localDescription) {
+              sendCloudSignal("ANSWER", { sdp: pc.localDescription.toJSON() }, current.code);
+            }
+          } catch {}
+        } else if (sigType === "ANSWER" && amHost && sigData.sdp && cloudPcRef.current) {
+          try {
+            await cloudPcRef.current.setRemoteDescription(
+              new RTCSessionDescription(sigData.sdp as RTCSessionDescriptionInit)
+            );
+          } catch {}
+        } else if (sigType === "ICE" && sigData.candidate && cloudPcRef.current) {
+          try {
+            await cloudPcRef.current.addIceCandidate(
+              new RTCIceCandidate(sigData.candidate as RTCIceCandidateInit)
+            );
+          } catch {}
+        }
+      }
+    };
+
+    const onSseCloud = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) void handleCloudEvent(detail);
+    };
+
+    window.addEventListener("sunshine-cloudplay-event", onSseCloud);
+
+    try {
+      const bc = new BroadcastChannel("cookie_cloudplay_v1_channel");
+      bc.onmessage = (ev) => {
+        if (ev.data?.type === "cloudplay-event") {
+          void handleCloudEvent(ev.data);
+        }
+      };
+      cloudBcRef.current = bc;
+    } catch {}
+
+    return () => {
+      window.removeEventListener("sunshine-cloudplay-event", onSseCloud);
+      cloudBcRef.current?.close();
+    };
+  }, [cleanupCloudRtc, handleIncomingKeyFromGuest, sendCloudSignal, setupCloudWebRtc]);
+
+  // Attach MediaStream to guest <video> whenever it mounts
+  useEffect(() => {
+    if (guestVideoRef.current && guestRemoteStreamRef.current) {
+      guestVideoRef.current.srcObject = guestRemoteStreamRef.current;
+      guestVideoRef.current.play().catch(() => {});
+    }
+  }, [remoteVideoActive, guestStageFull, isOpen, activeTabMode]);
+
+  // Host: Capture & stream frames from the single game instance to Guest + track Host keys
+  useEffect(() => {
+    if (!cloudParty || !isCloudHost || !cloudParty.guest) return;
+
+    const frameInterval = window.setInterval(() => {
+      try {
+        const { canvases } = getHostGameContexts();
+        const srcCanvas = canvases[0];
+        if (!srcCanvas) return;
+
+        if (!offscreenCanvasRef.current) {
+          const oc = document.createElement("canvas");
+          oc.width = 480;
+          oc.height = 270;
+          offscreenCanvasRef.current = oc;
+        }
+        const oc = offscreenCanvasRef.current;
+        const ctx = oc.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(srcCanvas, 0, 0, oc.width, oc.height);
+        const frameDataUrl = oc.toDataURL("image/jpeg", 0.5);
+        if (frameDataUrl && frameDataUrl.length > 100) {
+          sendCloudSignal("FRAME", { frame: frameDataUrl });
+        }
+      } catch {
+        // Canvas may be tainted if non-same-origin
+      }
+    }, 160);
+
+    const onHostKeyDown = (e: KeyboardEvent) => {
+      const mapped = KEY_CODE_TABLE[e.code];
+      if (!mapped) return;
+      if (!localHeldSetRef.current.has(mapped.label)) {
+        localHeldSetRef.current.add(mapped.label);
+        const list = Array.from(localHeldSetRef.current);
+        setHostHeldKeys(list);
+      }
+    };
+    const onHostKeyUp = (e: KeyboardEvent) => {
+      const mapped = KEY_CODE_TABLE[e.code];
+      if (!mapped) return;
+      if (localHeldSetRef.current.has(mapped.label)) {
+        localHeldSetRef.current.delete(mapped.label);
+        const list = Array.from(localHeldSetRef.current);
+        setHostHeldKeys(list);
+      }
+    };
+
+    window.addEventListener("keydown", onHostKeyDown, true);
+    window.addEventListener("keyup", onHostKeyUp, true);
+
+    return () => {
+      window.clearInterval(frameInterval);
+      window.removeEventListener("keydown", onHostKeyDown, true);
+      window.removeEventListener("keyup", onHostKeyUp, true);
+    };
+  }, [cloudParty, isCloudHost, sendCloudSignal]);
+
+  // Guest: Capture keybinds on Guest's computer and send them to Host's single game instance!
+  useEffect(() => {
+    if (!cloudParty || !isCloudGuest) return;
+
+    const isControllerActive =
+      guestStageFull || (isOpen && activeTabMode === "cloudplay");
+    if (!isControllerActive) return;
+
+    const guestRole = cloudParty.settings.guestRole || "arrows";
+    const remap = Boolean(cloudParty.settings.remapGuestWasdToArrows);
+
+    const onGuestKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT")
+      ) {
+        return;
+      }
+
+      const mapped = mapGuestKeyEvent(e, guestRole, remap);
+      if (!mapped) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (localHeldSetRef.current.has(mapped.code)) return;
+      localHeldSetRef.current.add(mapped.code);
+      setGuestHeldKeys(
+        Array.from(localHeldSetRef.current).map(
+          (c) => KEY_CODE_TABLE[c]?.label || c
+        )
+      );
+
+      sendCloudSignal("KEY", {
+        action: "keydown",
+        key: mapped.key,
+        code: mapped.code,
+        keyCode: mapped.keyCode,
+        label: mapped.label,
+      });
+    };
+
+    const onGuestKeyUp = (e: KeyboardEvent) => {
+      const mapped = mapGuestKeyEvent(e, guestRole, remap);
+      if (!mapped) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      localHeldSetRef.current.delete(mapped.code);
+      setGuestHeldKeys(
+        Array.from(localHeldSetRef.current).map(
+          (c) => KEY_CODE_TABLE[c]?.label || c
+        )
+      );
+
+      sendCloudSignal("KEY", {
+        action: "keyup",
+        key: mapped.key,
+        code: mapped.code,
+        keyCode: mapped.keyCode,
+        label: mapped.label,
+      });
+    };
+
+    const onWindowBlur = () => {
+      for (const code of localHeldSetRef.current) {
+        const info = KEY_CODE_TABLE[code];
+        if (info) {
+          sendCloudSignal("KEY", {
+            action: "keyup",
+            key: info.key,
+            code: info.code,
+            keyCode: info.keyCode,
+            label: info.label,
+          });
+        }
+      }
+      localHeldSetRef.current.clear();
+      setGuestHeldKeys([]);
+    };
+
+    window.addEventListener("keydown", onGuestKeyDown, { capture: true });
+    window.addEventListener("keyup", onGuestKeyUp, { capture: true });
+    window.addEventListener("blur", onWindowBlur);
+
+    return () => {
+      window.removeEventListener("keydown", onGuestKeyDown, { capture: true });
+      window.removeEventListener("keyup", onGuestKeyUp, { capture: true });
+      window.removeEventListener("blur", onWindowBlur);
+    };
+  }, [cloudParty, isCloudGuest, guestStageFull, isOpen, activeTabMode, sendCloudSignal]);
+
+  const handleCreateCloudParty = async () => {
+    if (cloudBusy) return;
+    setCloudBusy(true);
+    try {
+      const tab = store.getActiveTab();
+      const gameUrl = tab?.iframe?.src || "";
+      const res = await fetch("/api/cloudplay/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId: getClientId(),
+          username: getActiveUser(),
+          gameTitle: activeGameTitle,
+          gameUrl,
+          hostRole: hostRolePref,
+          guestRole: guestRolePref,
+          remapGuestWasdToArrows: remapGuestWasd,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.party) {
+        setCloudParty(data.party);
+        notifyToast(
+          `cloudplay party #${data.party.code} created! share the code with player 2`,
+          "success"
+        );
+      } else {
+        notifyToast(data.error || "failed to create cloudplay party", "error");
+      }
+    } catch {
+      notifyToast("network error creating party", "error");
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const handleJoinCloudParty = async (e?: Event) => {
+    if (e) e.preventDefault();
+    const cleanCode = joinCodeInput.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    if (!cleanCode || cleanCode.length < 4) {
+      notifyToast("enter your friend's 6-character party code", "error");
+      return;
+    }
+    if (cloudBusy) return;
+    setCloudBusy(true);
+    try {
+      const res = await fetch("/api/cloudplay/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: cleanCode,
+          clientId: getClientId(),
+          username: getActiveUser(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.party) {
+        const joinedParty = data.party as CloudPlayParty;
+        setCloudParty(joinedParty);
+        setHostRolePref(joinedParty.settings.hostRole);
+        setGuestRolePref(joinedParty.settings.guestRole);
+        setRemapGuestWasd(joinedParty.settings.remapGuestWasdToArrows);
+        setJoinCodeInput("");
+        notifyToast(
+          `joined @${joinedParty.host.username}'s cloudplay party (#${joinedParty.code})!`,
+          "success"
+        );
+        // Notify Host via broadcast & SSE that Guest is ready for WebRTC stream
+        try {
+          cloudBcRef.current?.postMessage({
+            type: "cloudplay-event",
+            code: joinedParty.code,
+            eventType: "PARTY_UPDATED",
+            party: joinedParty,
+            joinedUser: getActiveUser(),
+          });
+        } catch {}
+        sendCloudSignal("GUEST_READY", { username: getActiveUser() }, joinedParty.code);
+      } else {
+        notifyToast(data.error || "could not join cloudplay party", "error");
+      }
+    } catch {
+      notifyToast("network error joining party", "error");
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const handleLeaveCloudParty = async () => {
+    if (!cloudParty) return;
+    const code = cloudParty.code;
+    cleanupCloudRtc();
+    setCloudParty(null);
+    setGuestStageFull(false);
+    try {
+      cloudBcRef.current?.postMessage({
+        type: "cloudplay-event",
+        code,
+        eventType: isCloudHost ? "PARTY_CLOSED" : "GUEST_LEFT",
+        reason: `${getActiveUser()} left the party`,
+        leftUser: getActiveUser(),
+      });
+    } catch {}
+    await fetch("/api/cloudplay/leave", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code,
+        clientId: getClientId(),
+        username: getActiveUser(),
+      }),
+    }).catch(() => {});
+    notifyToast("left cloudplay party", "info");
+  };
+
+  const handleUpdateCloudSettings = async (
+    nextHostRole: "wasd" | "arrows" | "all",
+    nextGuestRole: "arrows" | "wasd" | "all",
+    nextRemap: boolean
+  ) => {
+    setHostRolePref(nextHostRole);
+    setGuestRolePref(nextGuestRole);
+    setRemapGuestWasd(nextRemap);
+    if (!cloudParty) return;
+    try {
+      const res = await fetch("/api/cloudplay/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: cloudParty.code,
+          hostRole: nextHostRole,
+          guestRole: nextGuestRole,
+          remapGuestWasdToArrows: nextRemap,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.party) {
+        setCloudParty(data.party);
+        try {
+          cloudBcRef.current?.postMessage({
+            type: "cloudplay-event",
+            code: cloudParty.code,
+            eventType: "PARTY_UPDATED",
+            party: data.party,
+          });
+        } catch {}
+      }
+    } catch {}
+  };
+
   const currentSpaceMessages = spaceMessages.filter((m) => m.channel === spaceChannelId);
 
   return (
-    <div
-      class={`chat-modal-overlay ${isOpen ? "open" : ""}`}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) setIsOpen(false);
-      }}
-    >
-      <div
-        class="chat-app-window"
-        style={{ maxWidth: "760px", height: "78vh", flexDirection: "column" }}
-      >
-        {/* Modal Header */}
-        <div class="chat-main-header">
-          <div class="chat-main-header-left">
-            <div class="chat-main-channel-name">
-              <i class="fa-solid fa-trophy"></i>
-              <span>{activeGameTitle}</span>
+    <>
+      {/* Floating CloudPlay Host Pill when playing full-screen with Modal closed */}
+      {cloudParty && !isOpen && !guestStageFull && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: "18px",
+            left: "18px",
+            zIndex: 999990,
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            padding: "9px 14px",
+            borderRadius: "16px",
+            backgroundColor: "rgba(12, 12, 16, 0.88)",
+            backdropFilter: "blur(14px)",
+            border: "1px solid var(--bg-surface-10)",
+            color: "var(--text-primary)",
+            fontSize: "12px",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.55)",
+          }}
+        >
+          <span
+            style={{
+              width: "8px",
+              height: "8px",
+              borderRadius: "50%",
+              backgroundColor: cloudParty.guest ? "#4ade80" : "#facc15",
+              display: "inline-block",
+            }}
+          />
+          <span>
+            <strong>cloudplay #{cloudParty.code}</strong> ·{" "}
+            {cloudParty.guest
+              ? `2/2 (@${cloudParty.host.username} + @${cloudParty.guest.username})`
+              : "1/2 waiting for friend"}
+          </span>
+          {guestHeldKeys.length > 0 && (
+            <span
+              style={{
+                padding: "2px 7px",
+                borderRadius: "8px",
+                backgroundColor: "var(--bg-surface-7)",
+                color: "#4ade80",
+                fontWeight: 600,
+              }}
+            >
+              p2 keys: {guestHeldKeys.join(" ")}
+            </span>
+          )}
+          <button
+            type="button"
+            class="chat-header-btn voice-active"
+            style={{ padding: "4px 9px", fontSize: "11px" }}
+            onClick={() => {
+              if (isCloudGuest) {
+                setGuestStageFull(true);
+              } else {
+                setActiveTabMode("cloudplay");
+                setIsOpen(true);
+              }
+            }}
+          >
+            {isCloudGuest ? "open live stage" : "party settings"}
+          </button>
+        </div>
+      )}
+
+      {/* Full-Viewport CloudPlay Guest Live Stage (for Player 2 playing Host's game instance) */}
+      {cloudParty && isCloudGuest && guestStageFull && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 999996,
+            backgroundColor: "#050507",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {/* Top Stage Bar */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "10px 18px",
+              backgroundColor: "var(--bg-body)",
+              borderBottom: "1px solid var(--bg-surface-10)",
+              flexWrap: "wrap",
+              gap: "10px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <span
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: "10px",
+                  backgroundColor: "var(--bg-surface-6)",
+                  fontWeight: 700,
+                  fontSize: "12.5px",
+                  color: "#4ade80",
+                }}
+              >
+                <i class="fa-solid fa-tower-broadcast" /> cloudplay #{cloudParty.code} · 2/2
+              </span>
+              <span style={{ fontSize: "13px", color: "var(--text-primary)" }}>
+                playing <strong>{cloudParty.gameTitle}</strong> on @{cloudParty.host.username}'s game instance
+              </span>
+              <span style={{ fontSize: "11.5px", color: "var(--color-sublabel)" }}>
+                ({p2pConnected ? "webrtc p2p low-latency" : "cloud relay active"})
+              </span>
             </div>
-            <div class="chat-main-channel-desc">
-              game leaderboard & private player space
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span
+                style={{
+                  fontSize: "12px",
+                  padding: "4px 10px",
+                  borderRadius: "10px",
+                  backgroundColor: "var(--bg-surface-4)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                your controls:{" "}
+                <strong>
+                  {cloudParty.settings.remapGuestWasdToArrows
+                    ? "WASD (auto-sent as Arrow Keys)"
+                    : cloudParty.settings.guestRole.toUpperCase()}
+                </strong>
+                {guestHeldKeys.length > 0 ? ` · pressing: [${guestHeldKeys.join(" ")}]` : ""}
+              </span>
+              <button
+                type="button"
+                class="chat-header-btn"
+                onClick={() =>
+                  handleUpdateCloudSettings(
+                    cloudParty.settings.hostRole,
+                    cloudParty.settings.guestRole,
+                    !cloudParty.settings.remapGuestWasdToArrows
+                  )
+                }
+              >
+                <i class="fa-solid fa-keyboard" />
+                <span>
+                  {cloudParty.settings.remapGuestWasdToArrows
+                    ? "using WASD -> arrows"
+                    : "remap my WASD -> arrows"}
+                </span>
+              </button>
+              <button
+                type="button"
+                class="chat-header-btn"
+                onClick={() => {
+                  setGuestStageFull(false);
+                  setActiveTabMode("cloudplay");
+                  setIsOpen(true);
+                }}
+              >
+                <i class="fa-solid fa-compress" />
+                <span>dock</span>
+              </button>
+              <button
+                type="button"
+                class="chat-header-btn danger"
+                onClick={handleLeaveCloudParty}
+              >
+                <i class="fa-solid fa-right-from-bracket" />
+                <span>leave party</span>
+              </button>
             </div>
           </div>
 
-          <div class="chat-main-header-actions">
-            <button
-              type="button"
-              class={`chat-header-btn ${activeTabMode === "leaderboard" ? "voice-active" : ""}`}
-              onClick={() => setActiveTabMode("leaderboard")}
-            >
-              <i class="fa-solid fa-ranking-star"></i>
-              <span>leaderboard</span>
-            </button>
-            <button
-              type="button"
-              class={`chat-header-btn ${activeTabMode === "space" ? "voice-active" : ""}`}
-              onClick={() => setActiveTabMode("space")}
-            >
-              <i class="fa-solid fa-users-rectangle"></i>
-              <span>game space ({currentSpaceMessages.length})</span>
-            </button>
-            <button
-              type="button"
-              class="chat-window-close"
-              onClick={() => setIsOpen(false)}
-            >
-              <i class="fa-solid fa-xmark"></i>
-            </button>
+          {/* Live Stream Canvas / Video Stage */}
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              position: "relative",
+              overflow: "hidden",
+              backgroundColor: "#000",
+            }}
+            tabIndex={0}
+          >
+            <video
+              ref={guestVideoRef}
+              autoplay
+              playsInline
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                display: remoteVideoActive ? "block" : "none",
+              }}
+            />
+            {!remoteVideoActive && latestFrameUrl && (
+              <img
+                src={latestFrameUrl}
+                alt="cloudplay live stream"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  userSelect: "none",
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+            {!remoteVideoActive && !latestFrameUrl && (
+              <div style={{ textAlign: "center", color: "var(--color-sublabel)", padding: "24px" }}>
+                <i class="fa-solid fa-tower-broadcast" style={{ fontSize: "34px", marginBottom: "12px" }} />
+                <div style={{ fontSize: "15px", color: "var(--text-primary)", marginBottom: "6px" }}>
+                  connected to @{cloudParty.host.username}'s game instance!
+                </div>
+                <div style={{ fontSize: "12.5px" }}>
+                  press your keys ({cloudParty.settings.remapGuestWasdToArrows ? "WASD or Arrow Keys" : cloudParty.settings.guestRole.toUpperCase()}) right now — op cookie is sending your keystrokes live to the host's game!
+                </div>
+              </div>
+            )}
           </div>
         </div>
+      )}
 
-        {activeTabMode === "leaderboard" ? (
+      {isOpen && (
+      <div
+        class="chat-modal-overlay open"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) setIsOpen(false);
+        }}
+      >
+        <div
+          class="chat-app-window"
+          style={{ maxWidth: "780px", height: "80vh", flexDirection: "column" }}
+        >
+          {/* Modal Header */}
+          <div class="chat-main-header">
+            <div class="chat-main-header-left">
+              <div class="chat-main-channel-name">
+                <i
+                  class={`fa-solid ${
+                    activeTabMode === "cloudplay"
+                      ? "fa-tower-broadcast"
+                      : activeTabMode === "space"
+                      ? "fa-users-rectangle"
+                      : "fa-trophy"
+                  }`}
+                ></i>
+                <span>{activeGameTitle}</span>
+              </div>
+              <div class="chat-main-channel-desc">
+                {activeTabMode === "cloudplay"
+                  ? "cloudplay · play 2-player local co-op games (wasd + arrows) across 2 computers"
+                  : "game leaderboard & private player space"}
+              </div>
+            </div>
+
+            <div class="chat-main-header-actions">
+              <button
+                type="button"
+                class={`chat-header-btn ${activeTabMode === "leaderboard" ? "voice-active" : ""}`}
+                onClick={() => setActiveTabMode("leaderboard")}
+              >
+                <i class="fa-solid fa-ranking-star"></i>
+                <span>leaderboard</span>
+              </button>
+              <button
+                type="button"
+                class={`chat-header-btn ${activeTabMode === "space" ? "voice-active" : ""}`}
+                onClick={() => setActiveTabMode("space")}
+              >
+                <i class="fa-solid fa-users-rectangle"></i>
+                <span>game space ({currentSpaceMessages.length})</span>
+              </button>
+              <button
+                type="button"
+                class={`chat-header-btn ${activeTabMode === "cloudplay" ? "voice-active" : ""}`}
+                onClick={() => setActiveTabMode("cloudplay")}
+              >
+                <i class="fa-solid fa-tower-broadcast"></i>
+                <span>
+                  cloudplay {cloudParty ? `(${cloudParty.guest ? "2/2" : "1/2"})` : "(2p)"}
+                </span>
+              </button>
+              <button
+                type="button"
+                class="chat-window-close"
+                onClick={() => setIsOpen(false)}
+              >
+                <i class="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+          </div>
+
+          {activeTabMode === "cloudplay" ? (
+            /* CLOUDPLAY 2-PLAYER CO-OP VIEW */
+            <div class="chat-feed" style={{ gap: "14px", padding: "18px" }}>
+              {/* Intro Banner */}
+              <div
+                style={{
+                  padding: "14px 16px",
+                  borderRadius: "14px",
+                  backgroundColor: "var(--bg-surface-3)",
+                  border: "1px solid var(--bg-surface-10)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }}>
+                    <i class="fa-solid fa-gamepad" style={{ marginRight: "6px" }} />
+                    cloudplay · 2-player local games over the cloud (max 2 players)
+                  </div>
+                  <div style={{ fontSize: "12px", color: "var(--color-sublabel)" }}>
+                    runs <strong>one game instance</strong> on player 1's computer while player 2 joins with a party code from their own computer. op cookie reads player 2's keybinds and injects them straight into the game!
+                  </div>
+                </div>
+              </div>
+
+              {!cloudParty ? (
+                /* CREATE OR JOIN PARTY */
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(290px, 1fr))",
+                    gap: "14px",
+                  }}
+                >
+                  {/* Card 1: Host a 2-Player Party */}
+                  <div
+                    style={{
+                      padding: "18px",
+                      borderRadius: "15px",
+                      backgroundColor: "var(--bg-surface-4)",
+                      border: "1px solid var(--bg-surface-10)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "12px",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: "15px", fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }}>
+                        <i class="fa-solid fa-crown" style={{ color: "#facc15", marginRight: "6px" }} />
+                        host a 2-player party (player 1)
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--color-sublabel)" }}>
+                        open any 2-player game (fireboy & watergirl, basket random, getaway shootout, etc.) and create a party code for your friend.
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", fontSize: "12.5px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ color: "var(--color-sublabel)" }}>your keybinds (player 1):</span>
+                        <div style={{ display: "flex", gap: "6px" }}>
+                          {(["wasd", "arrows", "all"] as const).map((r) => (
+                            <button
+                              key={r}
+                              type="button"
+                              class={`chat-header-btn ${hostRolePref === r ? "voice-active" : ""}`}
+                              style={{ padding: "4px 9px", fontSize: "11.5px" }}
+                              onClick={() => {
+                                setHostRolePref(r);
+                                if (r === "wasd") setGuestRolePref("arrows");
+                                else if (r === "arrows") setGuestRolePref("wasd");
+                              }}
+                            >
+                              {r.toUpperCase()}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ color: "var(--color-sublabel)" }}>friend's keybinds (player 2):</span>
+                        <div style={{ display: "flex", gap: "6px" }}>
+                          {(["arrows", "wasd", "all"] as const).map((r) => (
+                            <button
+                              key={r}
+                              type="button"
+                              class={`chat-header-btn ${guestRolePref === r ? "voice-active" : ""}`}
+                              style={{ padding: "4px 9px", fontSize: "11.5px" }}
+                              onClick={() => setGuestRolePref(r)}
+                            >
+                              {r.toUpperCase()}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "8px",
+                          padding: "8px 10px",
+                          borderRadius: "10px",
+                          backgroundColor: "var(--bg-surface-6)",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          color: "var(--text-primary)",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={remapGuestWasd}
+                          onChange={(e) => setRemapGuestWasd(e.currentTarget.checked)}
+                        />
+                        <span>
+                          let friend press <strong>WASD</strong> on their keyboard (op cookie converts it to <strong>arrow keys</strong>)
+                        </span>
+                      </label>
+                    </div>
+
+                    <button
+                      type="button"
+                      class="auth-action-btn"
+                      style={{ marginTop: "auto" }}
+                      disabled={cloudBusy}
+                      onClick={handleCreateCloudParty}
+                    >
+                      <i class="fa-solid fa-plus" style={{ marginRight: "6px" }} />
+                      {cloudBusy ? "creating party..." : "create 2-player party"}
+                    </button>
+                  </div>
+
+                  {/* Card 2: Join Friend's Party by Code */}
+                  <div
+                    style={{
+                      padding: "18px",
+                      borderRadius: "15px",
+                      backgroundColor: "var(--bg-surface-4)",
+                      border: "1px solid var(--bg-surface-10)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "12px",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: "15px", fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }}>
+                        <i class="fa-solid fa-right-to-bracket" style={{ color: "#4ade80", marginRight: "6px" }} />
+                        join friend's party (player 2)
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--color-sublabel)" }}>
+                        enter the 6-character party code from your friend to stream their game instance and send your keybinds in real time.
+                      </div>
+                    </div>
+
+                    <form
+                      onSubmit={handleJoinCloudParty}
+                      style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "auto" }}
+                    >
+                      <input
+                        type="text"
+                        class="admin-input"
+                        placeholder="enter 6-digit party code (e.g. 7K4M9X)..."
+                        value={joinCodeInput}
+                        maxLength={8}
+                        style={{
+                          textAlign: "center",
+                          fontSize: "18px",
+                          fontWeight: 700,
+                          letterSpacing: "3px",
+                          textTransform: "uppercase",
+                        }}
+                        onInput={(e) =>
+                          setJoinCodeInput((e.target as HTMLInputElement).value.toUpperCase())
+                        }
+                      />
+                      <button
+                        type="submit"
+                        class="auth-action-btn"
+                        disabled={cloudBusy || !joinCodeInput.trim()}
+                      >
+                        <i class="fa-solid fa-plug" style={{ marginRight: "6px" }} />
+                        {cloudBusy ? "joining..." : "join 2-player party"}
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              ) : (
+                /* ACTIVE CLOUDPLAY PARTY DASHBOARD */
+                <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+                  {/* Party Code & Status Header */}
+                  <div
+                    style={{
+                      padding: "16px 18px",
+                      borderRadius: "15px",
+                      backgroundColor: "var(--bg-surface-4)",
+                      border: "1px solid var(--bg-surface-10)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: "12px",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+                      <div
+                        style={{
+                          padding: "10px 16px",
+                          borderRadius: "12px",
+                          backgroundColor: "var(--bg-surface-7)",
+                          border: "1px solid var(--bg-surface-10)",
+                          textAlign: "center",
+                        }}
+                      >
+                        <div style={{ fontSize: "10px", color: "var(--color-sublabel)" }}>
+                          party code (max 2)
+                        </div>
+                        <div
+                          style={{
+                            fontSize: "22px",
+                            fontWeight: 800,
+                            letterSpacing: "3px",
+                            color: "#4ade80",
+                          }}
+                        >
+                          {cloudParty.code}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: "14.5px", fontWeight: 600, color: "var(--text-primary)" }}>
+                          {cloudParty.gameTitle} ·{" "}
+                          <span style={{ color: cloudParty.guest ? "#4ade80" : "#facc15" }}>
+                            {cloudParty.guest ? "2/2 players connected" : "1/2 waiting for friend to join..."}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: "12px", color: "var(--color-sublabel)", marginTop: "3px" }}>
+                          {isCloudHost
+                            ? "you are hosting the game instance. close this window anytime to play while player 2's keys are injected live!"
+                            : `connected to @${cloudParty.host.username}'s game instance! press your keys below or expand to full screen.`}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <button
+                        type="button"
+                        class="chat-header-btn"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(cloudParty.code).catch(() => {});
+                          notifyToast(`copied party code ${cloudParty.code}!`, "success");
+                        }}
+                      >
+                        <i class="fa-solid fa-copy" />
+                        <span>copy code</span>
+                      </button>
+                      {isCloudGuest && (
+                        <button
+                          type="button"
+                          class="chat-header-btn voice-active"
+                          onClick={() => {
+                            setIsOpen(false);
+                            setGuestStageFull(true);
+                          }}
+                        >
+                          <i class="fa-solid fa-expand" />
+                          <span>fullscreen stage</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        class="chat-header-btn danger"
+                        onClick={handleLeaveCloudParty}
+                      >
+                        <i class="fa-solid fa-right-from-bracket" />
+                        <span>{isCloudHost ? "end party" : "leave party"}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 2-Player Slots & Live Pressed Keys Visualizer */}
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                      gap: "12px",
+                    }}
+                  >
+                    {/* Player 1 (Host) */}
+                    <div
+                      style={{
+                        padding: "14px",
+                        borderRadius: "14px",
+                        backgroundColor: "var(--bg-surface-3)",
+                        border: "1px solid var(--bg-surface-10)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>
+                          <i class="fa-solid fa-crown" style={{ color: "#facc15", marginRight: "6px" }} />
+                          player 1 (host): @{cloudParty.host.username}
+                        </span>
+                        <span class="chat-you-pill">
+                          {cloudParty.settings.hostRole.toUpperCase()}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "11.5px", color: "var(--color-sublabel)", marginBottom: "8px" }}>
+                        runs the game instance · live keys:
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", minHeight: "26px" }}>
+                        {hostHeldKeys.length === 0 ? (
+                          <span style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                            no keys pressed
+                          </span>
+                        ) : (
+                          hostHeldKeys.map((k) => (
+                            <span
+                              key={k}
+                              style={{
+                                padding: "3px 9px",
+                                borderRadius: "8px",
+                                backgroundColor: "var(--bg-surface-7)",
+                                color: "#4ade80",
+                                fontWeight: 700,
+                                fontSize: "12px",
+                              }}
+                            >
+                              {k}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Player 2 (Guest) */}
+                    <div
+                      style={{
+                        padding: "14px",
+                        borderRadius: "14px",
+                        backgroundColor: "var(--bg-surface-3)",
+                        border: "1px solid var(--bg-surface-10)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>
+                          <i class="fa-solid fa-gamepad" style={{ color: "#4ade80", marginRight: "6px" }} />
+                          player 2 (guest):{" "}
+                          {cloudParty.guest ? `@${cloudParty.guest.username}` : "waiting..."}
+                        </span>
+                        <span class="chat-you-pill">
+                          {cloudParty.settings.remapGuestWasdToArrows
+                            ? "WASD -> ARROWS"
+                            : cloudParty.settings.guestRole.toUpperCase()}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "11.5px", color: "var(--color-sublabel)", marginBottom: "8px" }}>
+                        remote keybinds injected into host's game:
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", minHeight: "26px" }}>
+                        {guestHeldKeys.length === 0 ? (
+                          <span style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                            {cloudParty.guest ? "press your keys to test!" : "waiting for friend to join..."}
+                          </span>
+                        ) : (
+                          guestHeldKeys.map((k) => (
+                            <span
+                              key={k}
+                              style={{
+                                padding: "3px 9px",
+                                borderRadius: "8px",
+                                backgroundColor: "var(--bg-surface-7)",
+                                color: "#38bdf8",
+                                fontWeight: 700,
+                                fontSize: "12px",
+                              }}
+                            >
+                              {k}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Live Keybind Role Switcher */}
+                  <div
+                    style={{
+                      padding: "12px 14px",
+                      borderRadius: "12px",
+                      backgroundColor: "var(--bg-surface-3)",
+                      border: "1px solid var(--bg-surface-10)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: "10px",
+                      fontSize: "12px",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                      <span style={{ color: "var(--color-sublabel)" }}>player 2 key mode:</span>
+                      {(["arrows", "wasd", "all"] as const).map((r) => (
+                        <button
+                          key={r}
+                          type="button"
+                          class={`chat-header-btn ${
+                            cloudParty.settings.guestRole === r ? "voice-active" : ""
+                          }`}
+                          style={{ padding: "4px 9px", fontSize: "11.5px" }}
+                          onClick={() =>
+                            handleUpdateCloudSettings(
+                              cloudParty.settings.hostRole,
+                              r,
+                              cloudParty.settings.remapGuestWasdToArrows
+                            )
+                          }
+                        >
+                          {r.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
+
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "7px",
+                        cursor: "pointer",
+                        color: "var(--text-primary)",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={cloudParty.settings.remapGuestWasdToArrows}
+                        onChange={(e) =>
+                          handleUpdateCloudSettings(
+                            cloudParty.settings.hostRole,
+                            cloudParty.settings.guestRole,
+                            e.currentTarget.checked
+                          )
+                        }
+                      />
+                      <span>comfort remap: convert player 2's WASD into Arrow Keys</span>
+                    </label>
+                  </div>
+
+                  {/* Guest Docked Live Stream Preview */}
+                  {isCloudGuest && (
+                    <div
+                      style={{
+                        borderRadius: "14px",
+                        overflow: "hidden",
+                        border: "1px solid var(--bg-surface-10)",
+                        backgroundColor: "#000",
+                        height: "310px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        position: "relative",
+                      }}
+                      tabIndex={0}
+                    >
+                      {!guestStageFull && (
+                        <video
+                          ref={guestVideoRef}
+                          autoplay
+                          playsInline
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "contain",
+                            display: remoteVideoActive ? "block" : "none",
+                          }}
+                        />
+                      )}
+                      {!remoteVideoActive && latestFrameUrl && (
+                        <img
+                          src={latestFrameUrl}
+                          alt="host game stream"
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "contain",
+                            userSelect: "none",
+                            pointerEvents: "none",
+                          }}
+                        />
+                      )}
+                      {!remoteVideoActive && !latestFrameUrl && (
+                        <div style={{ textAlign: "center", color: "var(--color-sublabel)", padding: "20px" }}>
+                          <div style={{ fontSize: "13.5px", color: "var(--text-primary)", marginBottom: "4px" }}>
+                            connected to @{cloudParty.host.username}'s game!
+                          </div>
+                          <div style={{ fontSize: "12px" }}>
+                            press your keys now to control player 2 on the host's game, or click "fullscreen stage" above!
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : activeTabMode === "leaderboard" ? (
           /* LEADERBOARD VIEW */
           <div class="chat-feed" style={{ gap: "8px" }}>
             <div
@@ -954,6 +2567,8 @@ export default function GameSpaceModal() {
           </div>
         )}
       </div>
-    </div>
+      </div>
+      )}
+    </>
   );
 }

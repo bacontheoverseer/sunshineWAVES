@@ -1312,6 +1312,8 @@ export function initLiveClient(): void {
         window.dispatchEvent(new CustomEvent("sunshine-studio-event", { detail: msg }));
       } else if (msg.type === "presence-event") {
         window.dispatchEvent(new CustomEvent("sunshine-presence-event", { detail: msg }));
+      } else if (msg.type === "cloudplay-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-cloudplay-event", { detail: msg }));
       }
     } catch (err) {
       console.warn("Failed to parse SSE live message:", err);
@@ -1336,6 +1338,9 @@ export function initLiveClient(): void {
     if (e.key === "auth_user") {
       sendHeartbeat();
     }
+  });
+  window.addEventListener("cloudsync-auth-changed", () => {
+    sendHeartbeat();
   });
 
   // Listen for custom game change events

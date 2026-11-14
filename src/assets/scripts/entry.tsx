@@ -103,9 +103,9 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   scheduleIdleLoad(() => {
-    if (!shouldPreloadCloudSync()) return;
     void ensureCloudSyncLoaded();
   });
+  void ensureCloudSyncLoaded();
 
   const onSwMessage = (e: MessageEvent) => store.handleServiceWorkerMessage(e);
   if ("serviceWorker" in navigator) {
