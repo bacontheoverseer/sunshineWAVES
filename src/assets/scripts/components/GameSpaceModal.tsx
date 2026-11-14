@@ -7,6 +7,7 @@ import {
   syncGameActivityToServer,
   formatPlayTime,
   addCookieCoins,
+  isWebsiteNotGame,
   type LeaderboardEntry,
 } from "../core/cookieCoins.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
@@ -307,11 +308,17 @@ export default function GameSpaceModal() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const currentBrowserTab = tabs.find((t) => t.id === activeTabId) || null;
+  const isBrowserTabGame = Boolean(
+    currentBrowserTab?.isGame && !isWebsiteNotGame(currentBrowserTab?.title)
+  );
+  const hasActiveGameContext = Boolean(
+    (overrideGameName && !isWebsiteNotGame(overrideGameName)) || isBrowserTabGame
+  );
 
   const activeGameTitle = (
     overrideGameName ||
-    currentBrowserTab?.title ||
-    "operation cookie lobby"
+    (isBrowserTabGame ? currentBrowserTab?.title : null) ||
+    "cloudplay 2p party"
   )
     .replace(/^game:\s*/i, "")
     .split("/")[0]
@@ -325,7 +332,15 @@ export default function GameSpaceModal() {
   const [spaceMessages, setSpaceMessages] = useState<SpaceMessage[]>(() => {
     try {
       const raw = localStorage.getItem("cookie_space_messages_v1");
-      return raw ? JSON.parse(raw) : [];
+      if (!raw) return [];
+      const parsed: SpaceMessage[] = JSON.parse(raw);
+      const cleaned = Array.isArray(parsed)
+        ? parsed.filter((m) => !isWebsiteNotGame(String(m?.channel || "").replace(/^space:/, "")))
+        : [];
+      if (cleaned.length !== parsed.length) {
+        localStorage.setItem("cookie_space_messages_v1", JSON.stringify(cleaned));
+      }
+      return cleaned;
     } catch {
       return [];
     }
@@ -571,9 +586,12 @@ export default function GameSpaceModal() {
       if (!inBrowser && !inStudio) return;
 
       const tab = store.getActiveTab();
+      // Never track leaderboards or playtime for regular websites!
+      if (inBrowser && !tab?.isGame) return;
+
       const gName = (
         overrideGameName ||
-        (inBrowser ? tab?.title : null) ||
+        (inBrowser && tab?.isGame ? tab?.title : null) ||
         (inStudio ? "game studio" : "")
       )
         .replace(/^game:\s*/i, "")
@@ -581,7 +599,16 @@ export default function GameSpaceModal() {
         .trim()
         .toLowerCase();
 
-      if (!gName || gName === "new tab" || gName === "fetching data..." || gName === "operation cookie") return;
+      if (
+        !gName ||
+        gName === "new tab" ||
+        gName === "fetching data..." ||
+        gName === "operation cookie" ||
+        gName === "cloudplay 2p party" ||
+        isWebsiteNotGame(gName)
+      ) {
+        return;
+      }
 
       const isNewSession = lastTrackedGameRef.current !== gName;
       if (isNewSession) {
@@ -1751,22 +1778,26 @@ export default function GameSpaceModal() {
             </div>
 
             <div class="chat-main-header-actions">
-              <button
-                type="button"
-                class={`chat-header-btn ${activeTabMode === "leaderboard" ? "voice-active" : ""}`}
-                onClick={() => setActiveTabMode("leaderboard")}
-              >
-                <i class="fa-solid fa-ranking-star"></i>
-                <span>leaderboard</span>
-              </button>
-              <button
-                type="button"
-                class={`chat-header-btn ${activeTabMode === "space" ? "voice-active" : ""}`}
-                onClick={() => setActiveTabMode("space")}
-              >
-                <i class="fa-solid fa-users-rectangle"></i>
-                <span>game space ({currentSpaceMessages.length})</span>
-              </button>
+              {hasActiveGameContext && (
+                <>
+                  <button
+                    type="button"
+                    class={`chat-header-btn ${activeTabMode === "leaderboard" ? "voice-active" : ""}`}
+                    onClick={() => setActiveTabMode("leaderboard")}
+                  >
+                    <i class="fa-solid fa-ranking-star"></i>
+                    <span>leaderboard</span>
+                  </button>
+                  <button
+                    type="button"
+                    class={`chat-header-btn ${activeTabMode === "space" ? "voice-active" : ""}`}
+                    onClick={() => setActiveTabMode("space")}
+                  >
+                    <i class="fa-solid fa-users-rectangle"></i>
+                    <span>game space ({currentSpaceMessages.length})</span>
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 class={`chat-header-btn ${activeTabMode === "cloudplay" ? "voice-active" : ""}`}

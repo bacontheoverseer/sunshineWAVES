@@ -1221,11 +1221,12 @@ export function detectCurrentGameSession(): {
 
   if (inBrowser) {
     const app = (window as unknown as {
-      sunshineApp?: { getActiveTab?: () => { title?: string; isUrlLoaded?: boolean } | null };
+      sunshineApp?: { getActiveTab?: () => { title?: string; isUrlLoaded?: boolean; isGame?: boolean } | null };
     }).sunshineApp;
     const activeTab = app?.getActiveTab?.();
     const rawTitle = (activeTab?.title || "").trim();
     if (
+      activeTab?.isGame &&
       rawTitle &&
       rawTitle.toLowerCase() !== "new tab" &&
       rawTitle.toLowerCase() !== "fetching data..." &&

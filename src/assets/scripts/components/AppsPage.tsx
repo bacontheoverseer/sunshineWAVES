@@ -366,11 +366,12 @@ export default function AppsPage() {
   }, [show, hide, toggle]);
 
   const handleLaunchApp = useCallback(
-    (appUrl: string, appName?: string) => {
+    (appUrl: string) => {
       if (!appUrl.trim()) return;
       hide();
       if ((window as any).sunshineApp?.handleSearch) {
-        (window as any).sunshineApp.handleSearch(appUrl.trim(), appName);
+        // Do NOT pass appName as gameName so proxy apps/websites are never treated as games
+        (window as any).sunshineApp.handleSearch(appUrl.trim());
       }
     },
     [hide]
@@ -475,7 +476,7 @@ export default function AppsPage() {
           <article
             key={app.id}
             class="app-card"
-            onClick={() => handleLaunchApp(app.url, app.name)}
+            onClick={() => handleLaunchApp(app.url)}
           >
             <div class="app-card-top">
               <div class="app-icon-box" style={{ background: app.gradient }}>

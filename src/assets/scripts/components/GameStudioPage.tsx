@@ -2396,7 +2396,10 @@ export default function GameStudioPage() {
     store.notify();
   };
 
-  const openLeaderboardOrSpace = (gameName: string, tab: "leaderboard" | "space") => {
+  const openLeaderboardOrSpace = (
+    gameName: string,
+    tab: "leaderboard" | "space" | "cloudplay"
+  ) => {
     document.dispatchEvent(
       new CustomEvent("toggleGameSpaceModal", {
         detail: { gameName, tab },
@@ -2518,6 +2521,16 @@ export default function GameStudioPage() {
           >
             <i class="fa-solid fa-file-code"></i>
             <span>upload index.html (1,000 🍪)</span>
+          </button>
+
+          <button
+            type="button"
+            class="studio-tab-btn"
+            onClick={() => openLeaderboardOrSpace(title || "game studio", "cloudplay")}
+            title="CloudPlay — Host or Join a 2-Player Co-op Party"
+          >
+            <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80" }}></i>
+            <span>cloudplay (2p)</span>
           </button>
 
           <button
@@ -2785,6 +2798,15 @@ export default function GameStudioPage() {
                         >
                           <i class="fa-solid fa-users-rectangle"></i>
                           <span>game space</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="studio-tool-btn"
+                          style={{ flex: 1, justifyContent: "center" }}
+                          onClick={() => openLeaderboardOrSpace(g.title, "cloudplay")}
+                        >
+                          <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80" }}></i>
+                          <span>cloudplay</span>
                         </button>
                       </div>
                     </div>
@@ -3272,6 +3294,13 @@ export default function GameStudioPage() {
                   </button>
                   <button
                     type="button"
+                    class="studio-tool-btn"
+                    onClick={() => openLeaderboardOrSpace(playingCustomHtmlGame.title, "cloudplay")}
+                  >
+                    <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80" }}></i> cloudplay
+                  </button>
+                  <button
+                    type="button"
                     class="apps-custom-btn"
                     onClick={() => openGameInBrowserTab(playingCustomHtmlGame)}
                   >
@@ -3520,6 +3549,14 @@ export default function GameStudioPage() {
                       onClick={() => openLeaderboardOrSpace(title, "space")}
                     >
                       <i class="fa-solid fa-users-rectangle"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      title="Open CloudPlay (2-Player WASD + Arrows Party)"
+                      onClick={() => openLeaderboardOrSpace(title, "cloudplay")}
+                    >
+                      <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80" }}></i>
                     </button>
                     <button
                       type="button"

@@ -8,12 +8,20 @@ const FADE_DURATION = 100;
 const SKELETON_KEYS = Array.from({ length: 12 }, (_, i) => `skeleton-${i}`);
 const RENDER_BATCH = 120;
 
-const GameCard = memo(function GameCard({ game, onPlay }: { game: GameEntry; onPlay: (game: GameEntry) => void }) {
+const GameCard = memo(function GameCard({
+  game,
+  onPlay,
+  onCloudPlay,
+}: {
+  game: GameEntry;
+  onPlay: (game: GameEntry) => void;
+  onCloudPlay: (game: GameEntry, e: MouseEvent) => void;
+}) {
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
 
   return (
-    <article class="game-card" onClick={() => onPlay(game)}>
+    <article class="game-card" onClick={() => onPlay(game)} style={{ position: "relative" }}>
       <div
         class={`game-cover${!loaded && !errored ? " skeleton" : ""}${errored ? " no-cover" : ""}${loaded && !errored ? " loaded" : ""}`}
       >
@@ -27,6 +35,33 @@ const GameCard = memo(function GameCard({ game, onPlay }: { game: GameEntry; onP
           />
         )}
       </div>
+      <button
+        type="button"
+        title="Launch this game with CloudPlay (2-Player WASD + Arrows Party)"
+        onClick={(e) => onCloudPlay(game, e)}
+        style={{
+          position: "absolute",
+          top: "8px",
+          right: "8px",
+          zIndex: 3,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "5px",
+          padding: "4px 8px",
+          borderRadius: "8px",
+          border: "1px solid rgba(255,255,255,0.16)",
+          backgroundColor: "rgba(10, 10, 14, 0.78)",
+          backdropFilter: "blur(8px)",
+          color: "var(--text-primary)",
+          fontSize: "10.5px",
+          fontWeight: 600,
+          cursor: "pointer",
+          textTransform: "lowercase",
+        }}
+      >
+        <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80", fontSize: "10px" }}></i>
+        <span>2p</span>
+      </button>
       <div class="game-info">
         <h1>{game.name}</h1>
       </div>
@@ -257,6 +292,31 @@ export default function GamesPage() {
     [hide],
   );
 
+  const handleCloudPlayGame = useCallback(
+    async (game: GameEntry, e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!game.isExternal && (window as any).sunshineApp?.handleSearch) {
+        hide();
+        await (window as any).sunshineApp.handleSearch(game.gameUrl, game.name, game.coverUrl);
+        setTimeout(() => {
+          document.dispatchEvent(
+            new CustomEvent("toggleGameSpaceModal", {
+              detail: { tab: "cloudplay", gameName: game.name },
+            }),
+          );
+        }, 120);
+      } else {
+        document.dispatchEvent(
+          new CustomEvent("toggleGameSpaceModal", {
+            detail: { tab: "cloudplay", gameName: game.name },
+          }),
+        );
+      }
+    },
+    [hide],
+  );
+
   const filteredGames = useMemo(() => {
     if (!query) return allGames;
     const q = query.toLowerCase().trim();
@@ -297,8 +357,17 @@ export default function GamesPage() {
       class={`games-page${visible ? " is-visible" : ""}${active ? " is-active" : ""}`}
       aria-hidden={!visible}
     >
-      <div class="games-topbar">
-        <div class="search-bar games-search-bar" ref={searchBarRef}>
+      <div
+        class="games-topbar"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div class="search-bar games-search-bar" ref={searchBarRef} style={{ margin: 0 }}>
           <div class="light"></div>
           <div class="light-border"></div>
           <div class="light-inset-bg"></div>
@@ -313,6 +382,33 @@ export default function GamesPage() {
             onInput={(e) => setQuery(e.currentTarget.value)}
           />
         </div>
+        <button
+          type="button"
+          class="text-icon-btn"
+          title="CloudPlay — Join or Host a 2-Player Co-op Game Party (WASD + Arrow Keys)"
+          style={{
+            padding: "11px 16px",
+            fontSize: "13px",
+            borderRadius: "14px",
+            backgroundColor: "var(--bg-surface-3)",
+            border: "1px solid var(--bg-surface-10)",
+            color: "var(--text-primary)",
+            cursor: "pointer",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "8px",
+          }}
+          onClick={() => {
+            document.dispatchEvent(
+              new CustomEvent("toggleGameSpaceModal", {
+                detail: { tab: "cloudplay" },
+              }),
+            );
+          }}
+        >
+          <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80" }}></i>
+          <span>cloudplay (2p party)</span>
+        </button>
       </div>
       <div class="game-grid-container">
         <div
@@ -326,6 +422,7 @@ export default function GamesPage() {
                   key={`${game.sourceKey}-${game.gameUrl}`}
                   game={game}
                   onPlay={handlePlay}
+                  onCloudPlay={handleCloudPlayGame}
                 />
               ))}
         </div>

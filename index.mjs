@@ -2420,11 +2420,31 @@ app.post("/api/studio/studios", async (req, res) => {
   }
 });
 
-// --- Per-Game Playtime & Score Leaderboards API ---
+// --- Per-Game Playtime & Score Leaderboards API (Games Only — No Websites) ---
 const gameLeaderboards = new Map(); // gameKey -> Map<usernameLower, { username, seconds, plays, highScore, lastPlayed }>
 
+const SERVER_NON_GAME_PATTERNS = [
+  /^https?:\/\//i,
+  /^www\./i,
+  /\.(com|org|net|edu|gov|mil|co|uk|ca|de|jp|fr|au|ru|ch|it|nl|se|no|es|me|tv|gg|ai|app|dev|xyz)(\/|$|\s)/i,
+  /^(new tab|untitled|fetching data\.\.\.|fetching lesson\.\.\.|about:blank|operation cookie|browsing|global|cloudplay 2p party)$/i,
+  /\b(duckduckgo|google|bing|yahoo|youtube|tiktok|discord|soundcloud|spotify|netflix|reddit|instagram|twitter|x\.com|snapchat|pinterest|crunchyroll|wikipedia|github|twitch)\b/i,
+];
+
+function isWebsiteNotGameServer(rawName) {
+  const s = ((rawName || "") + "").trim().toLowerCase();
+  if (!s || s.length > 80) return true;
+  if (/\b(1v1\.lol|[a-z0-9-]+\.io)\b/i.test(s) && !/^https?:\/\//i.test(s)) {
+    return false;
+  }
+  return SERVER_NON_GAME_PATTERNS.some((re) => re.test(s));
+}
+
 app.get("/api/games/leaderboard", (req, res) => {
-  const gameKey = ((req.query.game || "global") + "").trim().toLowerCase();
+  const gameKey = ((req.query.game || "") + "").trim().toLowerCase();
+  if (!gameKey || isWebsiteNotGameServer(gameKey)) {
+    return res.json({ success: true, game: gameKey, entries: [], activePlayers: [] });
+  }
   const board = gameLeaderboards.get(gameKey);
   const entries = board
     ? Array.from(board.values()).sort((a, b) => b.seconds - a.seconds || b.plays - a.plays)
@@ -2438,11 +2458,18 @@ app.get("/api/games/leaderboard", (req, res) => {
 app.post("/api/games/leaderboard", (req, res) => {
   try {
     const { game, username, addSeconds, addPlay, score } = req.body || {};
-    const gameKey = ((game || "global") + "").trim().toLowerCase();
+    const gameKey = ((game || "") + "").trim().toLowerCase();
+    if (!gameKey || isWebsiteNotGameServer(gameKey)) {
+      return res.json({ success: true, entries: [] });
+    }
     const cleanUser = ((username || "guest") + "").trim();
     const userKey = cleanUser.toLowerCase();
 
     if (!gameLeaderboards.has(gameKey)) {
+      if (gameLeaderboards.size >= 300) {
+        const oldestKey = gameLeaderboards.keys().next().value;
+        if (oldestKey) gameLeaderboards.delete(oldestKey);
+      }
       gameLeaderboards.set(gameKey, new Map());
     }
     const board = gameLeaderboards.get(gameKey);

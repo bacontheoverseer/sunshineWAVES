@@ -146,7 +146,10 @@ export default function NavBar() {
       const manualUrl = activeTab.iframe.dataset.manualUrl;
       if (manualUrl) {
         if ((window as any).sunshineApp?.handleSearch)
-          await (window as any).sunshineApp.handleSearch(manualUrl, activeTab);
+          await (window as any).sunshineApp.handleSearch(
+            manualUrl,
+            activeTab.isGame ? activeTab.title : undefined
+          );
       } else if (
         activeTab.iframe.contentWindow &&
         activeTab.iframe.src &&
@@ -264,51 +267,55 @@ export default function NavBar() {
         <div id="suggestions-container-nav" class="suggestions-box"></div>
       </div>
       <div class="window-controls">
-        <a
-          id="gameLeaderboardBtn"
-          href="#"
-          title="Game Leaderboard (Most Played)"
-          onClick={(e) => {
-            e.preventDefault();
-            document.dispatchEvent(
-              new CustomEvent("toggleGameSpaceModal", {
-                detail: { tab: "leaderboard" },
-              }),
-            );
-          }}
-        >
-          <i class="fa-solid fa-trophy"></i>
-        </a>
-        <a
-          id="gameSpaceBtn"
-          href="#"
-          title="Game Space (Private Group Chat & Voice Chat for this Game)"
-          onClick={(e) => {
-            e.preventDefault();
-            document.dispatchEvent(
-              new CustomEvent("toggleGameSpaceModal", {
-                detail: { tab: "space" },
-              }),
-            );
-          }}
-        >
-          <i class="fa-solid fa-users-rectangle"></i>
-        </a>
-        <a
-          id="gameCloudPlayBtn"
-          href="#"
-          title="CloudPlay 2-Player Party (Play Local WASD + Arrow Key Games Across 2 Computers)"
-          onClick={(e) => {
-            e.preventDefault();
-            document.dispatchEvent(
-              new CustomEvent("toggleGameSpaceModal", {
-                detail: { tab: "cloudplay" },
-              }),
-            );
-          }}
-        >
-          <i class="fa-solid fa-tower-broadcast"></i>
-        </a>
+        {Boolean(activeTab?.isGame) && (
+          <>
+            <a
+              id="gameLeaderboardBtn"
+              href="#"
+              title="Game Leaderboard (Most Played)"
+              onClick={(e) => {
+                e.preventDefault();
+                document.dispatchEvent(
+                  new CustomEvent("toggleGameSpaceModal", {
+                    detail: { tab: "leaderboard", gameName: activeTab?.title },
+                  }),
+                );
+              }}
+            >
+              <i class="fa-solid fa-trophy"></i>
+            </a>
+            <a
+              id="gameSpaceBtn"
+              href="#"
+              title="Game Space (Private Group Chat & Voice Chat for this Game)"
+              onClick={(e) => {
+                e.preventDefault();
+                document.dispatchEvent(
+                  new CustomEvent("toggleGameSpaceModal", {
+                    detail: { tab: "space", gameName: activeTab?.title },
+                  }),
+                );
+              }}
+            >
+              <i class="fa-solid fa-users-rectangle"></i>
+            </a>
+            <a
+              id="gameCloudPlayBtn"
+              href="#"
+              title="CloudPlay 2-Player Party (Play Local WASD + Arrow Key Games Across 2 Computers)"
+              onClick={(e) => {
+                e.preventDefault();
+                document.dispatchEvent(
+                  new CustomEvent("toggleGameSpaceModal", {
+                    detail: { tab: "cloudplay", gameName: activeTab?.title },
+                  }),
+                );
+              }}
+            >
+              <i class="fa-solid fa-tower-broadcast"></i>
+            </a>
+          </>
+        )}
         <a id="home-btn" href="/" onClick={handleHome}>
           <i class="fa-solid fa-house"></i>
         </a>

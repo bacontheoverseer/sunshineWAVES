@@ -86,24 +86,6 @@ export default function TopBar() {
           <i class="fa-solid fa-cookie-bite"></i>
           <span>shop · {coins}</span>
         </a>
-        <a
-          href="#"
-          id="cloudplay-btn"
-          class="text-icon-btn"
-          title="CloudPlay — Play 2-Player Local Games (WASD + Arrows) Together Over the Cloud"
-          style={{ fontSize: "13px", padding: "10px 14px" }}
-          onClick={(e) => {
-            e.preventDefault();
-            document.dispatchEvent(
-              new CustomEvent("toggleGameSpaceModal", {
-                detail: { tab: "cloudplay" },
-              })
-            );
-          }}
-        >
-          <i class="fa-solid fa-tower-broadcast"></i>
-          <span>cloudplay</span>
-        </a>
       </div>
       <div id="top-right-stuff">
         <div

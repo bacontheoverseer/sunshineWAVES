@@ -21,6 +21,7 @@ interface Tab {
   scrollX: number;
   scrollY: number;
   openerTabId: number | null;
+  isGame?: boolean;
   fixedTitle?: boolean;
   fixedFavicon?: boolean;
   gameDisplayByUrl?: Record<string, string>;
@@ -186,12 +187,14 @@ export const store = {
       scrollX: 0,
       scrollY: 0,
       openerTabId: null,
+      isGame: Boolean(isGame),
       _iframeLoadHandler: null,
       _iframeFocusHandler: null,
       _iframeElementFocusHandler: null,
     };
 
     if (isGame) {
+      newTab.isGame = true;
       newTab.fixedTitle = true;
       newTab.title = title;
       if (gameIcon) {
@@ -884,22 +887,26 @@ export const store = {
     window.sunshineApp.handleSearch = async (query: string, gameName?: string, gameIcon?: string | null) => {
       const activeTab = this.getActiveTab();
       if (activeTab) {
-        if (gameName) {
+        const validGameName = typeof gameName === "string" && gameName.trim().length > 0 ? gameName.trim() : undefined;
+        if (validGameName) {
+          activeTab.isGame = true;
           activeTab.fixedTitle = true;
-          activeTab.title = gameName;
+          activeTab.title = validGameName;
           if (gameIcon) {
             activeTab.fixedFavicon = true;
             activeTab.favicon = gameIcon;
           } else {
             activeTab.fixedFavicon = false;
           }
-          rememberTabGameLabel(activeTab, query, gameName);
+          rememberTabGameLabel(activeTab, query, validGameName);
           this.notify();
         } else {
+          activeTab.isGame = false;
           activeTab.fixedTitle = false;
           activeTab.fixedFavicon = false;
+          this.notify();
         }
-        await performSearch(query, activeTab as never, gameName);
+        await performSearch(query, activeTab as never, validGameName);
       }
     };
 

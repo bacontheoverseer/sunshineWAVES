@@ -27,6 +27,50 @@ const COINS_STORAGE_KEY = "cookie_coins_balance_v1";
 const STUDIO_STORAGE_KEY = "cookie_user_studio_v1";
 const LEADERBOARD_STORAGE_KEY = "cookie_game_leaderboards_v2";
 
+const NON_GAME_WEBSITE_PATTERNS = [
+  /^https?:\/\//i,
+  /^www\./i,
+  /\.(com|org|net|edu|gov|mil|co|uk|ca|de|jp|fr|au|ru|ch|it|nl|se|no|es|me|tv|gg|ai|app|dev|xyz)(\/|$|\s)/i,
+  /^(new tab|untitled|fetching data\.\.\.|fetching lesson\.\.\.|about:blank|operation cookie|browsing)$/i,
+  /\b(duckduckgo|google|bing|yahoo|youtube|tiktok|discord|soundcloud|spotify|netflix|reddit|instagram|twitter|x\.com|snapchat|pinterest|crunchyroll|wikipedia|github|twitch)\b/i,
+];
+
+export function isWebsiteNotGame(rawName: string | null | undefined): boolean {
+  const s = (rawName || "").trim().toLowerCase();
+  if (!s || s.length > 80) return true;
+  // Allow known .lol / .io games
+  if (/\b(1v1\.lol|[a-z0-9-]+\.io)\b/i.test(s) && !/^https?:\/\//i.test(s)) {
+    return false;
+  }
+  return NON_GAME_WEBSITE_PATTERNS.some((re) => re.test(s));
+}
+
+export function pruneWebsiteStorage(): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const rawLb = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
+    if (rawLb) {
+      const all: Record<string, LeaderboardEntry[]> = JSON.parse(rawLb);
+      let changed = false;
+      for (const k of Object.keys(all)) {
+        if (isWebsiteNotGame(k)) {
+          delete all[k];
+          changed = true;
+        }
+      }
+      if (changed) {
+        localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(all));
+      }
+    }
+    // Also remove legacy v1 leaderboard key if present
+    localStorage.removeItem("cookie_game_leaderboards_v1");
+  } catch {}
+}
+
+if (typeof window !== "undefined") {
+  pruneWebsiteStorage();
+}
+
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
   if (typeof w.showToast === "function") {
@@ -137,7 +181,8 @@ export function formatPlayTime(totalSeconds: number): string {
 }
 
 export function getLocalLeaderboard(gameName: string): LeaderboardEntry[] {
-  const key = (gameName || "global").trim().toLowerCase();
+  const key = (gameName || "").trim().toLowerCase();
+  if (!key || isWebsiteNotGame(key)) return [];
   try {
     const raw = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
     const all: Record<string, LeaderboardEntry[]> = raw ? JSON.parse(raw) : {};
@@ -154,7 +199,8 @@ export function recordLocalGameTick(
   addPlay = 0,
   score = 0
 ): LeaderboardEntry[] {
-  const key = (gameName || "global").trim().toLowerCase();
+  const key = (gameName || "").trim().toLowerCase();
+  if (!key || isWebsiteNotGame(key)) return [];
   const username = getActiveUser();
   const userLower = username.toLowerCase();
 
@@ -194,7 +240,8 @@ export async function syncGameActivityToServer(
   addPlay = 0,
   score = 0
 ): Promise<LeaderboardEntry[]> {
-  const key = (gameName || "global").trim().toLowerCase();
+  const key = (gameName || "").trim().toLowerCase();
+  if (!key || isWebsiteNotGame(key)) return [];
   const username = getActiveUser();
   let updatedList = getLocalLeaderboard(key);
 
