@@ -26,6 +26,54 @@ export interface LeaderboardEntry {
 const COINS_STORAGE_KEY = "cookie_coins_balance_v1";
 const STUDIO_STORAGE_KEY = "cookie_user_studio_v1";
 const LEADERBOARD_STORAGE_KEY = "cookie_game_leaderboards_v2";
+const AD_FREE_UNTIL_KEY = "sunshine_ad_free_until";
+
+export function getAdFreeUntil(): number {
+  try {
+    const raw = localStorage.getItem(AD_FREE_UNTIL_KEY);
+    const ts = raw ? Number(raw) : 0;
+    return Number.isFinite(ts) && ts > Date.now() ? ts : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function isAdFreeActive(): boolean {
+  return getAdFreeUntil() > Date.now();
+}
+
+export function syncAdFreeDomClass(): void {
+  try {
+    document.documentElement.classList.toggle("sunshine-ad-free", isAdFreeActive());
+  } catch {}
+}
+
+export function activateAdFreePass(durationMs: number): number {
+  const base = Math.max(getAdFreeUntil(), Date.now());
+  const nextUntil = base + Math.max(0, Math.floor(durationMs));
+  try {
+    localStorage.setItem(AD_FREE_UNTIL_KEY, String(nextUntil));
+  } catch {}
+  syncAdFreeDomClass();
+  try {
+    window.dispatchEvent(
+      new CustomEvent("sunshine-ad-free-changed", { detail: { until: nextUntil } }),
+    );
+  } catch {}
+  return nextUntil;
+}
+
+export function formatAdFreeRemaining(untilMs: number): string {
+  const diff = Math.max(0, untilMs - Date.now());
+  if (diff <= 0) return "expired";
+  const totalMins = Math.ceil(diff / 60000);
+  const days = Math.floor(totalMins / (60 * 24));
+  const hours = Math.floor((totalMins % (60 * 24)) / 60);
+  const mins = totalMins % 60;
+  if (days > 0) return `${days}d ${hours}h left`;
+  if (hours > 0) return `${hours}h ${mins}m left`;
+  return `${mins}m left`;
+}
 
 const NON_GAME_WEBSITE_PATTERNS = [
   /^https?:\/\//i,

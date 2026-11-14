@@ -4,6 +4,10 @@ import {
   getCookieCoins,
   spendCookieCoins,
   getActiveUser,
+  getAdFreeUntil,
+  activateAdFreePass,
+  formatAdFreeRemaining,
+  syncAdFreeDomClass,
 } from "../core/cookieCoins.ts";
 import { getClientId, executeTrollAction } from "../core/liveClient.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
@@ -169,6 +173,48 @@ const SHOP_ITEMS: ShopTrollItem[] = [
   },
 ];
 
+interface AdFreePass {
+  id: string;
+  name: string;
+  desc: string;
+  durationLabel: string;
+  durationMs: number;
+  cost: number;
+  icon: string;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const AD_FREE_PASSES: AdFreePass[] = [
+  {
+    id: "ad-free-2d",
+    name: "2 days ad-free",
+    desc: "removes all homepage ads for 48 hours (stacks if already active)",
+    durationLabel: "2 days",
+    durationMs: 2 * DAY_MS,
+    cost: 5000,
+    icon: "fa-shield-halved",
+  },
+  {
+    id: "ad-free-7d",
+    name: "7 days ad-free",
+    desc: "full week of zero homepage ads (stacks if already active)",
+    durationLabel: "7 days",
+    durationMs: 7 * DAY_MS,
+    cost: 14000,
+    icon: "fa-crown",
+  },
+  {
+    id: "ad-free-30d",
+    name: "30 days ad-free",
+    desc: "one full month of completely ad-free browsing",
+    durationLabel: "30 days",
+    durationMs: 30 * DAY_MS,
+    cost: 45000,
+    icon: "fa-gem",
+  },
+];
+
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
   if (typeof w.showToast === "function") {
@@ -179,7 +225,9 @@ function notifyToast(message: string, type: "success" | "error" | "info" = "info
 export default function ShopPage() {
   const [visible, setVisible] = useState(false);
   const [active, setActive] = useState(false);
+  const [shopTab, setShopTab] = useState<"trolls" | "ad-removal">("trolls");
   const [coins, setCoins] = useState<number>(() => getCookieCoins());
+  const [adFreeUntil, setAdFreeUntil] = useState<number>(() => getAdFreeUntil());
   const [onlineTargets, setOnlineTargets] = useState<OnlineTargetUser[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<string>("");
   const [customTargetInput, setCustomTargetInput] = useState<string>("");
@@ -228,6 +276,8 @@ export default function ShopPage() {
     document.body.classList.add("shop-view");
     setVisible(true);
     setCoins(getCookieCoins());
+    syncAdFreeDomClass();
+    setAdFreeUntil(getAdFreeUntil());
 
     requestAnimationFrame(() => {
       setActive(true);
@@ -262,7 +312,13 @@ export default function ShopPage() {
     if (brand) brand.addEventListener("click", onBrandClick);
 
     const onCoinsUpdated = () => setCoins(getCookieCoins());
+    const onAdFreeUpdated = () => {
+      syncAdFreeDomClass();
+      setAdFreeUntil(getAdFreeUntil());
+    };
     window.addEventListener("cookie-coins-updated", onCoinsUpdated);
+    window.addEventListener("sunshine-ad-free-changed", onAdFreeUpdated);
+    document.addEventListener("cloudsync-restored", onAdFreeUpdated);
 
     try {
       trollBcRef.current = new BroadcastChannel("cookie_live_troll_channel");
@@ -272,6 +328,8 @@ export default function ShopPage() {
       if (shopBtn) shopBtn.removeEventListener("click", onShopClick);
       if (brand) brand.removeEventListener("click", onBrandClick);
       window.removeEventListener("cookie-coins-updated", onCoinsUpdated);
+      window.removeEventListener("sunshine-ad-free-changed", onAdFreeUpdated);
+      document.removeEventListener("cloudsync-restored", onAdFreeUpdated);
       trollBcRef.current?.close();
     };
   }, [show, hide, toggle]);
@@ -306,11 +364,32 @@ export default function ShopPage() {
   }, [selectedTarget]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || shopTab !== "trolls") return;
     fetchOnlineUsers();
     const timer = window.setInterval(fetchOnlineUsers, 6000);
     return () => window.clearInterval(timer);
-  }, [visible, fetchOnlineUsers]);
+  }, [visible, shopTab, fetchOnlineUsers]);
+
+  const handleBuyAdFreePass = (pass: AdFreePass) => {
+    if (coins < pass.cost) {
+      notifyToast(
+        `not enough cookie coins! you need ${pass.cost.toLocaleString()} coins (make & publish games in game studio to earn more)`,
+        "error"
+      );
+      return;
+    }
+    if (!spendCookieCoins(pass.cost)) {
+      notifyToast("insufficient cookie coins", "error");
+      return;
+    }
+    const nextUntil = activateAdFreePass(pass.durationMs);
+    setAdFreeUntil(nextUntil);
+    setCoins(getCookieCoins());
+    notifyToast(
+      `activated ${pass.name} (-${pass.cost.toLocaleString()} coins · ${formatAdFreeRemaining(nextUntil)})`,
+      "success"
+    );
+  };
 
   const handleBuyTroll = async (item: ShopTrollItem) => {
     if (sendingId) return;
@@ -432,9 +511,30 @@ export default function ShopPage() {
     >
       {/* Top Bar */}
       <div class="studio-topbar" style={{ marginBottom: "14px" }}>
-        <div class="studio-brand">
-          <i class="fa-solid fa-cookie-bite"></i>
-          <span>cookie shop</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+          <div class="studio-brand">
+            <i class="fa-solid fa-cookie-bite"></i>
+            <span>cookie shop</span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <button
+              type="button"
+              class={`studio-tab-btn${shopTab === "trolls" ? " active" : ""}`}
+              onClick={() => setShopTab("trolls")}
+            >
+              <i class="fa-solid fa-bolt"></i>
+              <span>troll shop</span>
+            </button>
+            <button
+              type="button"
+              class={`studio-tab-btn${shopTab === "ad-removal" ? " active" : ""}`}
+              onClick={() => setShopTab("ad-removal")}
+            >
+              <i class="fa-solid fa-shield-halved"></i>
+              <span>ad removal</span>
+            </button>
+          </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
@@ -443,7 +543,7 @@ export default function ShopPage() {
             style={{ cursor: "default", fontWeight: 600 }}
           >
             <i class="fa-solid fa-coins"></i>
-            <span>{coins} coins</span>
+            <span>{coins.toLocaleString()} coins</span>
           </div>
 
           <button
@@ -459,6 +559,131 @@ export default function ShopPage() {
           </button>
         </div>
       </div>
+
+      {shopTab === "ad-removal" ? (
+        <>
+          <div
+            class="apps-custom-launcher"
+            style={{
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "10px",
+              padding: "14px 16px",
+              marginBottom: "18px",
+            }}
+          >
+            <div class="apps-custom-launcher-label" style={{ gap: "8px" }}>
+              <i
+                class={`fa-solid ${adFreeUntil > Date.now() ? "fa-circle-check" : "fa-shield-halved"}`}
+                style={{ color: adFreeUntil > Date.now() ? "#4ade80" : "var(--text-primary)" }}
+              ></i>
+              <span>
+                {adFreeUntil > Date.now()
+                  ? `ad-free pass active · ${formatAdFreeRemaining(adFreeUntil)} (expires ${new Date(adFreeUntil).toLocaleString()})`
+                  : "ad-free status: inactive — remove all homepage ads starting at 5,000 coins for 2 days"}
+              </span>
+            </div>
+          </div>
+
+          <div
+            class="studio-community-grid"
+            style={{
+              gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
+              gap: "12px",
+            }}
+          >
+            {AD_FREE_PASSES.map((pass) => {
+              const canAfford = coins >= pass.cost;
+              return (
+                <article
+                  key={pass.id}
+                  class="studio-game-card"
+                  style={{
+                    padding: "16px",
+                    gap: "12px",
+                    background: "var(--bg-surface-3)",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "10px",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+                      <div
+                        class="app-icon-box"
+                        style={{
+                          width: "36px",
+                          height: "36px",
+                          borderRadius: "10px",
+                          fontSize: "15px",
+                          flexShrink: 0,
+                          background: "var(--bg-surface-5)",
+                          color: "var(--text-primary)",
+                          boxShadow: "none",
+                          border: "1px solid var(--bg-surface-10)",
+                        }}
+                      >
+                        <i class={`fa-solid ${pass.icon}`}></i>
+                      </div>
+                      <h3 class="app-card-title" style={{ fontSize: "14.5px", margin: 0 }}>
+                        {pass.name}
+                      </h3>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        color: canAfford ? "var(--text-primary)" : "var(--color-sublabel)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {pass.cost.toLocaleString()}c
+                    </span>
+                  </div>
+
+                  <p
+                    class="app-card-desc"
+                    style={{
+                      fontSize: "12px",
+                      lineHeight: 1.45,
+                      margin: 0,
+                      color: "var(--color-sublabel)",
+                    }}
+                  >
+                    {pass.desc}
+                  </p>
+
+                  <button
+                    type="button"
+                    class="studio-tab-btn"
+                    style={{
+                      width: "100%",
+                      justifyContent: "center",
+                      padding: "8px 10px",
+                      fontSize: "12px",
+                      opacity: canAfford ? 1 : 0.45,
+                      background: "var(--bg-surface-5)",
+                    }}
+                    onClick={() => handleBuyAdFreePass(pass)}
+                  >
+                    <i class="fa-solid fa-shield-halved"></i>
+                    <span>
+                      {adFreeUntil > Date.now()
+                        ? `extend +${pass.durationLabel} (${pass.cost.toLocaleString()} coins)`
+                        : `unlock ${pass.durationLabel} (${pass.cost.toLocaleString()} coins)`}
+                    </span>
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <>
 
       {/* Target & Filter Bar */}
       <div
@@ -682,6 +907,8 @@ export default function ShopPage() {
           );
         })}
       </div>
+        </>
+      )}
     </section>
   );
 }

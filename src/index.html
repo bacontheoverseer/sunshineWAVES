@@ -150,7 +150,19 @@
           "studio-view",
           "shop-view",
         ];
+        function isAdFreePurchased() {
+          try {
+            var until = Number(localStorage.getItem("sunshine_ad_free_until") || "0");
+            return isFinite(until) && until > Date.now();
+          } catch (_e) {
+            return false;
+          }
+        }
+        if (isAdFreePurchased()) {
+          document.documentElement.classList.add("sunshine-ad-free");
+        }
         window.__isSunshineHomepage = function () {
+          if (isAdFreePurchased()) return false;
           if (typeof _revealed !== "undefined" && !_revealed) return false;
           var body = document.body;
           if (!body) return false;
@@ -273,6 +285,7 @@
             if (window.aclib && typeof window.aclib.runAutoTag === "function" && !window.aclib.__sunshineWrapped) {
               var origRun = window.aclib.runAutoTag;
               window.aclib.runAutoTag = function () {
+                if (isAdFreePurchased()) return;
                 _acDepth++;
                 try {
                   return origRun.apply(this, arguments);

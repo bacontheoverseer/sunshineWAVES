@@ -3,6 +3,7 @@ import App from "./App.tsx";
 import { store } from "./state/store.ts";
 import { initUiSignals } from "./core/uiSignals";
 import { initClickParticles } from "./core/particles.ts";
+import { syncAdFreeDomClass } from "./core/cookieCoins.ts";
 import "../css/themes.css";
 import "../css/index.css";
 import "../css/tabs.css";
@@ -72,6 +73,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   initUiSignals();
   initClickParticles();
+  syncAdFreeDomClass();
+  document.addEventListener("cloudsync-restored", syncAdFreeDomClass);
   store.setupWindowsunshineApp();
 
   document.addEventListener(

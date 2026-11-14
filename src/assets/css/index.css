@@ -1161,6 +1161,7 @@ html.low-power-device .game-grid-container {
     will-change: auto;
 }
 
+html.sunshine-ad-free .sunshine-ad-node,
 body.browser-view .sunshine-ad-node,
 body.games-view .sunshine-ad-node,
 body.apps-view .sunshine-ad-node,
