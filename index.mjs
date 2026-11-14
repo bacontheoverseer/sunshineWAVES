@@ -822,6 +822,18 @@ const userProfiles = new Map(); // usernameLower -> { bio, statusText, updatedAt
 
 const CLOUDSYNC_JWT_SECRET =
   process.env.JWT_SECRET || "dev_jwt_secret_cookie_super_safe_key_123";
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = (
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_KEY ||
+  ""
+).trim();
+const USE_SUPABASE_CLOUDSYNC = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+if (SUPABASE_URL && !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn(
+    "[cloudsync] SUPABASE_URL is set without SUPABASE_SERVICE_ROLE_KEY; falling back to local SQLite"
+  );
+}
 
 function getCloudSyncDbFilePath() {
   if (process.env.CLOUDSYNC_DB_PATH) return process.env.CLOUDSYNC_DB_PATH;
@@ -901,6 +913,216 @@ function openCloudSyncDb(_readonly = false) {
   return sharedCloudSyncDbHandle;
 }
 
+async function supabaseRest(restPath, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let json = null;
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {}
+  }
+  return { ok: res.ok, status: res.status, json, text };
+}
+
+async function dbFindUserById(userId) {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const { ok, status, json, text } = await supabaseRest(
+      `cloudsync_users?id=eq.${Number(userId)}&select=id,username,token_version&limit=1`
+    );
+    if (!ok) throw new Error(`Supabase select user failed (${status}): ${text}`);
+    return Array.isArray(json) && json[0] ? json[0] : null;
+  }
+  const db = openCloudSyncDb(true);
+  try {
+    return (
+      db
+        .query("SELECT id, username, token_version FROM users WHERE id = ?")
+        .get(Number(userId)) || null
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function dbFindUserByUsername(username) {
+  const clean = String(username || "").trim();
+  const lower = clean.toLowerCase();
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const { ok, status, json, text } = await supabaseRest(
+      `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id,username,password_hash,token_version&limit=1`
+    );
+    if (!ok) throw new Error(`Supabase select username failed (${status}): ${text}`);
+    return Array.isArray(json) && json[0] ? json[0] : null;
+  }
+  const db = openCloudSyncDb(true);
+  try {
+    return (
+      db
+        .query(
+          "SELECT id, username, password_hash, token_version FROM users WHERE LOWER(username) = LOWER(?)"
+        )
+        .get(clean) || null
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function dbCreateUser(username, passwordHash) {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const existing = await dbFindUserByUsername(username);
+    if (existing) return { conflict: true };
+    const { ok, status, json, text } = await supabaseRest("cloudsync_users", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        username,
+        username_lower: username.toLowerCase(),
+        password_hash: passwordHash,
+        token_version: 1,
+      }),
+    });
+    if (status === 409 || json?.code === "23505") {
+      return { conflict: true };
+    }
+    if (!ok) throw new Error(`Supabase create user failed (${status}): ${text}`);
+    const created = Array.isArray(json) ? json[0] : json;
+    return {
+      conflict: false,
+      id: Number(created.id),
+      username: String(created.username),
+    };
+  }
+  const db = openCloudSyncDb(false);
+  try {
+    const existing = db
+      .query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)")
+      .get(username);
+    if (existing) return { conflict: true };
+    const result = db
+      .query("INSERT INTO users (username, password_hash, token_version) VALUES (?, ?, 1)")
+      .run(username, passwordHash);
+    return {
+      conflict: false,
+      id: Number(result.lastInsertRowid),
+      username,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+async function dbDeleteUser(userId) {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    await supabaseRest(`cloudsync_sync?user_id=eq.${Number(userId)}`, { method: "DELETE" });
+    const { ok, status, text } = await supabaseRest(
+      `cloudsync_users?id=eq.${Number(userId)}`,
+      { method: "DELETE" }
+    );
+    if (!ok) throw new Error(`Supabase delete user failed (${status}): ${text}`);
+    return;
+  }
+  const db = openCloudSyncDb(false);
+  try {
+    db.query("DELETE FROM sync_json WHERE user_id = ?").run(userId);
+    db.query("DELETE FROM sync_data WHERE user_id = ?").run(userId);
+    db.query("DELETE FROM users WHERE id = ?").run(userId);
+  } finally {
+    db.close();
+  }
+}
+
+async function dbGetSyncMetaUpdatedAt(userId) {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const { ok, status, json, text } = await supabaseRest(
+      `cloudsync_sync?user_id=eq.${Number(userId)}&select=updated_at&limit=1`
+    );
+    if (!ok) throw new Error(`Supabase meta failed (${status}): ${text}`);
+    const row = Array.isArray(json) && json[0] ? json[0] : null;
+    return row?.updated_at ? String(row.updated_at) : "";
+  }
+  const db = openCloudSyncDb(true);
+  try {
+    const row =
+      db.query("SELECT updated_at FROM sync_json WHERE user_id = ?").get(userId) ||
+      db.query("SELECT updated_at FROM sync_data WHERE user_id = ?").get(userId);
+    return row?.updated_at ? String(row.updated_at) : "";
+  } finally {
+    db.close();
+  }
+}
+
+async function dbGetSyncPayload(userId) {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const { ok, status, json, text } = await supabaseRest(
+      `cloudsync_sync?user_id=eq.${Number(userId)}&select=payload_json,updated_at&limit=1`
+    );
+    if (!ok) throw new Error(`Supabase download failed (${status}): ${text}`);
+    return Array.isArray(json) && json[0] ? json[0] : null;
+  }
+  const db = openCloudSyncDb(true);
+  try {
+    return (
+      db
+        .query("SELECT payload_json, updated_at FROM sync_json WHERE user_id = ?")
+        .get(userId) || null
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function dbUpsertSyncPayload(userId, payloadJson, updatedAt) {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const { ok, status, text } = await supabaseRest("cloudsync_sync?on_conflict=user_id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({
+        user_id: Number(userId),
+        payload_json: payloadJson,
+        updated_at: updatedAt,
+      }),
+    });
+    if (!ok) throw new Error(`Supabase upload failed (${status}): ${text}`);
+    return;
+  }
+  const db = openCloudSyncDb(false);
+  try {
+    db.query(
+      "INSERT OR REPLACE INTO sync_json (user_id, payload_json, updated_at) VALUES (?, ?, ?)"
+    ).run(userId, payloadJson, updatedAt);
+  } finally {
+    db.close();
+  }
+}
+
+async function dbListUsers() {
+  if (USE_SUPABASE_CLOUDSYNC) {
+    const { ok, status, json, text } = await supabaseRest(
+      "cloudsync_users?select=id,username,created_at&order=id.asc"
+    );
+    if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
+    return Array.isArray(json) ? json : [];
+  }
+  const db = openCloudSyncDb(true);
+  try {
+    return db
+      .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
+      .all();
+  } finally {
+    db.close();
+  }
+}
+
 function base64UrlEncode(input) {
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), "utf-8");
   return buf
@@ -971,7 +1193,7 @@ function clearCloudSyncAuthCookie(res) {
   );
 }
 
-function getAuthenticatedCloudSyncUser(req) {
+async function getAuthenticatedCloudSyncUser(req) {
   const cookieToken = req.cookies?.token;
   const headerToken = req.headers["x-cloudsync-token"] ||
     (req.headers.authorization?.startsWith("Bearer ")
@@ -982,27 +1204,20 @@ function getAuthenticatedCloudSyncUser(req) {
   if (!claims || !claims.id || !claims.username) return null;
 
   try {
-    const db = openCloudSyncDb(true);
-    try {
-      const row = db
-        .query("SELECT id, username, token_version FROM users WHERE id = ?")
-        .get(Number(claims.id));
-      if (!row) return null;
-      if (String(row.username).toLowerCase() !== String(claims.username).toLowerCase()) {
-        return null;
-      }
-      if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
-      return { id: Number(row.id), username: String(row.username) };
-    } finally {
-      db.close();
+    const row = await dbFindUserById(claims.id);
+    if (!row) return null;
+    if (String(row.username).toLowerCase() !== String(claims.username).toLowerCase()) {
+      return null;
     }
+    if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
+    return { id: Number(row.id), username: String(row.username) };
   } catch {
     return null;
   }
 }
 
 // --- Native CloudSync Auth & Sync Endpoints (/api/auth/* & /api/sync/*) ---
-app.post("/api/auth/register", (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
@@ -1028,33 +1243,23 @@ app.post("/api/auth/register", (req, res) => {
         .json({ success: false, user: null, error: "password too long" });
     }
 
-    const db = openCloudSyncDb(false);
-    let userId = 0;
-    try {
-      const existing = db
-        .query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)")
-        .get(username);
-      if (existing) {
-        return res
-          .status(409)
-          .json({ success: false, user: null, error: "username taken!" });
-      }
-      const hashed = Bun.password.hashSync(password, {
-        algorithm: "bcrypt",
-        cost: 10,
-      });
-      const result = db
-        .query("INSERT INTO users (username, password_hash, token_version) VALUES (?, ?, 1)")
-        .run(username, hashed);
-      userId = Number(result.lastInsertRowid);
-    } finally {
-      db.close();
+    const hashed = Bun.password.hashSync(password, {
+      algorithm: "bcrypt",
+      cost: 10,
+    });
+    const created = await dbCreateUser(username, hashed);
+    if (created.conflict) {
+      return res
+        .status(409)
+        .json({ success: false, user: null, error: "username taken!" });
     }
+    const userId = created.id;
 
     const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
     const token = signCloudSyncJwt({ id: userId, username, v: 1, exp });
     setCloudSyncAuthCookie(res, token, req);
     invalidateCloudSyncUsersCache();
+    await getCloudSyncUsersMapAsync(true).catch(() => {});
     touchKnownUser(username);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
@@ -1072,7 +1277,7 @@ app.post("/api/auth/register", (req, res) => {
   }
 });
 
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
@@ -1087,18 +1292,7 @@ app.post("/api/auth/login", (req, res) => {
         .json({ success: false, user: null, error: "password too long" });
     }
 
-    const db = openCloudSyncDb(true);
-    let row = null;
-    try {
-      row = db
-        .query(
-          "SELECT id, username, password_hash, token_version FROM users WHERE LOWER(username) = LOWER(?)"
-        )
-        .get(username);
-    } finally {
-      db.close();
-    }
-
+    const row = await dbFindUserByUsername(username);
     if (!row || !Bun.password.verifySync(password, String(row.password_hash))) {
       return res
         .status(401)
@@ -1116,6 +1310,7 @@ app.post("/api/auth/login", (req, res) => {
       exp,
     });
     setCloudSyncAuthCookie(res, token, req);
+    await getCloudSyncUsersMapAsync().catch(() => {});
     touchKnownUser(canonicalUsername);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
@@ -1138,8 +1333,8 @@ app.post("/api/auth/logout", (_req, res) => {
   res.json({ success: true, user: null, error: null });
 });
 
-app.get("/api/auth/me", (req, res) => {
-  const user = getAuthenticatedCloudSyncUser(req);
+app.get("/api/auth/me", async (req, res) => {
+  const user = await getAuthenticatedCloudSyncUser(req);
   if (!user) {
     return res
       .status(401)
@@ -1148,24 +1343,18 @@ app.get("/api/auth/me", (req, res) => {
   res.json({ success: true, user, error: null });
 });
 
-app.delete("/api/auth/me", (req, res) => {
-  const user = getAuthenticatedCloudSyncUser(req);
+app.delete("/api/auth/me", async (req, res) => {
+  const user = await getAuthenticatedCloudSyncUser(req);
   if (!user) {
     return res
       .status(401)
       .json({ success: false, user: null, error: "unauthorized" });
   }
   try {
-    const db = openCloudSyncDb(false);
-    try {
-      db.query("DELETE FROM sync_json WHERE user_id = ?").run(user.id);
-      db.query("DELETE FROM sync_data WHERE user_id = ?").run(user.id);
-      db.query("DELETE FROM users WHERE id = ?").run(user.id);
-    } finally {
-      db.close();
-    }
+    await dbDeleteUser(user.id);
     knownUsers.delete(user.username.toLowerCase());
     invalidateCloudSyncUsersCache();
+    await getCloudSyncUsersMapAsync(true).catch(() => {});
     clearCloudSyncAuthCookie(res);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     return res.json({ success: true, user: null, error: "account deleted!" });
@@ -1176,35 +1365,28 @@ app.delete("/api/auth/me", (req, res) => {
   }
 });
 
-app.get("/api/sync/meta", (req, res) => {
-  const user = getAuthenticatedCloudSyncUser(req);
+app.get("/api/sync/meta", async (req, res) => {
+  const user = await getAuthenticatedCloudSyncUser(req);
   if (!user) {
     return res
       .status(401)
       .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
   }
   try {
-    const db = openCloudSyncDb(true);
-    try {
-      const row =
-        db.query("SELECT updated_at FROM sync_json WHERE user_id = ?").get(user.id) ||
-        db.query("SELECT updated_at FROM sync_data WHERE user_id = ?").get(user.id);
-      return res.json({
-        success: true,
-        data: null,
-        updated_at: row?.updated_at ? String(row.updated_at) : "",
-        error: null,
-      });
-    } finally {
-      db.close();
-    }
+    const updatedAt = await dbGetSyncMetaUpdatedAt(user.id);
+    return res.json({
+      success: true,
+      data: null,
+      updated_at: updatedAt,
+      error: null,
+    });
   } catch {
     return res.json({ success: true, data: null, updated_at: "", error: null });
   }
 });
 
-app.post("/api/sync/upload", (req, res) => {
-  const user = getAuthenticatedCloudSyncUser(req);
+app.post("/api/sync/upload", async (req, res) => {
+  const user = await getAuthenticatedCloudSyncUser(req);
   if (!user) {
     return res
       .status(401)
@@ -1212,39 +1394,30 @@ app.post("/api/sync/upload", (req, res) => {
   }
   try {
     const payload = req.body || {};
-    const db = openCloudSyncDb(false);
-    let updatedAt = new Date().toISOString();
-    try {
-      let finalPayload = payload;
-      if (payload._delta) {
-        const existingRow = db
-          .query("SELECT payload_json FROM sync_json WHERE user_id = ?")
-          .get(user.id);
-        let baseObj = { localStorage: {}, indexedDB: {} };
-        if (existingRow?.payload_json) {
-          try {
-            baseObj = JSON.parse(String(existingRow.payload_json));
-          } catch {}
-        }
-        if (payload.localStorage && typeof payload.localStorage === "object") {
-          baseObj.localStorage = baseObj.localStorage || {};
-          for (const [k, v] of Object.entries(payload.localStorage)) {
-            if (v === null) delete baseObj.localStorage[k];
-            else baseObj.localStorage[k] = v;
-          }
-        }
-        if (payload.indexedDB && typeof payload.indexedDB === "object") {
-          baseObj.indexedDB = { ...(baseObj.indexedDB || {}), ...payload.indexedDB };
-        }
-        finalPayload = baseObj;
+    const updatedAt = new Date().toISOString();
+    let finalPayload = payload;
+    if (payload._delta) {
+      const existingRow = await dbGetSyncPayload(user.id);
+      let baseObj = { localStorage: {}, indexedDB: {} };
+      if (existingRow?.payload_json) {
+        try {
+          baseObj = JSON.parse(String(existingRow.payload_json));
+        } catch {}
       }
-
-      db.query(
-        "INSERT OR REPLACE INTO sync_json (user_id, payload_json, updated_at) VALUES (?, ?, ?)"
-      ).run(user.id, JSON.stringify(finalPayload), updatedAt);
-    } finally {
-      db.close();
+      if (payload.localStorage && typeof payload.localStorage === "object") {
+        baseObj.localStorage = baseObj.localStorage || {};
+        for (const [k, v] of Object.entries(payload.localStorage)) {
+          if (v === null) delete baseObj.localStorage[k];
+          else baseObj.localStorage[k] = v;
+        }
+      }
+      if (payload.indexedDB && typeof payload.indexedDB === "object") {
+        baseObj.indexedDB = { ...(baseObj.indexedDB || {}), ...payload.indexedDB };
+      }
+      finalPayload = baseObj;
     }
+
+    await dbUpsertSyncPayload(user.id, JSON.stringify(finalPayload), updatedAt);
     return res.json({
       success: true,
       data: null,
@@ -1258,36 +1431,29 @@ app.post("/api/sync/upload", (req, res) => {
   }
 });
 
-app.get("/api/sync/download", (req, res) => {
-  const user = getAuthenticatedCloudSyncUser(req);
+app.get("/api/sync/download", async (req, res) => {
+  const user = await getAuthenticatedCloudSyncUser(req);
   if (!user) {
     return res
       .status(401)
       .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
   }
   try {
-    const db = openCloudSyncDb(true);
-    try {
-      const row = db
-        .query("SELECT payload_json, updated_at FROM sync_json WHERE user_id = ?")
-        .get(user.id);
-      if (!row || !row.payload_json) {
-        return res.json({
-          success: true,
-          data: { localStorage: {}, indexedDB: {} },
-          updated_at: "",
-          error: null,
-        });
-      }
+    const row = await dbGetSyncPayload(user.id);
+    if (!row || !row.payload_json) {
       return res.json({
         success: true,
-        data: JSON.parse(String(row.payload_json)),
-        updated_at: String(row.updated_at || ""),
+        data: { localStorage: {}, indexedDB: {} },
+        updated_at: "",
         error: null,
       });
-    } finally {
-      db.close();
     }
+    return res.json({
+      success: true,
+      data: JSON.parse(String(row.payload_json)),
+      updated_at: String(row.updated_at || ""),
+      error: null,
+    });
   } catch {
     return res.json({
       success: true,
@@ -1306,14 +1472,63 @@ function isTemporaryGuestName(name) {
 }
 
 let cloudSyncUsersCache = { map: null, expiresAt: 0 };
+let cloudSyncUsersRefreshPromise = null;
 function invalidateCloudSyncUsersCache() {
   cloudSyncUsersCache = { map: null, expiresAt: 0 };
+}
+
+function buildCloudSyncUsersMap(rows) {
+  const map = new Map();
+  for (const r of rows || []) {
+    if (r && r.username) {
+      const clean = String(r.username).trim();
+      map.set(clean.toLowerCase(), {
+        id: Number(r.id),
+        username: clean,
+        createdAt: r.created_at || null,
+      });
+    }
+  }
+  return map;
+}
+
+async function getCloudSyncUsersMapAsync(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
+    return cloudSyncUsersCache.map;
+  }
+  if (cloudSyncUsersRefreshPromise && !forceRefresh) {
+    return cloudSyncUsersRefreshPromise;
+  }
+  const promise = (async () => {
+    try {
+      const rows = await dbListUsers();
+      const map = buildCloudSyncUsersMap(rows);
+      cloudSyncUsersCache = { map, expiresAt: Date.now() + 15000 };
+      return map;
+    } catch (err) {
+      if (USE_SUPABASE_CLOUDSYNC) {
+        console.warn("[cloudsync] Supabase user list warning:", err.message);
+      }
+      return cloudSyncUsersCache.map || new Map();
+    } finally {
+      if (cloudSyncUsersRefreshPromise === promise) {
+        cloudSyncUsersRefreshPromise = null;
+      }
+    }
+  })();
+  cloudSyncUsersRefreshPromise = promise;
+  return promise;
 }
 
 function getCloudSyncUsersMap(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
     return cloudSyncUsersCache.map;
+  }
+  if (USE_SUPABASE_CLOUDSYNC) {
+    void getCloudSyncUsersMapAsync(forceRefresh);
+    return cloudSyncUsersCache.map || new Map();
   }
   const map = new Map();
   try {
@@ -1322,17 +1537,9 @@ function getCloudSyncUsersMap(forceRefresh = false) {
       const rows = db
         .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
         .all();
-      for (const r of rows) {
-        if (r && r.username) {
-          const clean = String(r.username).trim();
-          map.set(clean.toLowerCase(), {
-            id: Number(r.id),
-            username: clean,
-            createdAt: r.created_at || null,
-          });
-        }
-      }
-      cloudSyncUsersCache = { map, expiresAt: now + 15000 };
+      const built = buildCloudSyncUsersMap(rows);
+      cloudSyncUsersCache = { map: built, expiresAt: now + 15000 };
+      return built;
     } finally {
       db.close();
     }
@@ -1340,6 +1547,14 @@ function getCloudSyncUsersMap(forceRefresh = false) {
     // ignore if DB not initialized yet
   }
   return map;
+}
+
+async function getCloudSyncUserAsync(username) {
+  if (!username) return null;
+  const clean = String(username).trim().toLowerCase();
+  if (!clean) return null;
+  const csMap = await getCloudSyncUsersMapAsync();
+  return csMap.get(clean) || null;
 }
 
 function getCloudSyncUser(username) {
@@ -1536,7 +1751,13 @@ app.post("/api/admin/verify", (req, res) => {
   res.json({ success: true, username: ADMIN_USERNAME });
 });
 
-app.get("/api/live/stream", (req, res) => {
+app.get("/api/live/stream", async (req, res) => {
+  const [authUser] = await Promise.all([
+    getAuthenticatedCloudSyncUser(req),
+    getCloudSyncUsersMapAsync().catch(() => null),
+  ]);
+  if (req.destroyed || req.socket?.destroyed) return;
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -1545,7 +1766,6 @@ app.get("/api/live/stream", (req, res) => {
     res.flushHeaders();
   }
 
-  const authUser = getAuthenticatedCloudSyncUser(req);
   const clientId = (req.query.id || Math.random().toString(36).substring(2, 10)).toString();
   const username = authUser
     ? authUser.username
@@ -2370,8 +2590,11 @@ app.post("/api/chat/moderate", async (req, res) => {
   }
 });
 
-app.get("/api/chat/state", (req, res) => {
-  const authUser = getAuthenticatedCloudSyncUser(req);
+app.get("/api/chat/state", async (req, res) => {
+  const [authUser] = await Promise.all([
+    getAuthenticatedCloudSyncUser(req),
+    getCloudSyncUsersMapAsync().catch(() => null),
+  ]);
   const rawUser = authUser ? authUser.username : (req.query.user || req.query.username || "").toString();
   const verifiedUserKey = authUser ? authUser.username.toLowerCase() : "";
   if (authUser) touchKnownUser(authUser.username);
@@ -2401,17 +2624,17 @@ app.get("/api/chat/state", (req, res) => {
   });
 });
 
-app.get("/api/chat/user-profile", (req, res) => {
+app.get("/api/chat/user-profile", async (req, res) => {
   const rawTarget = (req.query.username || req.query.user || "").toString().trim();
   if (!rawTarget) {
     return res.status(400).json({ success: false, exists: false, error: "username is required" });
   }
 
-  let csMap = getCloudSyncUsersMap();
+  let csMap = await getCloudSyncUsersMapAsync();
   const key = rawTarget.toLowerCase();
   let csUser = csMap.get(key) || null;
   if (!csUser) {
-    csMap = getCloudSyncUsersMap(true);
+    csMap = await getCloudSyncUsersMapAsync(true);
     csUser = csMap.get(key) || null;
   }
 
@@ -2498,7 +2721,7 @@ app.get("/api/chat/user-profile", (req, res) => {
 
 app.post("/api/chat/user-profile", async (req, res) => {
   try {
-    const authUser = getAuthenticatedCloudSyncUser(req);
+    const authUser = await getAuthenticatedCloudSyncUser(req);
     if (!authUser) {
       return res.status(401).json({ success: false, error: "Sign in to CloudSync to update your profile" });
     }
@@ -2508,7 +2731,10 @@ app.post("/api/chat/user-profile", async (req, res) => {
     if (authUser.username.toLowerCase() !== key) {
       return res.status(403).json({ success: false, error: "You can only edit your own profile" });
     }
-    const csMap = getCloudSyncUsersMap();
+    let csMap = await getCloudSyncUsersMapAsync();
+    if (!csMap.has(key)) {
+      csMap = await getCloudSyncUsersMapAsync(true);
+    }
     if (csMap.size > 0 && !csMap.has(key)) {
       return res.status(404).json({ success: false, error: "User not found in CloudSync" });
     }
@@ -2539,7 +2765,7 @@ app.post("/api/chat/user-profile", async (req, res) => {
 
 app.post("/api/chat/send", async (req, res) => {
   try {
-    const authUser = getAuthenticatedCloudSyncUser(req);
+    const authUser = await getAuthenticatedCloudSyncUser(req);
     const { message } = req.body || {};
     if (!message || !message.text || !message.author || !message.channel) {
       return res.status(400).json({ success: false, error: "Invalid message" });
@@ -2561,11 +2787,11 @@ app.post("/api/chat/send", async (req, res) => {
       if (!parts.includes(authUser.username.toLowerCase())) {
         return res.status(403).json({ success: false, error: "Cannot send DM into another user's channel" });
       }
-      let csMap = getCloudSyncUsersMap();
+      let csMap = await getCloudSyncUsersMapAsync();
       if (csMap.size > 0) {
         for (const cleanPart of parts) {
           if (!cleanPart || !csMap.has(cleanPart)) {
-            csMap = getCloudSyncUsersMap(true);
+            csMap = await getCloudSyncUsersMapAsync(true);
             if (!cleanPart || !csMap.has(cleanPart)) {
               return res.status(404).json({
                 success: false,
@@ -3026,7 +3252,7 @@ app.post("/api/shop/troll", async (req, res) => {
       }
     }
 
-    const authUser = getAuthenticatedCloudSyncUser(req);
+    const authUser = await getAuthenticatedCloudSyncUser(req);
     const payload = {
       type: "admin-chaos",
       trollEventId,
@@ -3040,7 +3266,7 @@ app.post("/api/shop/troll", async (req, res) => {
     };
 
     const normTarget = (targetUsername || "").trim().toLowerCase().replace(/[-_]/g, "");
-    const cloudUser = targetUsername ? getCloudSyncUser(targetUsername) : null;
+    const cloudUser = targetUsername ? await getCloudSyncUserAsync(targetUsername) : null;
     let delivered = 0;
     for (const [id, client] of liveClients.entries()) {
       const matchId = targetClientId && id === targetClientId;
@@ -3335,8 +3561,9 @@ process.on("exit", killServices);
 
 server.listen(PORT, () => {
   console.log(
-    `server listening on ${PORT}!! ~ caching: ${CACHING_ENABLED ? "yes" : "no"}`,
+    `server listening on ${PORT}!! ~ caching: ${CACHING_ENABLED ? "yes" : "no"} ~ cloudsync: ${USE_SUPABASE_CLOUDSYNC ? "supabase" : "sqlite"}`,
   );
+  void getCloudSyncUsersMapAsync().catch(() => {});
 
   if (NODE_ENV === "development") {
     spawnServices();
