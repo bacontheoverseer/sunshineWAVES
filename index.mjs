@@ -825,13 +825,19 @@ const CLOUDSYNC_JWT_SECRET =
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = (
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
   process.env.SUPABASE_KEY ||
   ""
 ).trim();
+const SUPABASE_KEY_IS_JWT = SUPABASE_SERVICE_ROLE_KEY.split(".").length === 3;
 const USE_SUPABASE_CLOUDSYNC = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 if (SUPABASE_URL && !SUPABASE_SERVICE_ROLE_KEY) {
   console.warn(
-    "[cloudsync] SUPABASE_URL is set without SUPABASE_SERVICE_ROLE_KEY; falling back to local SQLite"
+    "[cloudsync] SUPABASE_URL is set without SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY; falling back to local SQLite"
+  );
+} else if (SUPABASE_SERVICE_ROLE_KEY.startsWith("sb_publishable_")) {
+  console.warn(
+    "[cloudsync] Warning: SUPABASE_SERVICE_ROLE_KEY looks like a sb_publishable_ key! Use a sb_secret_ or legacy service_role key instead."
   );
 }
 
@@ -914,12 +920,17 @@ function openCloudSyncDb(_readonly = false) {
 }
 
 async function supabaseRest(restPath, options = {}) {
+  const authHeaders = {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    "Content-Type": "application/json",
+  };
+  if (SUPABASE_KEY_IS_JWT) {
+    authHeaders.Authorization = `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`;
+  }
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
     ...options,
     headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
+      ...authHeaders,
       ...(options.headers || {}),
     },
   });
