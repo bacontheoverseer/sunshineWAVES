@@ -1161,6 +1161,17 @@ html.low-power-device .game-grid-container {
     will-change: auto;
 }
 
+body.browser-view .sunshine-ad-node,
+body.games-view .sunshine-ad-node,
+body.apps-view .sunshine-ad-node,
+body.studio-view .sunshine-ad-node,
+body.shop-view .sunshine-ad-node,
+body:has(#auth-gate-backdrop) .sunshine-ad-node {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
     body.games-view,
     body.games-view .meow,

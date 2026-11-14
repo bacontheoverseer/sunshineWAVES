@@ -141,7 +141,155 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
     <script defer src="/b/all.js"></script>
     <script type="module" src="/assets/scripts/entry.tsx"></script>
+    <script>
+      (function () {
+        var NON_HOME_CLASSES = [
+          "browser-view",
+          "games-view",
+          "apps-view",
+          "studio-view",
+          "shop-view",
+        ];
+        window.__isSunshineHomepage = function () {
+          if (typeof _revealed !== "undefined" && !_revealed) return false;
+          var body = document.body;
+          if (!body) return false;
+          for (var i = 0; i < NON_HOME_CLASSES.length; i++) {
+            if (body.classList.contains(NON_HOME_CLASSES[i])) return false;
+          }
+          if (document.getElementById("auth-gate-backdrop")) return false;
+          return true;
+        };
+
+        var _acDepth = 0;
+        var _wrappedListeners = new WeakMap();
+
+        function isAcCaller() {
+          if (_acDepth > 0) return true;
+          try {
+            var cs = document.currentScript;
+            if (cs) {
+              if (cs.id === "aclib" || cs.getAttribute("data-sunshine-ac") === "1") return true;
+              var src = (cs.getAttribute("src") || cs.src || "").toLowerCase();
+              if (src.indexOf("acscdn") !== -1 || src.indexOf("adcash") !== -1) return true;
+            }
+          } catch (_e) {}
+          try {
+            var st = new Error().stack || "";
+            if (/acscdn|aclib|runAutoTag/i.test(st)) return true;
+          } catch (_e) {}
+          return false;
+        }
+
+        function withAcScope(fn) {
+          if (typeof fn !== "function") return fn;
+          return function () {
+            _acDepth++;
+            try {
+              return fn.apply(this, arguments);
+            } finally {
+              _acDepth--;
+            }
+          };
+        }
+
+        var origAdd = EventTarget.prototype.addEventListener;
+        var origRem = EventTarget.prototype.removeEventListener;
+        var GATED_EVENTS = {
+          click: 1, mousedown: 1, mouseup: 1, pointerdown: 1, pointerup: 1,
+          touchstart: 1, touchend: 1, auxclick: 1, dblclick: 1, keydown: 1, keyup: 1,
+        };
+        EventTarget.prototype.addEventListener = function (type, listener, options) {
+          if (
+            typeof listener === "function" &&
+            GATED_EVENTS[String(type).toLowerCase()] &&
+            isAcCaller()
+          ) {
+            var wrapped = _wrappedListeners.get(listener);
+            if (!wrapped) {
+              wrapped = function (ev) {
+                if (!window.__isSunshineHomepage()) return;
+                _acDepth++;
+                try {
+                  return listener.call(this, ev);
+                } finally {
+                  _acDepth--;
+                }
+              };
+              _wrappedListeners.set(listener, wrapped);
+            }
+            return origAdd.call(this, type, wrapped, options);
+          }
+          return origAdd.call(this, type, listener, options);
+        };
+        EventTarget.prototype.removeEventListener = function (type, listener, options) {
+          var wrapped = typeof listener === "function" ? _wrappedListeners.get(listener) : null;
+          return origRem.call(this, type, wrapped || listener, options);
+        };
+
+        var origOpen = window.open;
+        window.open = function () {
+          if (isAcCaller() && !window.__isSunshineHomepage()) return null;
+          return origOpen.apply(window, arguments);
+        };
+
+        var origSetTimeout = window.setTimeout;
+        window.setTimeout = function (fn, delay) {
+          if (typeof fn === "function" && isAcCaller()) {
+            var args = Array.prototype.slice.call(arguments, 2);
+            var scoped = withAcScope(function () {
+              return fn.apply(this, args);
+            });
+            return origSetTimeout.call(window, scoped, delay);
+          }
+          return origSetTimeout.apply(window, arguments);
+        };
+
+        var origAppend = Node.prototype.appendChild;
+        var origInsert = Node.prototype.insertBefore;
+        function tagIfAdNode(node) {
+          try {
+            if (!node || node.nodeType !== 1) return;
+            if (isAcCaller()) {
+              if (node.tagName === "SCRIPT") {
+                node.setAttribute("data-sunshine-ac", "1");
+              } else if (node.classList) {
+                node.classList.add("sunshine-ad-node");
+              }
+            }
+          } catch (_e) {}
+        }
+        Node.prototype.appendChild = function (node) {
+          tagIfAdNode(node);
+          return origAppend.call(this, node);
+        };
+        Node.prototype.insertBefore = function (node, ref) {
+          tagIfAdNode(node);
+          return origInsert.call(this, node, ref);
+        };
+
+        window.__wrapSunshineAclib = function () {
+          try {
+            if (window.aclib && typeof window.aclib.runAutoTag === "function" && !window.aclib.__sunshineWrapped) {
+              var origRun = window.aclib.runAutoTag;
+              window.aclib.runAutoTag = function () {
+                _acDepth++;
+                try {
+                  return origRun.apply(this, arguments);
+                } finally {
+                  _acDepth--;
+                }
+              };
+              window.aclib.__sunshineWrapped = true;
+            }
+          } catch (_e) {}
+        };
+      })();
+    </script>
     <script id="aclib" type="text/javascript" src="//acscdn.com/script/aclib.js"></script>
+    <script type="text/javascript">
+      if (window.__wrapSunshineAclib) window.__wrapSunshineAclib();
+    </script>
     <script type="text/javascript">
         aclib.runAutoTag({
             zoneId: 'rqxro9on74',

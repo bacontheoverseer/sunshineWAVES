@@ -34,7 +34,16 @@ function adblockSkip(hostname) {
 async function loadAdLists() {
   try {
     const listCache = await caches.open("sunshine-adblock-v1");
-    const newDomains = new Set(["doubleclick.net", "google-analytics.com"]);
+    const newDomains = new Set([
+      "doubleclick.net",
+      "google-analytics.com",
+      "googlesyndication.com",
+      "googleadservices.com",
+      "adservice.google.com",
+      "acscdn.com",
+      "highperformanceformat.com",
+      "profitableratecpm.com",
+    ]);
     await Promise.all(
       ADBLOCK_LISTS.map(async (url) => {
         try {
