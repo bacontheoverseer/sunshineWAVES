@@ -358,7 +358,7 @@ const NO_CACHE_CC = "public, max-age=0, must-revalidate";
 app.use(
   compression({
     filter: (req, res) => {
-      if (req.headers["x-no-compression"]) return false;
+      if (req.path === "/api/live/stream" || req.headers["x-no-compression"]) return false;
       return compression.filter(req, res);
     },
     level: 2,
@@ -523,6 +523,140 @@ app.get("/api/stuff", (_req, res) => {
     build: buildFingerprint,
     location,
   });
+});
+
+// --- Sunshine Live Client & Chaos Admin Engine ---
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "cookie_admin_chaos_master_key_99";
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "bacon";
+
+const liveClients = new Map();
+
+function verifyAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const bearerKey = authHeader && authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+  const key = req.headers["x-admin-key"] || bearerKey || req.query.adminKey || (req.body && req.body.adminSecret);
+  if (!key || key !== ADMIN_SECRET) {
+    return res.status(401).json({ success: false, error: "Unauthorized: Invalid Admin Secret" });
+  }
+  next();
+}
+
+function broadcastToClients(actionPayload, target = "all") {
+  const payloadStr = `data: ${JSON.stringify(actionPayload)}\n\n`;
+  let delivered = 0;
+  for (const [id, client] of liveClients.entries()) {
+    if (target === "all" || target === id || client.username === target) {
+      try {
+        client.res.write(payloadStr);
+        delivered++;
+      } catch {
+        liveClients.delete(id);
+      }
+    }
+  }
+  return delivered;
+}
+
+// Keep-alive heartbeat comment every 15s
+setInterval(() => {
+  for (const [id, client] of liveClients.entries()) {
+    try {
+      client.res.write(": keepalive\n\n");
+    } catch {
+      liveClients.delete(id);
+    }
+  }
+}, 15000);
+
+app.post("/api/admin/verify", (req, res) => {
+  const authHeader = req.headers.authorization;
+  const bearerKey = authHeader && authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+  const key = req.headers["x-admin-key"] || bearerKey || (req.body && req.body.adminSecret);
+  if (!key || key !== ADMIN_SECRET) {
+    return res.status(401).json({ success: false, error: "Invalid Admin Secret" });
+  }
+  res.json({ success: true, username: ADMIN_USERNAME });
+});
+
+app.get("/api/live/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+
+  const clientId = (req.query.id || Math.random().toString(36).substring(2, 10)).toString();
+  const username = (req.query.user || "Guest-" + clientId.substring(0, 4)).toString();
+  const page = (req.query.page || "/").toString();
+  const game = (req.query.game || "Browsing").toString();
+  const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "127.0.0.1")
+    .toString()
+    .replace(/^::ffff:/, "");
+
+  const clientRecord = {
+    res,
+    id: clientId,
+    username,
+    ip,
+    page,
+    game,
+    connectedAt: Date.now(),
+    lastSeen: Date.now(),
+  };
+
+  liveClients.set(clientId, clientRecord);
+
+  // Initial handshake
+  res.write(`data: ${JSON.stringify({ type: "connected", clientId, username })}\n\n`);
+
+  req.on("close", () => {
+    liveClients.delete(clientId);
+  });
+});
+
+app.post("/api/live/heartbeat", (req, res) => {
+  const { clientId, username, page, game } = req.body || {};
+  if (clientId && liveClients.has(clientId)) {
+    const client = liveClients.get(clientId);
+    if (username) client.username = username;
+    if (page) client.page = page;
+    if (game) client.game = game;
+    client.lastSeen = Date.now();
+  }
+  res.json({ success: true });
+});
+
+app.get("/api/admin/clients", verifyAdmin, (_req, res) => {
+  const clients = Array.from(liveClients.values()).map((c) => ({
+    id: c.id,
+    username: c.username,
+    ip: c.ip,
+    page: c.page,
+    game: c.game,
+    connectedAt: c.connectedAt,
+    lastSeen: c.lastSeen,
+  }));
+  res.json({ success: true, count: clients.length, clients });
+});
+
+app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
+  const { target = "all", action, data } = req.body || {};
+  if (!action) {
+    return res.status(400).json({ success: false, error: "Action is required" });
+  }
+
+  const payload = {
+    type: "admin-chaos",
+    action,
+    data: data || {},
+    from: ADMIN_USERNAME,
+    timestamp: Date.now(),
+  };
+
+  const count = broadcastToClients(payload, target);
+  res.json({ success: true, count, target, action });
 });
 
 function getBuiltModuleEntryPath() {

@@ -3,6 +3,7 @@ import { useEffect } from "preact/hooks";
 import { store, showBrowserView } from "../state/store.ts";
 import { navigateIframeTo, updateHistoryUI } from "../core/iframe.ts";
 import { getProxyUrl } from "../core/utils.ts";
+import { checkContent } from "../core/contentFilter.ts";
 
 interface TabLike {
   iframe: HTMLIFrameElement;
@@ -105,9 +106,30 @@ export async function handleSearch(
   _gameName?: string,
 ): Promise<void> {
   if (!activeTab || !query.trim()) return;
+
+  const filterResult = checkContent(query);
+  if (filterResult.blocked) {
+    if (typeof (window as any).showToast === "function") {
+      (window as any).showToast(filterResult.reason || "Content blocked by safety filter", "error");
+    } else {
+      alert(`⚠️ Blocked by Sunshine Safety Filter:\n\n${filterResult.reason}`);
+    }
+    return;
+  }
+
   showBrowserView();
   activeTab.isUrlLoaded = true;
   const searchURL = executeBang(query) || generateSearchUrl(query);
+
+  const urlCheck = checkContent(searchURL);
+  if (urlCheck.blocked) {
+    if (typeof (window as any).showToast === "function") {
+      (window as any).showToast(urlCheck.reason || "Content blocked by safety filter", "error");
+    } else {
+      alert(`⚠️ Blocked by Sunshine Safety Filter:\n\n${urlCheck.reason}`);
+    }
+    return;
+  }
   const isGame =
     /jsdelivr|googleusercontent|githack|selenite|edunet|velara|vsembed|vidsrc\.me|gn-math\.dev|truffled/.test(
       searchURL,

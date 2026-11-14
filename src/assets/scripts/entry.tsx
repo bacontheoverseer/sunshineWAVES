@@ -7,6 +7,7 @@ import "../css/themes.css";
 import "../css/index.css";
 import "../css/tabs.css";
 import "../css/chat.css";
+import "../css/admin.css";
 
 window.__sunshineStuffData = fetch("/api/stuff", { cache: "no-store" })
   .then((res) => (res.ok ? res.json() : null))
@@ -95,6 +96,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     void import("./features/settings.ts");
     void import("./features/toast.ts");
+    void import("./core/liveClient.ts").then((module) => {
+      module.initLiveClient();
+    });
   });
 
   scheduleIdleLoad(() => {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useMemo } from "preact/hooks";
+import { checkContent } from "../core/contentFilter.ts";
 
 interface ChatMessage {
   id: string;
@@ -220,6 +221,12 @@ export default function ChatModal() {
     if (!cloudUser) return;
     const text = inputText.trim();
     if (!text) return;
+
+    const filter = checkContent(text);
+    if (filter.blocked) {
+      alert(`⚠️ Message blocked: ${filter.reason}`);
+      return;
+    }
 
     const newMsg: ChatMessage = {
       id: "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7),
