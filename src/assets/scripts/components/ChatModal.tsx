@@ -517,14 +517,35 @@ export default function ChatModal() {
         if (typeof speaking === "boolean" && fromClientId) {
           setSpeakingMap((prev) => ({ ...prev, [fromClientId]: speaking }));
         }
-        if (Array.isArray(participants)) {
-          setVoiceRooms((prev) => ({ ...prev, [roomId]: participants }));
+        if (Array.isArray(participants) && participants.length > 0) {
+          const normalized = participants.map((p: any) => {
+            const cid = p.clientId || p.peerId;
+            if (cid === myClientId) {
+              return {
+                ...p,
+                clientId: cid,
+                avatarColor: p.avatarColor || stringToColor(p.username || "guest"),
+                muted: isMutedRef.current,
+                deafened: isDeafenedRef.current,
+              };
+            }
+            return {
+              ...p,
+              clientId: cid,
+              avatarColor: p.avatarColor || stringToColor(p.username || "guest"),
+            };
+          });
+          setVoiceRooms((prev) => ({ ...prev, [roomId]: normalized }));
         } else if (fromClientId && roomId) {
           setVoiceRooms((prev) => ({
             ...prev,
             [roomId]: (prev[roomId] || []).map((p) =>
               p.clientId === fromClientId
-                ? { ...p, muted: muted ?? p.muted, deafened: deafened ?? p.deafened }
+                ? {
+                    ...p,
+                    muted: typeof muted === "boolean" ? muted : p.muted,
+                    deafened: typeof deafened === "boolean" ? deafened : p.deafened,
+                  }
                 : p
             ),
           }));
@@ -706,7 +727,7 @@ export default function ChatModal() {
         clientId: myClientId,
         username: cloudUser,
         avatarColor: stringToColor(cloudUser),
-        muted: isMutedRef.current || !stream,
+        muted: isMutedRef.current,
         deafened: isDeafenedRef.current,
       };
 
@@ -728,56 +749,64 @@ export default function ChatModal() {
     [cloudUser, leaveVoiceRoom, sendVoiceSignal]
   );
 
-  const toggleMute = useCallback(() => {
-    setIsMuted((prev) => {
-      const next = !prev;
+  const applyVoiceMuteDeafenState = useCallback(
+    (nextMuted: boolean, nextDeafened: boolean) => {
+      isMutedRef.current = nextMuted;
+      isDeafenedRef.current = nextDeafened;
+      setIsMuted(nextMuted);
+      setIsDeafened(nextDeafened);
+
       if (localStreamRef.current) {
         for (const t of localStreamRef.current.getAudioTracks()) {
-          t.enabled = !next;
+          t.enabled = !nextMuted && !nextDeafened;
         }
       }
-      if (activeVoiceRoomRef.current) {
-        const myClientId = getClientId();
-        const rId = activeVoiceRoomRef.current;
+
+      for (const [, audioEl] of remoteAudioElementsRef.current.entries()) {
+        const peerUsername = audioEl.dataset.username || "";
+        audioEl.muted = nextDeafened || isUserBlocked(peerUsername);
+      }
+
+      const myClientId = getClientId();
+      if (nextMuted || nextDeafened) {
+        setSpeakingMap((prev) => ({ ...prev, [myClientId]: false }));
+      }
+
+      const rId = activeVoiceRoomRef.current;
+      if (rId) {
         setVoiceRooms((rooms) => ({
           ...rooms,
           [rId]: (rooms[rId] || []).map((p) =>
-            p.clientId === myClientId ? { ...p, muted: next } : p
+            p.clientId === myClientId
+              ? { ...p, muted: nextMuted, deafened: nextDeafened }
+              : p
           ),
         }));
         sendVoiceSignal({
           signalType: "VOICE_STATE",
           roomId: rId,
-          muted: next,
-          deafened: isDeafenedRef.current,
+          muted: nextMuted,
+          deafened: nextDeafened,
+          speaking: false,
         });
       }
-      return next;
-    });
-  }, [sendVoiceSignal]);
+    },
+    [sendVoiceSignal, isUserBlocked]
+  );
+
+  const toggleMute = useCallback(() => {
+    const nextMuted = !isMutedRef.current;
+    // If unmuting while deafened, also undeafen so user can talk & hear
+    const nextDeafened = !nextMuted && isDeafenedRef.current ? false : isDeafenedRef.current;
+    applyVoiceMuteDeafenState(nextMuted, nextDeafened);
+  }, [applyVoiceMuteDeafenState]);
 
   const toggleDeafen = useCallback(() => {
-    setIsDeafened((prev) => {
-      const next = !prev;
-      if (activeVoiceRoomRef.current) {
-        const myClientId = getClientId();
-        const rId = activeVoiceRoomRef.current;
-        setVoiceRooms((rooms) => ({
-          ...rooms,
-          [rId]: (rooms[rId] || []).map((p) =>
-            p.clientId === myClientId ? { ...p, deafened: next } : p
-          ),
-        }));
-        sendVoiceSignal({
-          signalType: "VOICE_STATE",
-          roomId: rId,
-          muted: isMutedRef.current,
-          deafened: next,
-        });
-      }
-      return next;
-    });
-  }, [sendVoiceSignal]);
+    const nextDeafened = !isDeafenedRef.current;
+    // Deafening also mutes mic; undeafening unmutes mic
+    const nextMuted = nextDeafened ? true : false;
+    applyVoiceMuteDeafenState(nextMuted, nextDeafened);
+  }, [applyVoiceMuteDeafenState]);
 
   // Poll / listen for CloudSync login updates
   useEffect(() => {
@@ -1171,9 +1200,17 @@ export default function ChatModal() {
                                   {m.username.slice(0, 1).toLowerCase()}
                                 </div>
                                 <span style={{ flex: 1 }}>{m.username}</span>
+                                {m.deafened && (
+                                  <i
+                                    class="fa-solid fa-volume-xmark"
+                                    title="Deafened"
+                                    style={{ fontSize: "10px", color: "#f87171" }}
+                                  ></i>
+                                )}
                                 {m.muted && (
                                   <i
                                     class="fa-solid fa-microphone-slash"
+                                    title="Muted"
                                     style={{ fontSize: "10px", color: "#f87171" }}
                                   ></i>
                                 )}
@@ -1551,13 +1588,13 @@ export default function ChatModal() {
                           {isMe && <span class="chat-you-pill">you</span>}
                         </div>
                         <div class="chat-voice-card-badges">
-                          {p.muted ? (
-                            <span>
-                              <i
-                                class="fa-solid fa-microphone-slash"
-                                style={{ color: "#f87171" }}
-                              ></i>{" "}
-                              muted
+                          {p.deafened ? (
+                            <span style={{ color: "#f87171" }}>
+                              <i class="fa-solid fa-volume-xmark"></i> deafened
+                            </span>
+                          ) : p.muted ? (
+                            <span style={{ color: "#f87171" }}>
+                              <i class="fa-solid fa-microphone-slash"></i> muted
                             </span>
                           ) : isSpeaking ? (
                             <span style={{ color: "#4ade80" }}>

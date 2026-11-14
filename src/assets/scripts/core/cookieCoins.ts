@@ -1,5 +1,6 @@
 /**
  * Operation Cookie - Global Cookie Coins Currency, Game Studios & Leaderboards
+ * (Strictly real user data — no fake players)
  */
 
 export interface StudioProfile {
@@ -24,7 +25,7 @@ export interface LeaderboardEntry {
 
 const COINS_STORAGE_KEY = "cookie_coins_balance_v1";
 const STUDIO_STORAGE_KEY = "cookie_user_studio_v1";
-const LEADERBOARD_STORAGE_KEY = "cookie_game_leaderboards_v1";
+const LEADERBOARD_STORAGE_KEY = "cookie_game_leaderboards_v2";
 
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
@@ -53,7 +54,6 @@ export function getCookieCoins(): number {
       const n = parseInt(raw, 10);
       if (!Number.isNaN(n)) return Math.max(0, n);
     }
-    // Starter balance of 150 Cookie Coins
     localStorage.setItem(COINS_STORAGE_KEY, "150");
     return 150;
   } catch {
@@ -102,12 +102,12 @@ export function getUserStudio(): StudioProfile {
   const defaultStudio: StudioProfile = {
     id: `studio_${owner.toLowerCase()}`,
     name: `${owner}'s studio`,
-    tagline: "building next-gen web games on operation cookie",
+    tagline: "building web games on operation cookie",
     owner,
     color: "#3b82f6",
     icon: "fa-rocket",
     coinsEarned: 0,
-    unclaimedCoins: 25,
+    unclaimedCoins: 0,
     createdAt: new Date().toISOString(),
   };
   return defaultStudio;
@@ -162,22 +162,7 @@ export async function recordGameActivity(
   try {
     const raw = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
     const all: Record<string, LeaderboardEntry[]> = raw ? JSON.parse(raw) : {};
-    const list = all[key] || [
-      {
-        username: "cookie_champ",
-        seconds: 1420,
-        plays: 19,
-        highScore: 450,
-        lastPlayed: new Date().toISOString(),
-      },
-      {
-        username: "neon_rider",
-        seconds: 890,
-        plays: 11,
-        highScore: 310,
-        lastPlayed: new Date().toISOString(),
-      },
-    ];
+    const list: LeaderboardEntry[] = all[key] || [];
 
     const existingIdx = list.findIndex((e) => e.username.toLowerCase() === userLower);
     if (existingIdx >= 0) {
@@ -216,7 +201,6 @@ export async function recordGameActivity(
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data?.entries) && data.entries.length > 0) {
-        // Merge server entries with local entries
         const map = new Map<string, LeaderboardEntry>();
         for (const item of updatedList) map.set(item.username.toLowerCase(), item);
         for (const item of data.entries as LeaderboardEntry[]) {

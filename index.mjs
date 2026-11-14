@@ -994,35 +994,42 @@ app.post("/api/chat/send", async (req, res) => {
 
 app.post("/api/voice/signal", (req, res) => {
   try {
-    const { type, roomId, peerId, username, targetPeerId, payload, muted, deafened } = req.body || {};
-    if (!type || !peerId) {
+    const body = req.body || {};
+    const sigType = body.signalType || body.type;
+    const clientId = body.fromClientId || body.peerId || body.clientId;
+    const targetClientId = body.targetClientId || body.targetPeerId || null;
+    const sdpOrCandidate = body.sdpOrCandidate || body.payload || null;
+    const { roomId, username, avatarColor, muted, deafened, speaking } = body;
+
+    if (!sigType || !clientId) {
       return res.status(400).json({ success: false, error: "Missing voice signal params" });
     }
 
-    if (type === "VOICE_JOIN" && roomId) {
-      // Remove peer from any previous room
+    if (sigType === "VOICE_JOIN" && roomId) {
       for (const [, peers] of voiceRooms.entries()) {
-        peers.delete(peerId);
+        peers.delete(clientId);
       }
       if (!voiceRooms.has(roomId)) {
         voiceRooms.set(roomId, new Map());
       }
-      voiceRooms.get(roomId).set(peerId, {
-        peerId,
+      voiceRooms.get(roomId).set(clientId, {
+        clientId,
+        peerId: clientId,
         username: username || "User",
+        avatarColor: avatarColor || "#3b82f6",
         muted: !!muted,
         deafened: !!deafened,
       });
-    } else if (type === "VOICE_LEAVE") {
+    } else if (sigType === "VOICE_LEAVE") {
       for (const [rId, peers] of voiceRooms.entries()) {
-        peers.delete(peerId);
+        peers.delete(clientId);
         if (peers.size === 0) voiceRooms.delete(rId);
       }
-    } else if (type === "VOICE_STATE" && roomId && voiceRooms.has(roomId)) {
-      const peer = voiceRooms.get(roomId).get(peerId);
+    } else if (sigType === "VOICE_STATE" && roomId && voiceRooms.has(roomId)) {
+      const peer = voiceRooms.get(roomId).get(clientId);
       if (peer) {
-        peer.muted = !!muted;
-        peer.deafened = !!deafened;
+        if (typeof muted === "boolean") peer.muted = muted;
+        if (typeof deafened === "boolean") peer.deafened = deafened;
       }
     }
 
@@ -1033,19 +1040,25 @@ app.post("/api/voice/signal", (req, res) => {
 
     const signalEvent = {
       type: "voice-event",
-      signalType: type,
+      signalType: sigType,
       roomId,
-      peerId,
+      fromClientId: clientId,
+      peerId: clientId,
       username,
-      targetPeerId,
-      payload,
-      muted,
-      deafened,
+      avatarColor,
+      targetClientId,
+      targetPeerId: targetClientId,
+      sdpOrCandidate,
+      payload: sdpOrCandidate,
+      muted: typeof muted === "boolean" ? muted : undefined,
+      deafened: typeof deafened === "boolean" ? deafened : undefined,
+      speaking: typeof speaking === "boolean" ? speaking : undefined,
+      participants: roomId ? activeVoice[roomId] || [] : [],
       voiceRooms: activeVoice,
     };
 
-    if (targetPeerId) {
-      broadcastToClients(signalEvent, targetPeerId);
+    if (targetClientId) {
+      broadcastToClients(signalEvent, targetClientId);
     } else {
       broadcastToClients(signalEvent, "all");
     }

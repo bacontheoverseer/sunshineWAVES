@@ -142,89 +142,6 @@ function makePresetGrid(preset: "platformer" | "topdown" | "shooter" | "flappy")
   return g;
 }
 
-const STARTER_COMMUNITY_GAMES: StudioGameProject[] = [
-  {
-    id: "starter_neon_parkour",
-    title: "neon cyber parkour",
-    description: "leap across neon rooftops, hit the cyan bounce pad, stomp the patrol bot, and reach the flag!",
-    author: "cookie_dev",
-    studioName: "neon wave interactive",
-    studioColor: "#3b82f6",
-    mode: "platformer",
-    grid: makePresetGrid("platformer"),
-    gravity: 0.55,
-    jumpForce: 11.5,
-    moveSpeed: 4.2,
-    playerColor: "#22c55e",
-    bgColor: "#090d16",
-    wallColor: "#3b82f6",
-    customScript: "// Called every frame: onTick(ctx, state, player)\n",
-    likes: 24,
-    plays: 142,
-    createdAt: "2026-11-10T12:00:00Z",
-  },
-  {
-    id: "starter_dungeon_crawler",
-    title: "shadow maze runner",
-    description: "top-down labyrinth! collect all golden coins, dodge the purple ghosts, and escape through the portal.",
-    author: "sunshine",
-    studioName: "sunshine Forge",
-    studioColor: "#a855f7",
-    mode: "topdown",
-    grid: makePresetGrid("topdown"),
-    gravity: 0,
-    jumpForce: 0,
-    moveSpeed: 3.8,
-    playerColor: "#38bdf8",
-    bgColor: "#111827",
-    wallColor: "#6366f1",
-    customScript: "",
-    likes: 19,
-    plays: 98,
-    createdAt: "2026-11-11T15:30:00Z",
-  },
-  {
-    id: "starter_star_blaster",
-    title: "starfighter arena",
-    description: "move with WASD/arrows and press SPACE to fire plasma bolts at incoming alien drones!",
-    author: "nova_pilot",
-    studioName: "orbital studios",
-    studioColor: "#f43f5e",
-    mode: "shooter",
-    grid: makePresetGrid("shooter"),
-    gravity: 0,
-    jumpForce: 0,
-    moveSpeed: 4.5,
-    playerColor: "#f43f5e",
-    bgColor: "#050811",
-    wallColor: "#334155",
-    customScript: "",
-    likes: 31,
-    plays: 210,
-    createdAt: "2026-11-12T09:15:00Z",
-  },
-  {
-    id: "starter_sky_flap",
-    title: "flappy neon dash",
-    description: "tap SPACE or click to flap through tight laser pillars and reach the finish line!",
-    author: "arcade_king",
-    studioName: "pixel crown games",
-    studioColor: "#10b981",
-    mode: "flappy",
-    grid: makePresetGrid("flappy"),
-    gravity: 0.42,
-    jumpForce: 7.8,
-    moveSpeed: 2.6,
-    playerColor: "#facc15",
-    bgColor: "#0f172a",
-    wallColor: "#10b981",
-    customScript: "",
-    likes: 16,
-    plays: 87,
-    createdAt: "2026-11-12T18:20:00Z",
-  },
-];
-
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
   if (typeof w.showToast === "function") {
@@ -388,16 +305,16 @@ export default function GameStudioPage() {
   const [studioColorInput, setStudioColorInput] = useState(userStudio.color);
   const [studioIconInput, setStudioIconInput] = useState(userStudio.icon);
 
-  // Community published games state
+  // Community published games state (only real user-published games)
   const [communityGames, setCommunityGames] = useState<StudioGameProject[]>(() => {
     try {
-      const saved = localStorage.getItem("cookie_studio_games_v1");
+      const saved = localStorage.getItem("cookie_studio_games_v2");
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch {}
-    return STARTER_COMMUNITY_GAMES;
+    return [];
   });
 
   // Editor project state
@@ -626,7 +543,7 @@ export default function GameStudioPage() {
         ? prev.map((g) => (g.id === incoming.id ? incoming : g))
         : [incoming, ...prev];
       try {
-        localStorage.setItem("cookie_studio_games_v1", JSON.stringify(next.slice(0, 80)));
+        localStorage.setItem("cookie_studio_games_v2", JSON.stringify(next.slice(0, 80)));
       } catch {}
       return next;
     });
@@ -1421,6 +1338,45 @@ export default function GameStudioPage() {
             </div>
           </div>
 
+          {filteredCommunityGames.length === 0 ? (
+            <div
+              class="studio-panel"
+              style={{
+                padding: "48px 24px",
+                alignItems: "center",
+                textAlign: "center",
+                gap: "12px",
+              }}
+            >
+              <i
+                class="fa-solid fa-gamepad"
+                style={{ fontSize: "32px", color: "var(--color-icon-dim)" }}
+              ></i>
+              <h3 style={{ margin: 0, fontSize: "15px" }}>
+                no community games published yet
+              </h3>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "12.5px",
+                  color: "var(--color-sublabel)",
+                  maxWidth: "420px",
+                }}
+              >
+                only real user-created games appear here. open the{" "}
+                <strong>game maker engine</strong> to build & publish the first game under your
+                studio and earn +50 cookie coins!
+              </p>
+              <button
+                type="button"
+                class="apps-custom-btn"
+                onClick={() => setSubTab("editor")}
+              >
+                <i class="fa-solid fa-hammer"></i>
+                <span>open game maker engine</span>
+              </button>
+            </div>
+          ) : (
           <div class="studio-community-grid">
             {filteredCommunityGames.map((g) => (
               <article key={g.id} class="studio-game-card">
@@ -1567,6 +1523,7 @@ export default function GameStudioPage() {
               </article>
             ))}
           </div>
+          )}
         </>
       )}
 

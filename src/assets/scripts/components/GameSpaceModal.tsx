@@ -91,11 +91,158 @@ export default function GameSpaceModal() {
   const [isDeafened, setIsDeafened] = useState(false);
   const [voiceMembers, setVoiceMembers] = useState<SpaceVoiceMember[]>([]);
 
+  const inSpaceVoiceRef = useRef(false);
+  const isMutedRef = useRef(false);
+  const isDeafenedRef = useRef(false);
+  const spaceVoiceRoomIdRef = useRef(spaceVoiceRoomId);
+  spaceVoiceRoomIdRef.current = spaceVoiceRoomId;
+
   const localStreamRef = useRef<MediaStream | null>(null);
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const bcRef = useRef<BroadcastChannel | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const sendSpaceVoiceSignal = useCallback((payload: Record<string, unknown>) => {
+    const full = {
+      ...payload,
+      roomId: spaceVoiceRoomIdRef.current,
+    };
+    try {
+      bcRef.current?.postMessage(full);
+    } catch {}
+    fetch("/api/voice/signal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(full),
+    }).catch(() => {});
+  }, []);
+
+  const createSpacePeerConnection = useCallback(
+    (remotePeerId: string, isInitiator: boolean) => {
+      const myPeerId = getClientId();
+      const existing = pcsRef.current.get(remotePeerId);
+      if (existing) return existing;
+
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+      pcsRef.current.set(remotePeerId, pc);
+
+      if (localStreamRef.current) {
+        for (const track of localStreamRef.current.getTracks()) {
+          pc.addTrack(track, localStreamRef.current);
+        }
+      }
+
+      pc.onicecandidate = (ev) => {
+        if (ev.candidate) {
+          sendSpaceVoiceSignal({
+            type: "VOICE_ICE",
+            signalType: "VOICE_ICE",
+            peerId: myPeerId,
+            fromClientId: myPeerId,
+            targetPeerId: remotePeerId,
+            targetClientId: remotePeerId,
+            sdpOrCandidate: ev.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.ontrack = (ev) => {
+        const stream = ev.streams[0];
+        if (!stream) return;
+        let audioEl = remoteAudiosRef.current.get(remotePeerId);
+        if (!audioEl) {
+          audioEl = new Audio();
+          audioEl.autoplay = true;
+          remoteAudiosRef.current.set(remotePeerId, audioEl);
+        }
+        audioEl.srcObject = stream;
+        audioEl.muted = isDeafenedRef.current;
+        audioEl.play().catch(() => {});
+      };
+
+      if (isInitiator) {
+        pc.createOffer()
+          .then((offer) => pc.setLocalDescription(offer))
+          .then(() => {
+            if (pc.localDescription) {
+              sendSpaceVoiceSignal({
+                type: "VOICE_OFFER",
+                signalType: "VOICE_OFFER",
+                peerId: myPeerId,
+                fromClientId: myPeerId,
+                targetPeerId: remotePeerId,
+                targetClientId: remotePeerId,
+                sdpOrCandidate: pc.localDescription.toJSON(),
+              });
+            }
+          })
+          .catch(() => {});
+      }
+
+      return pc;
+    },
+    [sendSpaceVoiceSignal]
+  );
+
+  const applySpaceMuteDeafen = useCallback(
+    (nextMuted: boolean, nextDeafened: boolean) => {
+      isMutedRef.current = nextMuted;
+      isDeafenedRef.current = nextDeafened;
+      setIsMuted(nextMuted);
+      setIsDeafened(nextDeafened);
+
+      if (localStreamRef.current) {
+        for (const t of localStreamRef.current.getAudioTracks()) {
+          t.enabled = !nextMuted && !nextDeafened;
+        }
+      }
+
+      for (const audioEl of remoteAudiosRef.current.values()) {
+        audioEl.muted = nextDeafened;
+      }
+
+      const myPeerId = getClientId();
+      const username = getActiveUser();
+
+      setVoiceMembers((prev) =>
+        prev.map((m) =>
+          m.peerId === myPeerId
+            ? { ...m, muted: nextMuted, deafened: nextDeafened }
+            : m
+        )
+      );
+
+      if (inSpaceVoiceRef.current) {
+        sendSpaceVoiceSignal({
+          type: "VOICE_STATE",
+          signalType: "VOICE_STATE",
+          peerId: myPeerId,
+          fromClientId: myPeerId,
+          username,
+          muted: nextMuted,
+          deafened: nextDeafened,
+        });
+      }
+    },
+    [sendSpaceVoiceSignal]
+  );
+
+  const toggleSpaceMute = useCallback(() => {
+    const nextMuted = !isMutedRef.current;
+    const nextDeafened = !nextMuted && isDeafenedRef.current ? false : isDeafenedRef.current;
+    applySpaceMuteDeafen(nextMuted, nextDeafened);
+    notifyToast(nextMuted ? "space mic muted" : "space mic unmuted", "info");
+  }, [applySpaceMuteDeafen]);
+
+  const toggleSpaceDeafen = useCallback(() => {
+    const nextDeafened = !isDeafenedRef.current;
+    const nextMuted = nextDeafened ? true : false;
+    applySpaceMuteDeafen(nextMuted, nextDeafened);
+    notifyToast(nextDeafened ? "space audio deafened" : "space audio undeafened", "info");
+  }, [applySpaceMuteDeafen]);
 
   // Refresh leaderboard when opened or game changes
   const refreshLeaderboard = useCallback(async () => {
@@ -189,12 +336,109 @@ export default function GameSpaceModal() {
       }
     };
 
+    const handleVoicePayload = async (detail: Record<string, unknown>) => {
+      if (!detail || detail.roomId !== spaceVoiceRoomIdRef.current) return;
+      const myPeerId = getClientId();
+      const sigType = String(detail.signalType || detail.type || "");
+      const fromPeer = String(detail.fromClientId || detail.peerId || "");
+      const targetPeer = String(detail.targetClientId || detail.targetPeerId || "");
+
+      if (
+        detail.voiceRooms &&
+        typeof detail.voiceRooms === "object" &&
+        Array.isArray((detail.voiceRooms as Record<string, unknown>)[spaceVoiceRoomIdRef.current])
+      ) {
+        const list = (detail.voiceRooms as Record<string, SpaceVoiceMember[]>)[
+          spaceVoiceRoomIdRef.current
+        ].map((m) => {
+          const pid = m.peerId || (m as unknown as { clientId?: string }).clientId || "";
+          if (pid === myPeerId) {
+            return {
+              peerId: myPeerId,
+              username: m.username || getActiveUser(),
+              muted: isMutedRef.current,
+              deafened: isDeafenedRef.current,
+            };
+          }
+          return {
+            peerId: pid,
+            username: m.username || "player",
+            muted: Boolean(m.muted),
+            deafened: Boolean(m.deafened),
+          };
+        });
+        setVoiceMembers(list);
+      } else if (sigType === "VOICE_STATE" && fromPeer) {
+        setVoiceMembers((prev) =>
+          prev.map((m) =>
+            m.peerId === fromPeer
+              ? {
+                  ...m,
+                  muted: fromPeer === myPeerId ? isMutedRef.current : Boolean(detail.muted),
+                  deafened:
+                    fromPeer === myPeerId ? isDeafenedRef.current : Boolean(detail.deafened),
+                }
+              : m
+          )
+        );
+      }
+
+      if (!inSpaceVoiceRef.current || !fromPeer || fromPeer === myPeerId) return;
+      if (targetPeer && targetPeer !== myPeerId) return;
+
+      try {
+        if (sigType === "VOICE_JOIN") {
+          createSpacePeerConnection(fromPeer, true);
+        } else if (sigType === "VOICE_LEAVE") {
+          const pc = pcsRef.current.get(fromPeer);
+          if (pc) {
+            pc.close();
+            pcsRef.current.delete(fromPeer);
+          }
+          const audioEl = remoteAudiosRef.current.get(fromPeer);
+          if (audioEl) {
+            audioEl.pause();
+            remoteAudiosRef.current.delete(fromPeer);
+          }
+        } else if (sigType === "VOICE_OFFER" && detail.sdpOrCandidate) {
+          const pc = createSpacePeerConnection(fromPeer, false);
+          await pc.setRemoteDescription(
+            new RTCSessionDescription(detail.sdpOrCandidate as RTCSessionDescriptionInit)
+          );
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          if (pc.localDescription) {
+            sendSpaceVoiceSignal({
+              type: "VOICE_ANSWER",
+              signalType: "VOICE_ANSWER",
+              peerId: myPeerId,
+              fromClientId: myPeerId,
+              targetPeerId: fromPeer,
+              targetClientId: fromPeer,
+              sdpOrCandidate: pc.localDescription.toJSON(),
+            });
+          }
+        } else if (sigType === "VOICE_ANSWER" && detail.sdpOrCandidate) {
+          const pc = pcsRef.current.get(fromPeer);
+          if (pc) {
+            await pc.setRemoteDescription(
+              new RTCSessionDescription(detail.sdpOrCandidate as RTCSessionDescriptionInit)
+            );
+          }
+        } else if (sigType === "VOICE_ICE" && detail.sdpOrCandidate) {
+          const pc = pcsRef.current.get(fromPeer);
+          if (pc) {
+            await pc.addIceCandidate(
+              new RTCIceCandidate(detail.sdpOrCandidate as RTCIceCandidateInit)
+            );
+          }
+        }
+      } catch {}
+    };
+
     const onSseVoice = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (!detail || detail.roomId !== spaceVoiceRoomId) return;
-      if (detail.voiceRooms && Array.isArray(detail.voiceRooms[spaceVoiceRoomId])) {
-        setVoiceMembers(detail.voiceRooms[spaceVoiceRoomId]);
-      }
+      if (detail) handleVoicePayload(detail);
     };
 
     document.addEventListener("toggleGameSpaceModal", onToggle);
@@ -214,6 +458,8 @@ export default function GameSpaceModal() {
             } catch {}
             return next;
           });
+        } else if (ev.data?.roomId === spaceVoiceRoomIdRef.current) {
+          handleVoicePayload(ev.data);
         }
       };
       bcRef.current = bc;
@@ -225,7 +471,7 @@ export default function GameSpaceModal() {
       window.removeEventListener("sunshine-voice-event", onSseVoice);
       bcRef.current?.close();
     };
-  }, [spaceVoiceRoomId]);
+  }, [spaceVoiceRoomId, createSpacePeerConnection, sendSpaceVoiceSignal]);
 
   useEffect(() => {
     if (isOpen) {
@@ -295,7 +541,7 @@ export default function GameSpaceModal() {
     const myPeerId = getClientId();
     const username = getActiveUser();
 
-    if (inSpaceVoice) {
+    if (inSpaceVoiceRef.current) {
       if (localStreamRef.current) {
         for (const t of localStreamRef.current.getTracks()) t.stop();
         localStreamRef.current = null;
@@ -305,47 +551,51 @@ export default function GameSpaceModal() {
       for (const a of remoteAudiosRef.current.values()) a.pause();
       remoteAudiosRef.current.clear();
 
+      inSpaceVoiceRef.current = false;
       setInSpaceVoice(false);
       setVoiceMembers((prev) => prev.filter((m) => m.peerId !== myPeerId));
-      fetch("/api/voice/signal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "VOICE_LEAVE",
-          roomId: spaceVoiceRoomId,
-          peerId: myPeerId,
-          username,
-        }),
-      }).catch(() => {});
+      sendSpaceVoiceSignal({
+        type: "VOICE_LEAVE",
+        signalType: "VOICE_LEAVE",
+        peerId: myPeerId,
+        fromClientId: myPeerId,
+        username,
+      });
       notifyToast("left game space voice chat", "info");
       return;
     }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      for (const t of stream.getAudioTracks()) {
+        t.enabled = !isMutedRef.current && !isDeafenedRef.current;
+      }
       localStreamRef.current = stream;
     } catch {
       notifyToast("joined game space voice in listen-only mode", "info");
     }
 
+    inSpaceVoiceRef.current = true;
     setInSpaceVoice(true);
     setVoiceMembers((prev) => [
       ...prev.filter((m) => m.peerId !== myPeerId),
-      { peerId: myPeerId, username, muted: isMuted, deafened: isDeafened },
-    ]);
-
-    fetch("/api/voice/signal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "VOICE_JOIN",
-        roomId: spaceVoiceRoomId,
+      {
         peerId: myPeerId,
         username,
-        muted: isMuted,
-        deafened: isDeafened,
-      }),
-    }).catch(() => {});
+        muted: isMutedRef.current,
+        deafened: isDeafenedRef.current,
+      },
+    ]);
+
+    sendSpaceVoiceSignal({
+      type: "VOICE_JOIN",
+      signalType: "VOICE_JOIN",
+      peerId: myPeerId,
+      fromClientId: myPeerId,
+      username,
+      muted: isMutedRef.current,
+      deafened: isDeafenedRef.current,
+    });
 
     notifyToast(`connected to ${activeGameTitle} space voice!`, "success");
   };
@@ -539,36 +789,26 @@ export default function GameSpaceModal() {
                       <button
                         type="button"
                         class={`chat-header-btn ${isMuted ? "danger" : ""}`}
-                        onClick={() => {
-                          setIsMuted((m) => {
-                            const next = !m;
-                            if (localStreamRef.current) {
-                              for (const t of localStreamRef.current.getAudioTracks()) {
-                                t.enabled = !next;
-                              }
-                            }
-                            return next;
-                          });
-                        }}
+                        onClick={toggleSpaceMute}
                       >
                         <i
                           class={`fa-solid ${
                             isMuted ? "fa-microphone-slash" : "fa-microphone"
                           }`}
                         ></i>
-                        <span>{isMuted ? "muted" : "mute"}</span>
+                        <span>{isMuted ? "unmute" : "mute"}</span>
                       </button>
                       <button
                         type="button"
                         class={`chat-header-btn ${isDeafened ? "danger" : ""}`}
-                        onClick={() => setIsDeafened((d) => !d)}
+                        onClick={toggleSpaceDeafen}
                       >
                         <i
                           class={`fa-solid ${
                             isDeafened ? "fa-volume-xmark" : "fa-headphones"
                           }`}
                         ></i>
-                        <span>{isDeafened ? "deafened" : "deafen"}</span>
+                        <span>{isDeafened ? "undeafen" : "deafen"}</span>
                       </button>
                     </>
                   )}
@@ -589,24 +829,46 @@ export default function GameSpaceModal() {
 
               {voiceMembers.length > 0 && (
                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  {voiceMembers.map((vm) => (
-                    <div
-                      key={vm.peerId}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        padding: "5px 10px",
-                        borderRadius: "20px",
-                        backgroundColor: "var(--bg-surface-4)",
-                        border: "1px solid #4ade80",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <i class="fa-solid fa-microphone" style={{ color: "#4ade80" }}></i>
-                      <span>@{vm.username}</span>
-                    </div>
-                  ))}
+                  {voiceMembers.map((vm) => {
+                    const isRestricted = vm.deafened || vm.muted;
+                    return (
+                      <div
+                        key={vm.peerId}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          padding: "5px 10px",
+                          borderRadius: "20px",
+                          backgroundColor: "var(--bg-surface-4)",
+                          border: `1px solid ${isRestricted ? "#f87171" : "#4ade80"}`,
+                          fontSize: "12px",
+                        }}
+                      >
+                        <i
+                          class={`fa-solid ${
+                            vm.deafened
+                              ? "fa-volume-xmark"
+                              : vm.muted
+                              ? "fa-microphone-slash"
+                              : "fa-microphone"
+                          }`}
+                          style={{ color: isRestricted ? "#f87171" : "#4ade80" }}
+                        ></i>
+                        <span>@{vm.username}</span>
+                        {vm.deafened && (
+                          <span style={{ fontSize: "10px", color: "#f87171" }}>
+                            (deafened)
+                          </span>
+                        )}
+                        {!vm.deafened && vm.muted && (
+                          <span style={{ fontSize: "10px", color: "#f87171" }}>
+                            (muted)
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
