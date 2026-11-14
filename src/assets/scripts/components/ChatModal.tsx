@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "preact/hooks";
 import { moderateChatMessage } from "../core/contentFilter.ts";
-import { getClientId } from "../core/liveClient.ts";
+import { getClientId, detectCurrentGameSession } from "../core/liveClient.ts";
 
 interface ChatMessage {
   id: string;
@@ -15,8 +15,12 @@ interface ChatMessage {
 interface OnlineUser {
   username: string;
   color: string;
-  status?: string;
+  status?: "online" | "offline";
   isSelf?: boolean;
+  game?: string;
+  isPlayingGame?: boolean;
+  gameStartedAt?: number;
+  lastSeen?: number;
 }
 
 interface VoiceParticipant {
@@ -121,6 +125,48 @@ function notifyToast(message: string, type: "success" | "error" | "info" = "info
   }
 }
 
+function notifyDmOrMentionToast(
+  sender: string,
+  messageText: string,
+  isDm: boolean,
+  onView: () => void
+) {
+  const w = window as unknown as {
+    showToast?: (
+      type: string,
+      message: string,
+      iconName?: string,
+      duration?: number,
+      actions?: { text: string; callback: () => void }[]
+    ) => void;
+  };
+  if (typeof w.showToast === "function") {
+    const cleanText = messageText.trim();
+    const preview =
+      cleanText.length > 56 ? cleanText.slice(0, 56) + "..." : cleanText;
+    const label = isDm
+      ? `dm from @${sender}: "${preview}"`
+      : `@${sender} mentioned you: "${preview}"`;
+    w.showToast("info", label, "comment-dots", 8500, [
+      {
+        text: "view",
+        callback: onView,
+      },
+    ]);
+  }
+}
+
+function formatElapsedDuration(startedAtMs: number | undefined, nowMs: number): string {
+  if (!startedAtMs || startedAtMs <= 0) return "1s";
+  const totalSec = Math.max(1, Math.floor((nowMs - startedAtMs) / 1000));
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
 function renderFormattedText(text: string) {
   const parts = text.split(/(\bhttps?:\/\/[^\s]+|@[a-zA-Z0-9_.-]+)/g);
   return parts.map((part, i) => {
@@ -148,6 +194,7 @@ export default function ChatModal() {
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   // CloudSync user state
   const [cloudUser, setCloudUser] = useState<string | null>(() => {
@@ -202,8 +249,9 @@ export default function ChatModal() {
     return [];
   });
 
-  // Server-reported online users
-  const [serverOnlineUsers, setServerOnlineUsers] = useState<{ username: string; color: string }[]>([]);
+  // Server-reported online and offline users
+  const [serverOnlineUsers, setServerOnlineUsers] = useState<OnlineUser[]>([]);
+  const [serverOfflineUsers, setServerOfflineUsers] = useState<OnlineUser[]>([]);
 
   // Voice Chat state
   const [activeVoiceRoom, setActiveVoiceRoom] = useState<string | null>(null);
@@ -217,6 +265,10 @@ export default function ChatModal() {
   const broadcastRef = useRef<BroadcastChannel | null>(null);
   const activeChannelRef = useRef(activeChannel);
   activeChannelRef.current = activeChannel;
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
+  const seenMessageIdsRef = useRef<Set<string>>(new Set(messages.map((m) => m.id)));
+  const initialStateLoadedRef = useRef(false);
 
   // WebRTC & WebAudio refs
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -284,7 +336,7 @@ export default function ChatModal() {
 
   // Sync audio element volumes and mute states when deafened / blocked / volume slider changes
   useEffect(() => {
-    for (const [peerClientId, audioEl] of remoteAudioElementsRef.current.entries()) {
+    for (const [, audioEl] of remoteAudioElementsRef.current.entries()) {
       const peerUsername = audioEl.dataset.username || "";
       const blocked = isUserBlocked(peerUsername);
       const customVol = userVolumes[peerUsername.toLowerCase()] ?? 1;
@@ -295,13 +347,16 @@ export default function ChatModal() {
 
   // Incoming message handler (shared by SSE, BroadcastChannel, and API poll)
   const ingestIncomingMessage = useCallback(
-    (incoming: ChatMessage) => {
+    (incoming: ChatMessage, options?: { silent?: boolean }) => {
       if (!incoming || !incoming.id) return;
+
+      const isAlreadySeen = seenMessageIdsRef.current.has(incoming.id);
+      const myLower = (cloudUser || "guest").toLowerCase();
+      const authorLower = (incoming.author || "").toLowerCase();
+
       // If it's a DM, verify current user is one of the 2 participants
       if (incoming.channel.startsWith("dm:")) {
-        if (!cloudUser) return;
         const parts = incoming.channel.slice(3).split(":");
-        const myLower = cloudUser.toLowerCase();
         if (!parts.includes(myLower)) return;
 
         const partner = parts[0] === myLower ? parts[1] : parts[0];
@@ -317,6 +372,8 @@ export default function ChatModal() {
         }
       }
 
+      seenMessageIdsRef.current.add(incoming.id);
+
       setMessages((prev) => {
         if (prev.some((m) => m.id === incoming.id)) return prev;
         const updated = [...prev, incoming].slice(-250);
@@ -327,14 +384,34 @@ export default function ChatModal() {
       });
 
       if (
-        incoming.channel !== activeChannelRef.current &&
-        incoming.author.toLowerCase() !== (cloudUser || "").toLowerCase() &&
-        !blockedUsers.includes(incoming.author.toLowerCase())
+        !isAlreadySeen &&
+        authorLower !== myLower &&
+        !blockedUsers.includes(authorLower)
       ) {
-        setUnreadCounts((prev) => ({
-          ...prev,
-          [incoming.channel]: (prev[incoming.channel] || 0) + 1,
-        }));
+        if (!isOpenRef.current || incoming.channel !== activeChannelRef.current) {
+          setUnreadCounts((prev) => ({
+            ...prev,
+            [incoming.channel]: (prev[incoming.channel] || 0) + 1,
+          }));
+        }
+
+        if (!options?.silent) {
+          const isDm = incoming.channel.startsWith("dm:");
+          const isMention = Boolean(
+            cloudUser &&
+              incoming.text.toLowerCase().includes(`@${cloudUser.toLowerCase()}`)
+          );
+          if (
+            (isDm || isMention) &&
+            (!isOpenRef.current || activeChannelRef.current !== incoming.channel)
+          ) {
+            notifyDmOrMentionToast(incoming.author, incoming.text, isDm, () => {
+              setActiveChannel(incoming.channel);
+              setIsOpen(true);
+              setUnreadCounts((prev) => ({ ...prev, [incoming.channel]: 0 }));
+            });
+          }
+        }
       }
     },
     [cloudUser, blockedUsers]
@@ -832,25 +909,45 @@ export default function ChatModal() {
     };
   }, []);
 
-  // Fetch initial chat & voice state when opened
+  // 1-second ticker so active game playtime on profiles updates live every second
   useEffect(() => {
-    if (!isOpen) return;
-    fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (!data) return;
-        if (Array.isArray(data.messages)) {
-          for (const m of data.messages) ingestIncomingMessage(m);
-        }
-        if (data.voiceRooms && typeof data.voiceRooms === "object") {
-          setVoiceRooms((prev) => ({ ...prev, ...data.voiceRooms }));
-        }
-        if (Array.isArray(data.onlineUsers)) {
-          setServerOnlineUsers(data.onlineUsers);
-        }
-      })
-      .catch(() => {});
-  }, [isOpen, cloudUser, ingestIncomingMessage]);
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Poll chat & presence state in background even when Chat modal is closed (while playing games or browsing)
+  useEffect(() => {
+    const fetchChatAndPresenceState = () => {
+      const isInitial = !initialStateLoadedRef.current;
+      fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data) return;
+          initialStateLoadedRef.current = true;
+          if (Array.isArray(data.messages)) {
+            for (const m of data.messages) {
+              ingestIncomingMessage(m, { silent: isInitial });
+            }
+          }
+          if (data.voiceRooms && typeof data.voiceRooms === "object") {
+            setVoiceRooms((prev) => ({ ...prev, ...data.voiceRooms }));
+          }
+          if (Array.isArray(data.onlineUsers)) {
+            setServerOnlineUsers(data.onlineUsers);
+          }
+          if (Array.isArray(data.offlineUsers)) {
+            setServerOfflineUsers(data.offlineUsers);
+          }
+        })
+        .catch(() => {});
+    };
+
+    fetchChatAndPresenceState();
+    const pollInterval = window.setInterval(fetchChatAndPresenceState, 5000);
+    return () => window.clearInterval(pollInterval);
+  }, [cloudUser, isOpen, ingestIncomingMessage]);
 
   // Modal open / close handlers, SSE custom events & BroadcastChannel
   useEffect(() => {
@@ -867,10 +964,22 @@ export default function ChatModal() {
       if (detail) handleVoiceEvent(detail);
     };
 
+    const onSsePresence = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+      if (Array.isArray(detail.onlineUsers)) {
+        setServerOnlineUsers(detail.onlineUsers);
+      }
+      if (Array.isArray(detail.offlineUsers)) {
+        setServerOfflineUsers(detail.offlineUsers);
+      }
+    };
+
     document.addEventListener("toggleChatModal", handleToggle);
     document.addEventListener("closeChatModal", handleClose);
     window.addEventListener("sunshine-chat-event", onSseChat);
     window.addEventListener("sunshine-voice-event", onSseVoice);
+    window.addEventListener("sunshine-presence-event", onSsePresence);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isOpen) setIsOpen(false);
@@ -894,6 +1003,7 @@ export default function ChatModal() {
       document.removeEventListener("closeChatModal", handleClose);
       window.removeEventListener("sunshine-chat-event", onSseChat);
       window.removeEventListener("sunshine-voice-event", onSseVoice);
+      window.removeEventListener("sunshine-presence-event", onSsePresence);
       window.removeEventListener("keydown", handleKeyDown);
       broadcastRef.current?.close();
     };
@@ -986,48 +1096,118 @@ export default function ChatModal() {
     [messages, activeChannel, isUserBlocked]
   );
 
-  // Combine online users from current user, server state, and recent message authors
+  // Local user's live game session (updated every 1s via nowMs)
+  const myGameSession = useMemo(() => {
+    void nowMs;
+    return detectCurrentGameSession();
+  }, [nowMs]);
+
+  // Combine online users from current user + live server presence
   const onlineUsers = useMemo(() => {
     const map = new Map<string, OnlineUser>();
     if (cloudUser) {
       map.set(cloudUser.toLowerCase(), {
         username: cloudUser,
         color: stringToColor(cloudUser),
+        status: "online",
         isSelf: true,
+        game: myGameSession.game,
+        isPlayingGame: myGameSession.isPlayingGame,
+        gameStartedAt: myGameSession.gameStartedAt,
       });
     }
     for (const su of serverOnlineUsers) {
+      if (!su || !su.username) continue;
       const k = su.username.toLowerCase();
+      if (cloudUser && k === cloudUser.toLowerCase()) {
+        // Keep local self entry authoritative for instant game tracking
+        continue;
+      }
       if (!map.has(k)) {
         map.set(k, {
           username: su.username,
           color: su.color || stringToColor(su.username),
-        });
-      }
-    }
-    for (const msg of messages) {
-      const key = msg.author.toLowerCase();
-      if (!map.has(key)) {
-        map.set(key, {
-          username: msg.author,
-          color: msg.avatarColor || stringToColor(msg.author),
+          status: "online",
+          game: su.game || "browsing",
+          isPlayingGame: Boolean(su.isPlayingGame),
+          gameStartedAt: Number(su.gameStartedAt) || 0,
         });
       }
     }
     return Array.from(map.values());
-  }, [cloudUser, serverOnlineUsers, messages]);
+  }, [cloudUser, serverOnlineUsers, myGameSession]);
+
+  // Offline users: known users from serverOfflineUsers, DM peers, and message authors who are not currently online
+  const offlineUsers = useMemo(() => {
+    const onlineKeys = new Set(onlineUsers.map((u) => u.username.toLowerCase()));
+    const map = new Map<string, OnlineUser>();
+
+    for (const off of serverOfflineUsers) {
+      if (!off || !off.username) continue;
+      const k = off.username.toLowerCase();
+      if (!onlineKeys.has(k) && !map.has(k)) {
+        map.set(k, {
+          username: off.username,
+          color: off.color || stringToColor(off.username),
+          status: "offline",
+          lastSeen: off.lastSeen,
+        });
+      }
+    }
+
+    for (const peer of dmPeers) {
+      const clean = peer.trim();
+      if (!clean) continue;
+      const k = clean.toLowerCase();
+      if (!onlineKeys.has(k) && !map.has(k)) {
+        map.set(k, {
+          username: clean,
+          color: stringToColor(clean),
+          status: "offline",
+        });
+      }
+    }
+
+    for (const msg of messages) {
+      if (!msg.author) continue;
+      const k = msg.author.toLowerCase();
+      if (!onlineKeys.has(k) && !map.has(k)) {
+        map.set(k, {
+          username: msg.author,
+          color: msg.avatarColor || stringToColor(msg.author),
+          status: "offline",
+        });
+      }
+    }
+
+    return Array.from(map.values());
+  }, [onlineUsers, serverOfflineUsers, dmPeers, messages]);
 
   // Active channel metadata
   const activeChannelDef = useMemo(() => {
     if (activeChannel.startsWith("dm:")) {
       const partner = getDmPartnerName(activeChannel, cloudUser);
+      const partnerOnline = onlineUsers.find(
+        (u) => u.username.toLowerCase() === partner.toLowerCase()
+      );
+      let dmDesc = `direct message with @${partner} · offline`;
+      if (partnerOnline) {
+        if (partnerOnline.isPlayingGame && partnerOnline.game) {
+          dmDesc = `@${partner} is online · playing ${partnerOnline.game} (${formatElapsedDuration(
+            partnerOnline.gameStartedAt,
+            nowMs
+          )})`;
+        } else {
+          dmDesc = `@${partner} is online · browsing`;
+        }
+      }
       return {
         id: activeChannel,
         name: partner,
         icon: "fa-at",
         isDm: true,
         isVoice: false,
-        desc: `direct message with @${partner}`,
+        desc: dmDesc,
       };
     }
     const voiceFound = VOICE_CHANNELS.find((v) => v.id === activeChannel);
@@ -1058,7 +1238,7 @@ export default function ChatModal() {
       isVoice: false,
       desc: `welcome to #${activeChannel}`,
     };
-  }, [activeChannel, cloudUser]);
+  }, [activeChannel, cloudUser, onlineUsers, nowMs]);
 
   const currentDmPartner = activeChannelDef.isDm ? activeChannelDef.name : null;
   const isCurrentDmBlocked = currentDmPartner ? isUserBlocked(currentDmPartner) : false;
@@ -1372,28 +1552,40 @@ export default function ChatModal() {
           <div class="chat-sidebar-user">
             {cloudUser ? (
               <>
-                <div
-                  class="chat-user-avatar"
-                  style={{
-                    backgroundColor: stringToColor(cloudUser),
-                    width: "32px",
-                    height: "32px",
-                    fontSize: "13px",
-                    fontWeight: "600",
-                    borderRadius: "50%",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                  }}
-                >
-                  {cloudUser.slice(0, 1).toLowerCase()}
+                <div class="chat-user-avatar-wrap">
+                  <div
+                    class="chat-user-avatar"
+                    style={{
+                      backgroundColor: stringToColor(cloudUser),
+                      width: "32px",
+                      height: "32px",
+                      fontSize: "13px",
+                      fontWeight: "600",
+                      borderRadius: "50%",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {cloudUser.slice(0, 1).toLowerCase()}
+                  </div>
+                  <div class="chat-user-dot"></div>
                 </div>
                 <div class="chat-sidebar-user-info">
                   <span class="chat-sidebar-username">{cloudUser}</span>
                   <span class="chat-sidebar-status">
                     <span style={{ fontSize: "8px" }}>●</span> online
                   </span>
+                  {myGameSession.isPlayingGame && myGameSession.game && (
+                    <div class="chat-profile-game-status" title={`Playing ${myGameSession.game}`}>
+                      <i class="fa-solid fa-gamepad"></i>
+                      <span>
+                        playing {myGameSession.game} ·{" "}
+                        {formatElapsedDuration(myGameSession.gameStartedAt, nowMs)}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </>
             ) : (
@@ -1778,7 +1970,7 @@ export default function ChatModal() {
           </div>
         </div>
 
-        {/* ── COLUMN 3: Right Online Users & Blocked List Sidebar ── */}
+        {/* ── COLUMN 3: Right Online / Offline Users & Blocked List Sidebar ── */}
         <div class="chat-online-panel">
           <div class="chat-online-header">
             <span>online · {onlineUsers.length}</span>
@@ -1799,8 +1991,9 @@ export default function ChatModal() {
             ) : (
               onlineUsers.map((u) => {
                 const blocked = isUserBlocked(u.username);
+                const playingActive = Boolean(u.isPlayingGame && u.game && u.game !== "browsing");
                 return (
-                  <div key={u.username} class="chat-user-item">
+                  <div key={`online_${u.username}`} class="chat-user-item">
                     <div
                       class="chat-user-avatar-wrap"
                       onClick={() => {
@@ -1837,6 +2030,16 @@ export default function ChatModal() {
                         </span>
                         {u.isSelf && <span class="chat-you-pill">you</span>}
                       </div>
+                      {playingActive ? (
+                        <div class="chat-user-game-sub" title={`Playing ${u.game}`}>
+                          <i class="fa-solid fa-gamepad"></i>
+                          <span>
+                            playing {u.game} · {formatElapsedDuration(u.gameStartedAt, nowMs)}
+                          </span>
+                        </div>
+                      ) : (
+                        <div class="chat-user-status-sub">online</div>
+                      )}
                     </div>
 
                     {!u.isSelf && (
@@ -1863,6 +2066,84 @@ export default function ChatModal() {
                 );
               })
             )}
+
+            {/* Offline Users Section */}
+            <div class="chat-offline-section">
+              <div class="chat-section-sub-header">
+                <span>offline · {offlineUsers.length}</span>
+              </div>
+              {offlineUsers.length === 0 ? (
+                <div
+                  style={{
+                    padding: "6px 8px",
+                    color: "var(--color-sublabel)",
+                    fontSize: "11px",
+                    opacity: 0.7,
+                  }}
+                >
+                  no offline users yet
+                </div>
+              ) : (
+                offlineUsers.map((u) => {
+                  const blocked = isUserBlocked(u.username);
+                  return (
+                    <div key={`offline_${u.username}`} class="chat-user-item offline">
+                      <div
+                        class="chat-user-avatar-wrap"
+                        onClick={() => openDirectMessage(u.username)}
+                      >
+                        <div
+                          class="chat-user-avatar"
+                          style={{
+                            backgroundColor: u.color,
+                            opacity: blocked ? 0.35 : 0.55,
+                          }}
+                        >
+                          {u.username.slice(0, 1).toLowerCase()}
+                        </div>
+                        <div class="chat-user-dot offline"></div>
+                      </div>
+                      <div
+                        class="chat-user-meta"
+                        onClick={() => openDirectMessage(u.username)}
+                      >
+                        <div class="chat-user-name-row">
+                          <span
+                            class="chat-user-name"
+                            style={{
+                              opacity: blocked ? 0.45 : 0.7,
+                              textDecoration: blocked ? "line-through" : undefined,
+                            }}
+                          >
+                            {u.username}
+                          </span>
+                        </div>
+                        <div class="chat-user-status-sub offline">offline</div>
+                      </div>
+
+                      <div class="chat-user-actions">
+                        <button
+                          type="button"
+                          class="chat-user-mini-btn"
+                          title={`Direct message ${u.username}`}
+                          onClick={() => openDirectMessage(u.username)}
+                        >
+                          <i class="fa-solid fa-comment-dots"></i>
+                        </button>
+                        <button
+                          type="button"
+                          class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
+                          title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
+                          onClick={() => toggleBlockUser(u.username)}
+                        >
+                          <i class="fa-solid fa-ban"></i>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
 
             {/* Blocked Users Management Section */}
             {blockedUsers.length > 0 && (

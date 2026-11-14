@@ -3,7 +3,8 @@ import { store, useStore } from "../state/store.ts";
 import {
   getActiveUser,
   getLocalLeaderboard,
-  recordGameActivity,
+  recordLocalGameTick,
+  syncGameActivityToServer,
   formatPlayTime,
   addCookieCoins,
   type LeaderboardEntry,
@@ -272,9 +273,12 @@ export default function GameSpaceModal() {
     } catch {}
   }, [activeGameTitle]);
 
-  // Background playtime tracker while playing any game in browser-view or studio
+  // Background playtime tracker while playing any game in browser-view or studio (exact 1-second precision)
+  const lastTrackedGameRef = useRef<string>("");
+  const pendingSyncSecondsRef = useRef<number>(0);
+
   useEffect(() => {
-    let playTicks = 0;
+    let playSeconds = 0;
     const interval = window.setInterval(() => {
       const inBrowser = document.body.classList.contains("browser-view");
       const inStudio = document.body.classList.contains("studio-view");
@@ -284,28 +288,47 @@ export default function GameSpaceModal() {
       const gName = (
         overrideGameName ||
         (inBrowser ? tab?.title : null) ||
-        ""
+        (inStudio ? "game studio" : "")
       )
         .replace(/^game:\s*/i, "")
         .split("/")[0]
         .trim()
         .toLowerCase();
 
-      if (!gName || gName === "new tab" || gName === "fetching data...") return;
+      if (!gName || gName === "new tab" || gName === "fetching data..." || gName === "operation cookie") return;
 
-      playTicks++;
-      recordGameActivity(gName, 15, playTicks === 1 ? 1 : 0).then((updated) => {
-        if (isOpen) setEntries(updated);
-      });
+      const isNewSession = lastTrackedGameRef.current !== gName;
+      if (isNewSession) {
+        lastTrackedGameRef.current = gName;
+      }
 
-      // Every 4 ticks (60 seconds of active play), award +5 Cookie Coins!
-      if (playTicks % 4 === 0) {
+      playSeconds++;
+      pendingSyncSecondsRef.current += 1;
+
+      const localUpdated = recordLocalGameTick(gName, 1, isNewSession ? 1 : 0);
+      if (isOpen && gName === activeGameTitle) {
+        setEntries(localUpdated);
+      }
+
+      // Sync accumulated exact seconds to server every 4 seconds or on new game start
+      if (isNewSession || pendingSyncSecondsRef.current >= 4) {
+        const deltaSec = pendingSyncSecondsRef.current;
+        pendingSyncSecondsRef.current = 0;
+        syncGameActivityToServer(gName, deltaSec, isNewSession ? 1 : 0).then((serverUpdated) => {
+          if (isOpen && gName === activeGameTitle) {
+            setEntries(serverUpdated);
+          }
+        });
+      }
+
+      // Every 60 seconds of active play, award +5 Cookie Coins!
+      if (playSeconds % 60 === 0) {
         addCookieCoins(5, `playing ${gName}`);
       }
-    }, 15000);
+    }, 1000);
 
     return () => window.clearInterval(interval);
-  }, [overrideGameName, isOpen]);
+  }, [overrideGameName, isOpen, activeGameTitle]);
 
   // Open/Close listener & SSE / BroadcastChannel for Space messages & Voice
   useEffect(() => {
@@ -475,8 +498,11 @@ export default function GameSpaceModal() {
 
   useEffect(() => {
     if (isOpen) {
-      // Record initial session entry when opening leaderboard for current game
-      recordGameActivity(activeGameTitle, 5, 1).then((list) => setEntries(list));
+      if (pendingSyncSecondsRef.current > 0) {
+        const delta = pendingSyncSecondsRef.current;
+        pendingSyncSecondsRef.current = 0;
+        syncGameActivityToServer(activeGameTitle, delta, 0).then((list) => setEntries(list));
+      }
       refreshLeaderboard();
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });

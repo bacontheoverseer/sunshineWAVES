@@ -113,13 +113,24 @@ function initToast(): void {
   };
 
   window.showToast = function (
-    type: string,
-    message: string,
+    typeOrMsg: string,
+    messageOrType: string,
     iconName?: string,
     arg4?: number | ToastAction[],
     arg5?: ToastAction[],
   ): ToastController {
-    let duration = 3000;
+    const knownTypes = ["success", "error", "info"];
+    let type = typeOrMsg;
+    let message = messageOrType;
+    if (!knownTypes.includes(typeOrMsg) && knownTypes.includes(messageOrType)) {
+      type = messageOrType;
+      message = typeOrMsg;
+    } else if (!knownTypes.includes(typeOrMsg) && !messageOrType) {
+      type = "info";
+      message = typeOrMsg;
+    }
+
+    let duration = 3500;
     let actions: ToastAction[] = [];
 
     if (Array.isArray(arg4)) {

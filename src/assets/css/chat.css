@@ -347,9 +347,9 @@
 
 /* User profile footer at bottom of sidebar */
 .chat-sidebar-user {
-  height: 54px;
+  min-height: 54px;
   border-top: 1px solid var(--bg-surface-10);
-  padding: 0 12px;
+  padding: 8px 12px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -361,6 +361,7 @@
   flex-direction: column;
   min-width: 0;
   flex: 1;
+  gap: 1px;
 }
 
 .chat-sidebar-username {
@@ -379,6 +380,34 @@
   align-items: center;
   gap: 4px;
   text-transform: lowercase;
+}
+
+.chat-profile-game-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: #a5b4fc;
+  background-color: rgba(99, 102, 241, 0.14);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin-top: 2px;
+  text-transform: lowercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-profile-game-status i {
+  font-size: 9.5px;
+  color: #818cf8;
+  flex-shrink: 0;
+}
+
+.chat-profile-game-status span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -886,7 +915,7 @@
    COLUMN 3: Right Online Users & Blocked Management Sidebar
    ───────────────────────────────────────────────────────────── */
 .chat-online-panel {
-  width: 220px;
+  width: 235px;
   background-color: var(--bg-surface-2);
   border-left: 1px solid var(--bg-surface-10);
   display: flex;
@@ -970,11 +999,16 @@
   border: 2px solid var(--bg-surface-2);
 }
 
+.chat-user-dot.offline {
+  background-color: #71717a;
+}
+
 .chat-user-meta {
   display: flex;
   flex-direction: column;
   min-width: 0;
   flex: 1;
+  gap: 1px;
 }
 
 .chat-user-name-row {
@@ -990,6 +1024,56 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat-user-game-sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: #a5b4fc;
+  text-transform: lowercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-user-game-sub i {
+  font-size: 9px;
+  color: #818cf8;
+  flex-shrink: 0;
+}
+
+.chat-user-game-sub span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-user-status-sub {
+  font-size: 10.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}
+
+.chat-user-status-sub.offline {
+  opacity: 0.65;
+}
+
+.chat-offline-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bg-surface-10);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chat-section-sub-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-sublabel);
+  padding: 2px 8px 4px;
+  text-transform: lowercase;
 }
 
 .chat-you-pill {

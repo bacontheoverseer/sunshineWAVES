@@ -532,6 +532,66 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || "cookie_admin_chaos_master_key_
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "bacon";
 
 const liveClients = new Map();
+const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
+
+function touchKnownUser(username, extra = {}) {
+  if (!username) return;
+  const clean = String(username).trim();
+  if (!clean) return;
+  const key = clean.toLowerCase();
+  const prev = knownUsers.get(key) || {
+    username: clean,
+    lastSeen: Date.now(),
+    game: "browsing",
+    isPlayingGame: false,
+    gameStartedAt: 0,
+  };
+  prev.username = clean;
+  prev.lastSeen = Date.now();
+  if (typeof extra.game === "string") prev.game = extra.game;
+  if (typeof extra.isPlayingGame === "boolean") prev.isPlayingGame = extra.isPlayingGame;
+  if (typeof extra.gameStartedAt === "number") prev.gameStartedAt = extra.gameStartedAt;
+  knownUsers.set(key, prev);
+}
+
+function getPresenceSnapshot() {
+  const onlineByUsername = new Map();
+  for (const c of liveClients.values()) {
+    const clean = String(c.username || "").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    const existing = onlineByUsername.get(key);
+    // Prefer the session that is actively playing a game or most recently seen
+    if (!existing || (c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen) {
+      onlineByUsername.set(key, {
+        id: c.id,
+        username: clean,
+        online: true,
+        page: c.page || "/",
+        game: c.game || "browsing",
+        isPlayingGame: Boolean(c.isPlayingGame),
+        gameStartedAt: Number(c.gameStartedAt) || 0,
+        lastSeen: c.lastSeen,
+      });
+    }
+  }
+
+  const onlineUsers = Array.from(onlineByUsername.values());
+  const offlineUsers = [];
+  for (const [key, u] of knownUsers.entries()) {
+    if (!onlineByUsername.has(key)) {
+      offlineUsers.push({
+        username: u.username,
+        online: false,
+        game: "",
+        isPlayingGame: false,
+        gameStartedAt: 0,
+        lastSeen: u.lastSeen,
+      });
+    }
+  }
+  return { onlineUsers, offlineUsers };
+}
 
 function verifyAdmin(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -604,28 +664,65 @@ app.get("/api/live/stream", (req, res) => {
     ip,
     page,
     game,
+    isPlayingGame: false,
+    gameStartedAt: 0,
     connectedAt: Date.now(),
     lastSeen: Date.now(),
   };
 
   liveClients.set(clientId, clientRecord);
+  touchKnownUser(username, { game, isPlayingGame: false, gameStartedAt: 0 });
 
   // Initial handshake
   res.write(`data: ${JSON.stringify({ type: "connected", clientId, username })}\n\n`);
+  broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
   req.on("close", () => {
+    const rec = liveClients.get(clientId);
+    if (rec?.username) {
+      touchKnownUser(rec.username, { isPlayingGame: false, gameStartedAt: 0 });
+    }
     liveClients.delete(clientId);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
   });
 });
 
 app.post("/api/live/heartbeat", (req, res) => {
-  const { clientId, username, page, game } = req.body || {};
+  const { clientId, username, page, game, isPlayingGame, gameStartedAt } = req.body || {};
+  let changed = false;
   if (clientId && liveClients.has(clientId)) {
     const client = liveClients.get(clientId);
-    if (username) client.username = username;
+    if (username && client.username !== username) {
+      client.username = username;
+      changed = true;
+    }
     if (page) client.page = page;
-    if (game) client.game = game;
+    if (typeof game === "string" && client.game !== game) {
+      client.game = game;
+      changed = true;
+    }
+    if (typeof isPlayingGame === "boolean") {
+      client.isPlayingGame = isPlayingGame;
+    }
+    if (typeof gameStartedAt === "number") {
+      client.gameStartedAt = gameStartedAt;
+    }
     client.lastSeen = Date.now();
+    touchKnownUser(client.username, {
+      game: client.game,
+      isPlayingGame: client.isPlayingGame,
+      gameStartedAt: client.gameStartedAt,
+    });
+  } else if (username) {
+    touchKnownUser(username, {
+      game: game || "browsing",
+      isPlayingGame: Boolean(isPlayingGame),
+      gameStartedAt: Number(gameStartedAt) || 0,
+    });
+    changed = true;
+  }
+  if (changed) {
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
   }
   res.json({ success: true });
 });
@@ -919,7 +1016,10 @@ app.post("/api/chat/moderate", async (req, res) => {
 });
 
 app.get("/api/chat/state", (req, res) => {
-  const user = (req.query.user || "").toString().toLowerCase();
+  const rawUser = (req.query.user || req.query.username || "").toString();
+  const user = rawUser.toLowerCase();
+  if (rawUser) touchKnownUser(rawUser);
+
   const visibleMessages = chatHistory.filter((m) => {
     if (!m.channel.startsWith("dm:")) return true;
     if (!user) return false;
@@ -932,16 +1032,14 @@ app.get("/api/chat/state", (req, res) => {
     activeVoice[roomId] = Array.from(peers.values());
   }
 
-  const onlineList = Array.from(liveClients.values()).map((c) => ({
-    id: c.id,
-    username: c.username,
-  }));
+  const presence = getPresenceSnapshot();
 
   res.json({
     success: true,
     messages: visibleMessages.slice(-200),
     voiceRooms: activeVoice,
-    onlineUsers: onlineList,
+    onlineUsers: presence.onlineUsers,
+    offlineUsers: presence.offlineUsers,
   });
 });
 
@@ -951,6 +1049,8 @@ app.post("/api/chat/send", async (req, res) => {
     if (!message || !message.text || !message.author || !message.channel) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
+
+    touchKnownUser(message.author);
 
     const mod = await moderateTextWithOpenAI(message.text);
     if (mod.flagged) {

@@ -131,7 +131,7 @@ export function formatPlayTime(totalSeconds: number): string {
   const hrs = Math.floor(s / 3600);
   const mins = Math.floor((s % 3600) / 60);
   const secs = s % 60;
-  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
   if (mins > 0) return `${mins}m ${secs}s`;
   return `${secs}s`;
 }
@@ -148,17 +148,16 @@ export function getLocalLeaderboard(gameName: string): LeaderboardEntry[] {
   }
 }
 
-export async function recordGameActivity(
+export function recordLocalGameTick(
   gameName: string,
-  addSeconds: number,
+  addSeconds = 1,
   addPlay = 0,
   score = 0
-): Promise<LeaderboardEntry[]> {
+): LeaderboardEntry[] {
   const key = (gameName || "global").trim().toLowerCase();
   const username = getActiveUser();
   const userLower = username.toLowerCase();
 
-  let updatedList: LeaderboardEntry[] = [];
   try {
     const raw = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
     const all: Record<string, LeaderboardEntry[]> = raw ? JSON.parse(raw) : {};
@@ -183,8 +182,21 @@ export async function recordGameActivity(
     list.sort((a, b) => b.seconds - a.seconds || b.plays - a.plays);
     all[key] = list;
     localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(all));
-    updatedList = list;
-  } catch {}
+    return [...list];
+  } catch {
+    return [];
+  }
+}
+
+export async function syncGameActivityToServer(
+  gameName: string,
+  addSeconds: number,
+  addPlay = 0,
+  score = 0
+): Promise<LeaderboardEntry[]> {
+  const key = (gameName || "global").trim().toLowerCase();
+  const username = getActiveUser();
+  let updatedList = getLocalLeaderboard(key);
 
   try {
     const res = await fetch("/api/games/leaderboard", {
@@ -193,9 +205,9 @@ export async function recordGameActivity(
       body: JSON.stringify({
         game: key,
         username,
-        addSeconds,
-        addPlay,
-        score,
+        addSeconds: Math.max(0, Math.floor(addSeconds)),
+        addPlay: Math.max(0, Math.floor(addPlay)),
+        score: Math.max(0, Math.floor(score)),
       }),
     });
     if (res.ok) {
@@ -218,4 +230,14 @@ export async function recordGameActivity(
   } catch {}
 
   return updatedList;
+}
+
+export async function recordGameActivity(
+  gameName: string,
+  addSeconds: number,
+  addPlay = 0,
+  score = 0
+): Promise<LeaderboardEntry[]> {
+  recordLocalGameTick(gameName, addSeconds, addPlay, score);
+  return syncGameActivityToServer(gameName, addSeconds, addPlay, score);
 }

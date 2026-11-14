@@ -1172,6 +1172,8 @@ let currentClientId: string | null = null;
 let currentUsername: string = "Guest";
 let eventSource: EventSource | null = null;
 let heartbeatInterval: number | null = null;
+let activeGameTitleTracked: string = "";
+let activeGameStartedAtMs: number = 0;
 
 export function getClientId(): string {
   if (currentClientId) return currentClientId;
@@ -1203,16 +1205,81 @@ export function getActiveUsername(): string {
   return fallback;
 }
 
-function sendHeartbeat(page?: string, game?: string): void {
+export function detectCurrentGameSession(): {
+  game: string;
+  isPlayingGame: boolean;
+  gameStartedAt: number;
+  elapsedSeconds: number;
+} {
+  if (typeof document === "undefined") {
+    return { game: "browsing", isPlayingGame: false, gameStartedAt: 0, elapsedSeconds: 0 };
+  }
+
+  let detectedGame = "";
+  const inBrowser = document.body.classList.contains("browser-view");
+  const inStudio = document.body.classList.contains("studio-view");
+
+  if (inBrowser) {
+    const app = (window as unknown as {
+      sunshineApp?: { getActiveTab?: () => { title?: string; isUrlLoaded?: boolean } | null };
+    }).sunshineApp;
+    const activeTab = app?.getActiveTab?.();
+    const rawTitle = (activeTab?.title || "").trim();
+    if (
+      rawTitle &&
+      rawTitle.toLowerCase() !== "new tab" &&
+      rawTitle.toLowerCase() !== "fetching data..." &&
+      rawTitle.toLowerCase() !== "operation cookie"
+    ) {
+      detectedGame = rawTitle.replace(/^game:\s*/i, "").split("/")[0].trim().toLowerCase();
+    }
+  } else if (inStudio) {
+    detectedGame = "game studio";
+  }
+
+  if (detectedGame) {
+    if (detectedGame !== activeGameTitleTracked) {
+      activeGameTitleTracked = detectedGame;
+      activeGameStartedAtMs = Date.now();
+    }
+    const elapsed = Math.max(1, Math.floor((Date.now() - activeGameStartedAtMs) / 1000));
+    return {
+      game: detectedGame,
+      isPlayingGame: true,
+      gameStartedAt: activeGameStartedAtMs,
+      elapsedSeconds: elapsed,
+    };
+  }
+
+  activeGameTitleTracked = "";
+  activeGameStartedAtMs = 0;
+  return {
+    game: "browsing",
+    isPlayingGame: false,
+    gameStartedAt: 0,
+    elapsedSeconds: 0,
+  };
+}
+
+function sendHeartbeat(page?: string, overrideGame?: string): void {
   const clientId = getClientId();
   const username = getActiveUsername();
   const activePage = page || window.location.pathname;
-  const activeGame = game || (document.title.replace(/^Sunshine\s*[-|~]?\s*/i, "") || "Browsing");
+  const session = detectCurrentGameSession();
+  const activeGame = overrideGame || session.game || "browsing";
+  const gameStartedAt = session.isPlayingGame ? session.gameStartedAt : 0;
 
   void fetch("/api/live/heartbeat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clientId, username, page: activePage, game: activeGame }),
+    body: JSON.stringify({
+      clientId,
+      username,
+      page: activePage,
+      game: activeGame,
+      isPlayingGame: session.isPlayingGame,
+      gameStartedAt,
+    }),
   }).catch(() => {
     // ignore failed heartbeats
   });
@@ -1243,6 +1310,8 @@ export function initLiveClient(): void {
         window.dispatchEvent(new CustomEvent("sunshine-voice-event", { detail: msg }));
       } else if (msg.type === "studio-event") {
         window.dispatchEvent(new CustomEvent("sunshine-studio-event", { detail: msg }));
+      } else if (msg.type === "presence-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-presence-event", { detail: msg }));
       }
     } catch (err) {
       console.warn("Failed to parse SSE live message:", err);
@@ -1253,11 +1322,11 @@ export function initLiveClient(): void {
     // EventSource automatically retries connection
   };
 
-  // Setup periodic heartbeat
+  // Setup periodic heartbeat every 4 seconds so online status & game playtime stay live
   if (heartbeatInterval) window.clearInterval(heartbeatInterval);
   heartbeatInterval = window.setInterval(() => {
     sendHeartbeat();
-  }, 25000);
+  }, 4000);
 
   // Send initial heartbeat
   sendHeartbeat();
@@ -1271,6 +1340,10 @@ export function initLiveClient(): void {
 
   // Listen for custom game change events
   window.addEventListener("game-switched", ((e: CustomEvent) => {
+    if (e.detail?.gameTitle) {
+      activeGameTitleTracked = String(e.detail.gameTitle).toLowerCase();
+      activeGameStartedAtMs = Date.now();
+    }
     sendHeartbeat(undefined, e.detail?.gameTitle);
   }) as EventListener);
 
