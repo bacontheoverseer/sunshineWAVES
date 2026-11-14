@@ -806,6 +806,251 @@ app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
   }
 });
 
+// --- Chat, Direct Messaging, OpenAI Moderation (Excluding Swears), & Voice Signaling ---
+const chatHistory = [];
+const voiceRooms = new Map(); // roomId -> Map<peerId, { peerId, username, muted, deafened }>
+
+// Severe harm patterns (hate slurs, self-harm, sexual minors, severe threats) — normal swear words are explicitly allowed
+const SEVERE_MODERATION_RULES = [
+  {
+    category: "self-harm",
+    regex: /\b(kys|kill\s+your\s*self|commit\s+suicide|slit\s+your\s+wrists|go\s+hang\s+yourself)\b/i,
+    reason: "flagged by moderation: self-harm encouragement is not allowed.",
+  },
+  {
+    category: "hate",
+    regex: /\b(n[i1!]gg[ae3]r|f[a@]gg[o0]t|k[i1!]ke|ch[i1!]nk|tr[a@]nn(y|ie)|ret[a@]rd)\b/i,
+    reason: "flagged by moderation: hate speech and slurs are not allowed.",
+  },
+  {
+    category: "violence/threatening",
+    regex: /\b(i\s+will\s+(kill|murder|shoot|stab|swat|doxx?)\s+you|school\s+shoot(er|ing)|bomb\s+threat)\b/i,
+    reason: "flagged by moderation: violent threats and doxxing are not allowed.",
+  },
+  {
+    category: "sexual/minors",
+    regex: /\b(child\s+p[o0]rn|cp\s+link|loli\s+hentai|underage\s+nsfw|pedo(phile)?)\b/i,
+    reason: "flagged by moderation: severe sexual content violation.",
+  },
+];
+
+async function moderateTextWithOpenAI(text, customApiKey) {
+  const clean = (text || "").trim();
+  if (!clean) return { flagged: false };
+
+  // 1. Check local severe moderation rules first (never blocks normal swear words)
+  for (const rule of SEVERE_MODERATION_RULES) {
+    if (rule.regex.test(clean)) {
+      return {
+        flagged: true,
+        category: rule.category,
+        reason: rule.reason,
+        provider: "local-moderation",
+      };
+    }
+  }
+
+  // 2. If OPENAI_API_KEY is available, call OpenAI omni-moderation-latest
+  const apiKey = customApiKey || process.env.OPENAI_API_KEY;
+  if (apiKey && apiKey.startsWith("sk-")) {
+    try {
+      const response = await fetch("https://api.openai.com/v1/moderations", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "omni-moderation-latest",
+          input: clean,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const result = data?.results?.[0];
+        if (result && result.categories) {
+          // Check strict harm categories while excluding casual profanity/swearing
+          const strictCategories = [
+            "sexual",
+            "sexual/minors",
+            "hate",
+            "hate/threatening",
+            "harassment/threatening",
+            "self-harm",
+            "self-harm/intent",
+            "self-harm/instructions",
+            "violence",
+            "violence/graphic",
+            "illicit/violent",
+          ];
+          const triggered = strictCategories.filter((cat) => result.categories[cat] === true);
+          if (triggered.length > 0) {
+            return {
+              flagged: true,
+              category: triggered[0],
+              reason: `flagged by openai moderation (${triggered.join(", ")}).`,
+              provider: "openai",
+            };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("OpenAI moderation request failed, using local rules:", err.message);
+    }
+  }
+
+  return { flagged: false, provider: apiKey ? "openai" : "local-moderation" };
+}
+
+app.post("/api/chat/moderate", async (req, res) => {
+  try {
+    const { text, apiKey } = req.body || {};
+    const result = await moderateTextWithOpenAI(text, apiKey);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, flagged: false, error: err.message });
+  }
+});
+
+app.get("/api/chat/state", (req, res) => {
+  const user = (req.query.user || "").toString().toLowerCase();
+  const visibleMessages = chatHistory.filter((m) => {
+    if (!m.channel.startsWith("dm:")) return true;
+    if (!user) return false;
+    const parts = m.channel.split(":");
+    return parts.includes(user);
+  });
+
+  const activeVoice = {};
+  for (const [roomId, peers] of voiceRooms.entries()) {
+    activeVoice[roomId] = Array.from(peers.values());
+  }
+
+  const onlineList = Array.from(liveClients.values()).map((c) => ({
+    id: c.id,
+    username: c.username,
+  }));
+
+  res.json({
+    success: true,
+    messages: visibleMessages.slice(-200),
+    voiceRooms: activeVoice,
+    onlineUsers: onlineList,
+  });
+});
+
+app.post("/api/chat/send", async (req, res) => {
+  try {
+    const { message, apiKey } = req.body || {};
+    if (!message || !message.text || !message.author || !message.channel) {
+      return res.status(400).json({ success: false, error: "Invalid message" });
+    }
+
+    const mod = await moderateTextWithOpenAI(message.text, apiKey);
+    if (mod.flagged) {
+      return res.status(400).json({
+        success: false,
+        flagged: true,
+        category: mod.category,
+        error: mod.reason || "Message blocked by moderation",
+      });
+    }
+
+    chatHistory.push(message);
+    if (chatHistory.length > 500) chatHistory.shift();
+
+    // Broadcast via SSE to connected clients
+    const eventPayload = {
+      type: "chat-event",
+      event: "NEW_MESSAGE",
+      message,
+    };
+
+    if (message.channel.startsWith("dm:")) {
+      const parts = message.channel.split(":");
+      for (const [, client] of liveClients.entries()) {
+        const u = (client.username || "").toLowerCase();
+        if (parts.includes(u)) {
+          try {
+            client.res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
+          } catch {}
+        }
+      }
+    } else {
+      broadcastToClients(eventPayload, "all");
+    }
+
+    res.json({ success: true, message });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/voice/signal", (req, res) => {
+  try {
+    const { type, roomId, peerId, username, targetPeerId, payload, muted, deafened } = req.body || {};
+    if (!type || !peerId) {
+      return res.status(400).json({ success: false, error: "Missing voice signal params" });
+    }
+
+    if (type === "VOICE_JOIN" && roomId) {
+      // Remove peer from any previous room
+      for (const [, peers] of voiceRooms.entries()) {
+        peers.delete(peerId);
+      }
+      if (!voiceRooms.has(roomId)) {
+        voiceRooms.set(roomId, new Map());
+      }
+      voiceRooms.get(roomId).set(peerId, {
+        peerId,
+        username: username || "User",
+        muted: !!muted,
+        deafened: !!deafened,
+      });
+    } else if (type === "VOICE_LEAVE") {
+      for (const [rId, peers] of voiceRooms.entries()) {
+        peers.delete(peerId);
+        if (peers.size === 0) voiceRooms.delete(rId);
+      }
+    } else if (type === "VOICE_STATE" && roomId && voiceRooms.has(roomId)) {
+      const peer = voiceRooms.get(roomId).get(peerId);
+      if (peer) {
+        peer.muted = !!muted;
+        peer.deafened = !!deafened;
+      }
+    }
+
+    const activeVoice = {};
+    for (const [rId, peers] of voiceRooms.entries()) {
+      activeVoice[rId] = Array.from(peers.values());
+    }
+
+    const signalEvent = {
+      type: "voice-event",
+      signalType: type,
+      roomId,
+      peerId,
+      username,
+      targetPeerId,
+      payload,
+      muted,
+      deafened,
+      voiceRooms: activeVoice,
+    };
+
+    if (targetPeerId) {
+      broadcastToClients(signalEvent, targetPeerId);
+    } else {
+      broadcastToClients(signalEvent, "all");
+    }
+
+    res.json({ success: true, voiceRooms: activeVoice });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 function getBuiltModuleEntryPath() {
   if (NODE_ENV !== "production") return null;
   try {

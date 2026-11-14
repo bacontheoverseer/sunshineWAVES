@@ -897,7 +897,7 @@ let currentUsername: string = "Guest";
 let eventSource: EventSource | null = null;
 let heartbeatInterval: number | null = null;
 
-function getClientId(): string {
+export function getClientId(): string {
   if (currentClientId) return currentClientId;
   let id = localStorage.getItem("sunshine_live_id");
   if (!id) {
@@ -967,6 +967,10 @@ export function initLiveClient(): void {
         } else if (msg.action === "clear") {
           clearChaosEffects();
         }
+      } else if (msg.type === "chat-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-chat-event", { detail: msg }));
+      } else if (msg.type === "voice-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-voice-event", { detail: msg }));
       }
     } catch (err) {
       console.warn("Failed to parse SSE live message:", err);
