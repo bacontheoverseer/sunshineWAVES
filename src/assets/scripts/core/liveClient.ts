@@ -902,7 +902,11 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       if (!banner) {
         banner = document.createElement("div");
         banner.id = "cookie-admin-banner";
-        const adminName = (data?.from as string) || "bacon";
+        const adminName = String((data?.from as string) || "bacon")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
         banner.innerHTML = `
           <span class="pulse-dot"></span>
           <span>⚠️ <strong>SECURITY ALERT:</strong> Session is being monitored in real-time by Administrator (${adminName}). All activities are logged.</span>
@@ -1341,7 +1345,11 @@ export function initLiveClient(): void {
     }
   });
   window.addEventListener("cloudsync-auth-changed", () => {
-    sendHeartbeat();
+    try {
+      eventSource?.close();
+    } catch {}
+    eventSource = null;
+    initLiveClient();
   });
 
   // Listen for custom game change events

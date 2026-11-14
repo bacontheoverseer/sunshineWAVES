@@ -156,7 +156,12 @@ function initToast(): void {
 
     const content = document.createElement("div");
     content.className = "toast-content";
-    content.innerHTML = `<i class="${iconClass}"></i><span>${message}</span>`;
+    const iconEl = document.createElement("i");
+    iconEl.className = iconClass;
+    const textEl = document.createElement("span");
+    textEl.textContent = message;
+    content.appendChild(iconEl);
+    content.appendChild(textEl);
     toast.appendChild(content);
 
     if (actions && actions.length > 0) {

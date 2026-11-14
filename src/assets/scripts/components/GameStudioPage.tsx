@@ -323,13 +323,41 @@ function rewriteExternalHtmlAssetsForCoep(rawHtml: string): string {
   );
 }
 
+function escapeStudioHtml(str: string): string {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function injectCloudSyncBridgeIntoHtml(rawHtml: string, project: StudioGameProject): string {
   const { username, isCloudSynced } = getCloudSyncState();
   const coepSafeHtml = rewriteExternalHtmlAssetsForCoep(rawHtml || "");
   const bridgeScript = `
 <script>
 (function() {
-  // Auto-proxy cross-origin fetch/Image/Audio requests through /!!/ so COEP never blocks external game assets
+  // Provide isolated in-memory storage fallback when running inside sandbox without allow-same-origin
+  try {
+    void window.localStorage.length;
+  } catch (e) {
+    try {
+      var mem = Object.create(null);
+      var memStorage = {
+        getItem: function(k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+        setItem: function(k, v) { mem[String(k)] = String(v); },
+        removeItem: function(k) { delete mem[String(k)]; },
+        clear: function() { mem = Object.create(null); },
+        key: function(i) { return Object.keys(mem)[i] || null; },
+        get length() { return Object.keys(mem).length; }
+      };
+      Object.defineProperty(window, "localStorage", { value: memStorage });
+      Object.defineProperty(window, "sessionStorage", { value: memStorage });
+    } catch (_) {}
+  }
+
+  // Auto-proxy cross-origin fetch requests through /!!/ so COEP never blocks external game assets
   try {
     var origFetch = window.fetch;
     if (origFetch) {
@@ -343,16 +371,16 @@ function injectCloudSyncBridgeIntoHtml(rawHtml: string, project: StudioGameProje
   } catch (e) {}
 
   window.CookieCloudSync = {
-    gameId: ${JSON.stringify(project.id)},
-    gameTitle: ${JSON.stringify(project.title)},
-    username: ${JSON.stringify(username)},
+    gameId: ${JSON.stringify(project.id).replace(/</g, "\\u003c")},
+    gameTitle: ${JSON.stringify(project.title).replace(/</g, "\\u003c")},
+    username: ${JSON.stringify(username).replace(/</g, "\\u003c")},
     isCloudSynced: ${JSON.stringify(isCloudSynced)},
     reportProgress: function(data) {
       try {
         window.parent.postMessage({
           type: "COOKIE_CLOUDSYNC_PROGRESS",
-          gameId: ${JSON.stringify(project.id)},
-          gameTitle: ${JSON.stringify(project.title)},
+          gameId: ${JSON.stringify(project.id).replace(/</g, "\\u003c")},
+          gameTitle: ${JSON.stringify(project.title).replace(/</g, "\\u003c")},
           score: Number(data && data.score) || 0,
           levelReached: Number(data && data.level) || 1,
           coinsAdded: Number(data && data.coins) || 0,
@@ -376,12 +404,14 @@ function buildStandaloneGameHtml(project: StudioGameProject): string {
   if (project.isCustomHtml && project.customHtmlContent) {
     return injectCloudSyncBridgeIntoHtml(project.customHtmlContent, project);
   }
-  const serialized = JSON.stringify(project);
+  const serialized = JSON.stringify(project).replace(/</g, "\\u003c");
+  const safeTitle = escapeStudioHtml(project.title);
+  const safeCreator = escapeStudioHtml(project.studioName || project.author);
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
-<title>${project.title} — ${project.studioName || project.author}</title>
+<title>${safeTitle} — ${safeCreator}</title>
 <style>
   body { margin: 0; background: #070a12; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
   .hud { display: flex; gap: 18px; align-items: center; margin-bottom: 10px; font-size: 13px; background: rgba(255,255,255,0.06); padding: 8px 18px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.12); }
@@ -391,7 +421,7 @@ function buildStandaloneGameHtml(project: StudioGameProject): string {
 </head>
 <body>
   <div class="hud">
-    <strong>${project.title}</strong>
+    <strong>${safeTitle}</strong>
     <span id="lvl">level 1</span>
     <span id="hp">hp: ❤️❤️❤️</span>
     <span id="score">score: 0</span>
@@ -591,6 +621,7 @@ export default function GameStudioPage() {
   const [customScript, setCustomScript] = useState(
     "// Optional JS per-frame hook:\n// state.score += 0;"
   );
+  const isForeignProjectRef = useRef(false);
 
   // Live Play-Test Engine state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1562,7 +1593,7 @@ export default function GameStudioPage() {
           }
         }
 
-        if (cfg.customScript && cfg.customScript.trim()) {
+        if (cfg.customScript && cfg.customScript.trim() && !isForeignProjectRef.current) {
           try {
             const fn = new Function("ctx", "state", "player", cfg.customScript);
             fn(ctx, sim, pl);
@@ -2433,6 +2464,9 @@ export default function GameStudioPage() {
     }
 
     setPlayingCustomHtmlGame(null);
+    isForeignProjectRef.current = Boolean(
+      g.author && g.author.toLowerCase() !== getActiveAuthor().toLowerCase()
+    );
     setTitle(g.title);
     setDescription(g.description);
     setMode(g.mode);
@@ -2483,6 +2517,7 @@ export default function GameStudioPage() {
     hide();
     const tab = store.addTab(null, g.title, true);
     tab.isUrlLoaded = true;
+    tab.iframe.setAttribute("sandbox", "allow-scripts allow-pointer-lock allow-forms allow-popups");
     tab.iframe.src = blobUrl;
     document.body.classList.add("browser-view");
     store.notify();
@@ -3354,6 +3389,7 @@ export default function GameStudioPage() {
                 key={htmlPreviewBlobUrl}
                 title="Custom HTML Game Preview"
                 src={htmlPreviewBlobUrl}
+                sandbox="allow-scripts allow-pointer-lock allow-forms allow-popups"
                 allow="fullscreen; autoplay; gamepad; pointer-lock; clipboard-read; clipboard-write"
                 style={{
                   width: "100%",
@@ -3446,6 +3482,7 @@ export default function GameStudioPage() {
                   key={playingCustomBlobUrl}
                   title={playingCustomHtmlGame.title}
                   src={playingCustomBlobUrl}
+                  sandbox="allow-scripts allow-pointer-lock allow-forms allow-popups"
                   allow="fullscreen; autoplay; gamepad; pointer-lock; clipboard-read; clipboard-write"
                   style={{
                     width: "100%",

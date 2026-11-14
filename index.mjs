@@ -1253,10 +1253,13 @@ app.get("/api/live/stream", (req, res) => {
     res.flushHeaders();
   }
 
+  const authUser = getAuthenticatedCloudSyncUser(req);
   const clientId = (req.query.id || Math.random().toString(36).substring(2, 10)).toString();
-  const username = (req.query.user || "Guest-" + clientId.substring(0, 4)).toString();
-  const page = (req.query.page || "/").toString();
-  const game = (req.query.game || "Browsing").toString();
+  const username = authUser
+    ? authUser.username
+    : (req.query.user || "Guest-" + clientId.substring(0, 4)).toString();
+  const page = (req.query.page || "/").toString().slice(0, 200);
+  const game = (req.query.game || "Browsing").toString().slice(0, 120);
   const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "127.0.0.1")
     .toString()
     .replace(/^::ffff:/, "");
@@ -1265,6 +1268,7 @@ app.get("/api/live/stream", (req, res) => {
     res,
     id: clientId,
     username,
+    verifiedUsername: authUser ? authUser.username.toLowerCase() : null,
     ip,
     page,
     game,
@@ -1362,24 +1366,74 @@ app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
   res.json({ success: true, count, target, action });
 });
 
+function isSafeExternalHttpUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || "").trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+      return false;
+    }
+    const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+      const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+      if (
+        a === 0 ||
+        a === 10 ||
+        a === 127 ||
+        (a === 169 && b === 254) ||
+        (a === 172 && b >= 16 && b <= 31) ||
+        (a === 192 && b === 168) ||
+        (a === 100 && b >= 64 && b <= 127)
+      ) {
+        return false;
+      }
+    }
+    if (host === "::1" || host === "::" || /^(fe80|fc00|fd[0-9a-f]{2}):/i.test(host) || host.startsWith("::ffff:")) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 app.get("/api/live/audio-proxy", async (req, res) => {
   try {
     const rawUrl = (req.query.url || "").toString().trim();
-    if (!rawUrl || (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://"))) {
-      return res.status(400).send("Invalid audio url");
+    if (!isSafeExternalHttpUrl(rawUrl)) {
+      return res.status(400).send("Invalid or disallowed audio url");
     }
-    const upstream = await fetch(rawUrl, {
+    let targetUrl = rawUrl;
+    let upstream = await fetch(targetUrl, {
+      redirect: "manual",
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         Accept: "audio/*,*/*;q=0.9",
       },
     });
+    if (upstream.status >= 300 && upstream.status < 400) {
+      const loc = upstream.headers.get("location");
+      targetUrl = loc ? new URL(loc, rawUrl).toString() : "";
+      if (!isSafeExternalHttpUrl(targetUrl)) {
+        return res.status(400).send("Disallowed redirect target");
+      }
+      upstream = await fetch(targetUrl, { redirect: "error" });
+    }
     if (!upstream.ok) {
       return res.status(upstream.status).send("Upstream audio failed");
     }
+    const contentLen = Number(upstream.headers.get("content-length") || 0);
+    if (contentLen > 8 * 1024 * 1024) {
+      return res.status(413).send("Audio too large");
+    }
     const contentType = upstream.headers.get("content-type") || "audio/mpeg";
     const buf = Buffer.from(await upstream.arrayBuffer());
+    if (buf.length > 8 * 1024 * 1024) {
+      return res.status(413).send("Audio too large");
+    }
     res.setHeader("Content-Type", contentType);
+    res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Cache-Control", "public, max-age=86400");
@@ -1438,6 +1492,8 @@ function decodeHtmlEntities(str) {
     .trim();
 }
 
+const ALLOWED_SOUND_EXTS = new Set([".mp3", ".wav", ".ogg", ".m4a", ".webm"]);
+
 app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
   try {
     const { name, filename, data } = req.body || {};
@@ -1445,12 +1501,18 @@ app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
       return res.status(400).json({ success: false, error: "Missing sound file data" });
     }
 
-    const ext = path.extname(filename).toLowerCase() || ".mp3";
-    const baseClean = path.basename(filename, ext).replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 32);
+    const ext = path.extname(String(filename)).toLowerCase() || ".mp3";
+    if (!ALLOWED_SOUND_EXTS.has(ext)) {
+      return res.status(400).json({ success: false, error: "Unsupported audio file extension" });
+    }
+    const baseClean = path.basename(String(filename), ext).replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 32) || "sound";
     const safeFilename = `upload_${Date.now()}_${baseClean}${ext}`;
 
-    const cleanBase64 = data.replace(/^data:[^;]+;base64,/, "");
+    const cleanBase64 = String(data).replace(/^data:[^;]+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: "Sound file exceeds 5MB limit" });
+    }
     writeSoundBufferToDirs(safeFilename, buffer);
 
     const soundUrl = `/assets/sounds/${safeFilename}`;
@@ -1555,14 +1617,15 @@ app.get("/api/admin/myinstants-search", async (req, res) => {
 app.post("/api/admin/resolve-sound", async (req, res) => {
   try {
     const rawUrl = (req.body?.url || "").toString().trim();
-    if (!rawUrl) {
-      return res.status(400).json({ success: false, error: "Missing url" });
+    if (!rawUrl || !isSafeExternalHttpUrl(rawUrl)) {
+      return res.status(400).json({ success: false, error: "Invalid or disallowed url" });
     }
 
     let resolvedMp3 = rawUrl;
-
-    if (rawUrl.includes("myinstants.com/") && !rawUrl.endsWith(".mp3")) {
+    const parsedRaw = new URL(rawUrl);
+    if ((parsedRaw.hostname === "myinstants.com" || parsedRaw.hostname.endsWith(".myinstants.com")) && !rawUrl.endsWith(".mp3")) {
       const pageRes = await fetch(rawUrl, {
+        redirect: "error",
         headers: { "User-Agent": "Mozilla/5.0" },
       });
       const html = await pageRes.text();
@@ -1572,14 +1635,23 @@ app.post("/api/admin/resolve-sound", async (req, res) => {
       }
     }
 
-    // Download and cache into /assets/sounds/ (both public and dist) so it works 100% same-origin
+    if (!isSafeExternalHttpUrl(resolvedMp3)) {
+      return res.status(400).json({ success: false, error: "Disallowed resolved audio URL" });
+    }
+
+    // Download and cache into /assets/sounds/ (only if safe external audio <= 5MB)
     try {
-      const audioRes = await fetch(resolvedMp3, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const audioRes = await fetch(resolvedMp3, { redirect: "error", headers: { "User-Agent": "Mozilla/5.0" } });
       if (audioRes.ok) {
-        const buf = Buffer.from(await audioRes.arrayBuffer());
-        const safeFilename = `cached_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`;
-        writeSoundBufferToDirs(safeFilename, buf);
-        return res.json({ success: true, url: `/assets/sounds/${safeFilename}` });
+        const len = Number(audioRes.headers.get("content-length") || 0);
+        if (len <= 5 * 1024 * 1024) {
+          const buf = Buffer.from(await audioRes.arrayBuffer());
+          if (buf.length <= 5 * 1024 * 1024) {
+            const safeFilename = `cached_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`;
+            writeSoundBufferToDirs(safeFilename, buf);
+            return res.json({ success: true, url: `/assets/sounds/${safeFilename}` });
+          }
+        }
       }
     } catch {}
 
@@ -2007,15 +2079,17 @@ app.post("/api/chat/moderate", async (req, res) => {
 });
 
 app.get("/api/chat/state", (req, res) => {
-  const rawUser = (req.query.user || req.query.username || "").toString();
-  const user = rawUser.toLowerCase();
-  if (rawUser) touchKnownUser(rawUser);
+  const authUser = getAuthenticatedCloudSyncUser(req);
+  const rawUser = authUser ? authUser.username : (req.query.user || req.query.username || "").toString();
+  const verifiedUserKey = authUser ? authUser.username.toLowerCase() : "";
+  if (authUser) touchKnownUser(authUser.username);
 
   const visibleMessages = chatHistory.filter((m) => {
     if (!m.channel.startsWith("dm:")) return true;
-    if (!user) return false;
+    // Only return private DMs to the cryptographically authenticated participant
+    if (!verifiedUserKey) return false;
     const parts = m.channel.split(":");
-    return parts.includes(user);
+    return parts.includes(verifiedUserKey);
   });
 
   const activeVoice = {};
@@ -2097,7 +2171,6 @@ app.get("/api/chat/user-profile", (req, res) => {
     success: true,
     exists: true,
     profile: {
-      id: csUser ? csUser.id : null,
       username: canonicalName,
       createdAt: csUser ? csUser.createdAt : null,
       cloudSyncVerified: Boolean(csUser),
@@ -2129,13 +2202,17 @@ app.get("/api/chat/user-profile", (req, res) => {
 
 app.post("/api/chat/user-profile", async (req, res) => {
   try {
+    const authUser = getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to update your profile" });
+    }
     const { username, bio, statusText } = req.body || {};
-    const cleanUser = (username || "").toString().trim();
-    if (!cleanUser) {
-      return res.status(400).json({ success: false, error: "Missing username" });
+    const cleanUser = (username || authUser.username).toString().trim();
+    const key = cleanUser.toLowerCase();
+    if (authUser.username.toLowerCase() !== key) {
+      return res.status(403).json({ success: false, error: "You can only edit your own profile" });
     }
     const csMap = getCloudSyncUsersMap();
-    const key = cleanUser.toLowerCase();
     if (csMap.size > 0 && !csMap.has(key)) {
       return res.status(404).json({ success: false, error: "User not found in CloudSync" });
     }
@@ -2166,31 +2243,44 @@ app.post("/api/chat/user-profile", async (req, res) => {
 
 app.post("/api/chat/send", async (req, res) => {
   try {
+    const authUser = getAuthenticatedCloudSyncUser(req);
     const { message } = req.body || {};
     if (!message || !message.text || !message.author || !message.channel) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
-    // Validate DM recipients against the CloudSync database
-    if (message.channel.startsWith("dm:")) {
+    const sanitizedMsg = {
+      ...message,
+      author: authUser ? authUser.username : String(message.author).trim().slice(0, 40),
+      text: String(message.text).slice(0, 2000),
+      channel: String(message.channel).trim().slice(0, 120),
+    };
+
+    // Enforce authenticated sender & CloudSync validation for private DMs
+    if (sanitizedMsg.channel.startsWith("dm:")) {
+      if (!authUser) {
+        return res.status(401).json({ success: false, error: "Sign in to CloudSync to send private DMs" });
+      }
+      const parts = sanitizedMsg.channel.slice(3).split(":").map((p) => (p || "").trim().toLowerCase());
+      if (!parts.includes(authUser.username.toLowerCase())) {
+        return res.status(403).json({ success: false, error: "Cannot send DM into another user's channel" });
+      }
       const csMap = getCloudSyncUsersMap();
       if (csMap.size > 0) {
-        const parts = message.channel.slice(3).split(":");
-        for (const p of parts) {
-          const cleanPart = (p || "").trim().toLowerCase();
+        for (const cleanPart of parts) {
           if (!cleanPart || !csMap.has(cleanPart)) {
             return res.status(404).json({
               success: false,
-              error: `user "@${p}" does not exist in cloudsync`,
+              error: `user "@${cleanPart}" does not exist in cloudsync`,
             });
           }
         }
       }
     }
 
-    touchKnownUser(message.author);
+    touchKnownUser(sanitizedMsg.author);
 
-    const mod = await moderateTextWithOpenAI(message.text);
+    const mod = await moderateTextWithOpenAI(sanitizedMsg.text);
     if (mod.flagged) {
       return res.status(400).json({
         success: false,
@@ -2200,21 +2290,21 @@ app.post("/api/chat/send", async (req, res) => {
       });
     }
 
-    chatHistory.push(message);
+    chatHistory.push(sanitizedMsg);
     if (chatHistory.length > 500) chatHistory.shift();
 
     // Broadcast via SSE to connected clients
     const eventPayload = {
       type: "chat-event",
       event: "NEW_MESSAGE",
-      message,
+      message: sanitizedMsg,
     };
 
-    if (message.channel.startsWith("dm:")) {
-      const parts = message.channel.split(":");
+    if (sanitizedMsg.channel.startsWith("dm:")) {
+      const parts = sanitizedMsg.channel.split(":");
       for (const [, client] of liveClients.entries()) {
-        const u = (client.username || "").toLowerCase();
-        if (parts.includes(u)) {
+        const verifiedU = client.verifiedUsername;
+        if (verifiedU && parts.includes(verifiedU)) {
           try {
             client.res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
           } catch {}
@@ -2224,7 +2314,7 @@ app.post("/api/chat/send", async (req, res) => {
       broadcastToClients(eventPayload, "all");
     }
 
-    res.json({ success: true, message });
+    res.json({ success: true, message: sanitizedMsg });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -2380,6 +2470,8 @@ app.get("/api/studio/games/:id/play.html", (req, res) => {
     return res.status(404).send("Custom HTML game not found");
   }
   res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Content-Security-Policy", "sandbox allow-scripts allow-pointer-lock allow-popups allow-forms");
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.send(found.customHtmlContent);
 });
 
@@ -2635,11 +2727,16 @@ app.post("/api/shop/troll", async (req, res) => {
       }
     }
 
+    const authUser = getAuthenticatedCloudSyncUser(req);
     const payload = {
       type: "admin-chaos",
       trollEventId,
       action,
-      data: { ...(data || {}), trollEventId, fromShopUser: sender || "Someone" },
+      data: {
+        ...(data || {}),
+        trollEventId,
+        fromShopUser: authUser ? authUser.username : (sender || "Someone"),
+      },
       timestamp: Date.now(),
     };
 

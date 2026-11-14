@@ -400,9 +400,14 @@ export default function ChatModal() {
       if (!cloudUser || savingProfile) return;
       setSavingProfile(true);
       try {
+        let token = "";
+        try { token = localStorage.getItem("auth_token") || ""; } catch {}
         const res = await fetch("/api/chat/user-profile", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body: JSON.stringify({
             username: cloudUser,
             bio: editingBio,
@@ -1105,7 +1110,11 @@ export default function ChatModal() {
     const fetchChatAndPresenceState = () => {
       if (document.hidden && initialStateLoadedRef.current) return;
       const isInitial = !initialStateLoadedRef.current;
-      fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`)
+      let authToken = "";
+      try { authToken = localStorage.getItem("auth_token") || ""; } catch {}
+      fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`, {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+      })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (!data) return;
@@ -1292,9 +1301,14 @@ export default function ChatModal() {
       } catch {}
 
       // Also broadcast via server SSE endpoint if available
+      let sendToken = "";
+      try { sendToken = localStorage.getItem("auth_token") || ""; } catch {}
       fetch("/api/chat/send", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(sendToken ? { Authorization: `Bearer ${sendToken}` } : {}),
+        },
         body: JSON.stringify({
           message: newMsg,
         }),

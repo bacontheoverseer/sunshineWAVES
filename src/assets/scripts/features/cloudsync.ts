@@ -1003,13 +1003,18 @@ export class CloudSync {
       this._lastStatusText = text;
       this._lastStatusType = cls;
 
+      const iconEl = document.createElement("i");
       if (cls === "loading") {
-        el.innerHTML = `<i class="fa-solid fa-rotate" style="color: var(--text-white);"></i> ${text}`;
+        iconEl.className = "fa-solid fa-rotate";
+        iconEl.style.color = "var(--text-white)";
       } else if (cls === "error") {
-        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color: #ff5555;"></i> ${text}`;
+        iconEl.className = "fa-solid fa-triangle-exclamation";
+        iconEl.style.color = "#ff5555";
       } else {
-        el.innerHTML = `<i class="fa-solid fa-check" style="color: var(--text-white);"></i> ${text}`;
+        iconEl.className = "fa-solid fa-check";
+        iconEl.style.color = "var(--text-white)";
       }
+      el.replaceChildren(iconEl, document.createTextNode(` ${text}`));
     };
 
     updateEl(ind);
