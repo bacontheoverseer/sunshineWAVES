@@ -116,11 +116,17 @@ function _initSettings(): void {
     return exportData;
   }
 
+  const EXPORT_SKIP_LOCAL_KEYS = new Set([
+    "auth_user",
+    "auth_token",
+    "sunshine-sync-meta",
+  ]);
+
   window.sunshineExportAllData = async function (): Promise<MasterExport> {
     const masterExport: MasterExport = {
       localStorage: Object.keys(localStorage).reduce(
         (acc: Record<string, string>, key: string) => {
-          if (key !== "sunshine-sync-meta") {
+          if (!EXPORT_SKIP_LOCAL_KEYS.has(key)) {
             acc[key] = localStorage.getItem(key) as string;
           }
           return acc;
@@ -202,11 +208,30 @@ function _initSettings(): void {
 
     try {
       progressCallback("clearing local storage...");
+      const preservedSessionKeys: Record<string, string> = {};
+      for (const sessionKey of EXPORT_SKIP_LOCAL_KEYS) {
+        const existingValue = localStorage.getItem(sessionKey);
+        if (existingValue !== null) {
+          preservedSessionKeys[sessionKey] = existingValue;
+        }
+      }
+
       localStorage.clear();
+      for (const [sessionKey, sessionValue] of Object.entries(
+        preservedSessionKeys,
+      )) {
+        try {
+          localStorage.setItem(sessionKey, sessionValue);
+        } catch {}
+      }
       const totalKeys = Object.keys(importedData.localStorage).length;
       let currentKey = 0;
 
       for (const [key, value] of Object.entries(importedData.localStorage)) {
+        if (EXPORT_SKIP_LOCAL_KEYS.has(key)) {
+          currentKey++;
+          continue;
+        }
         try {
           localStorage.setItem(key, value);
         } catch (e) {

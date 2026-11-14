@@ -977,8 +977,8 @@ function getAuthenticatedCloudSyncUser(req) {
     (req.headers.authorization?.startsWith("Bearer ")
       ? req.headers.authorization.slice(7).trim()
       : null);
-  const rawToken = cookieToken || headerToken;
-  const claims = verifyCloudSyncJwt(rawToken);
+  const claims =
+    verifyCloudSyncJwt(headerToken) || verifyCloudSyncJwt(cookieToken);
   if (!claims || !claims.id || !claims.username) return null;
 
   try {
