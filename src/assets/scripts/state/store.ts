@@ -517,7 +517,7 @@ export const store = {
     if (searchInputNav) {
       searchInputNav.placeholder = activeTab?.isLoading
         ? "fetching lesson..."
-        : "search or enter url (˶>⩊<˶)";
+        : "search or enter url :D";
     }
   },
 

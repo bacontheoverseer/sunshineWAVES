@@ -344,7 +344,7 @@ export default function NewTabModal() {
             placeholder={
               mode === "splitSelect"
                 ? "select a tab to split with..."
-                : "search or enter url (˶>⩊<˶)"
+                : "search or enter url :D"
             }
             autocomplete="off"
             onKeyUp={handleKeyUp}

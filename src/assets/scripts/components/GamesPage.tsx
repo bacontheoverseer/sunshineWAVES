@@ -86,7 +86,7 @@ export default function GamesPage() {
       })
       .catch(() => {
         setError(
-          "failed to fetch games .‸. (this is an issue with the source)",
+          "failed to fetch games :( (this is an issue with the source)",
         );
         setLoaded(true);
       });
