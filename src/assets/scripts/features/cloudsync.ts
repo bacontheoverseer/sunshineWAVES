@@ -200,6 +200,7 @@ export class CloudSync {
         this.user = {};
         localStorage.removeItem("auth_user");
         localStorage.removeItem("auth_token");
+        window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
       }
       this.updateModalState();
 
@@ -1204,6 +1205,7 @@ export class CloudSync {
     this.user = {};
     this._dirtyKeys.clear();
     localStorage.removeItem("auth_user");
+    localStorage.removeItem("auth_token");
     localStorage.removeItem("sunshine-sync-meta");
 
     await this.wipeLocalData();

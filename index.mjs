@@ -976,7 +976,7 @@ function getAuthenticatedCloudSyncUser(req) {
       : null);
   const rawToken = cookieToken || headerToken;
   const claims = verifyCloudSyncJwt(rawToken);
-  if (!claims || !claims.id) return null;
+  if (!claims || !claims.id || !claims.username) return null;
 
   try {
     const db = openCloudSyncDb(true);
@@ -985,6 +985,9 @@ function getAuthenticatedCloudSyncUser(req) {
         .query("SELECT id, username, token_version FROM users WHERE id = ?")
         .get(Number(claims.id));
       if (!row) return null;
+      if (String(row.username).toLowerCase() !== String(claims.username).toLowerCase()) {
+        return null;
+      }
       if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
       return { id: Number(row.id), username: String(row.username) };
     } finally {
@@ -1304,9 +1307,9 @@ function invalidateCloudSyncUsersCache() {
   cloudSyncUsersCache = { map: null, expiresAt: 0 };
 }
 
-function getCloudSyncUsersMap() {
+function getCloudSyncUsersMap(forceRefresh = false) {
   const now = Date.now();
-  if (cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
+  if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
     return cloudSyncUsersCache.map;
   }
   const map = new Map();
@@ -2401,9 +2404,13 @@ app.get("/api/chat/user-profile", (req, res) => {
     return res.status(400).json({ success: false, exists: false, error: "username is required" });
   }
 
-  const csMap = getCloudSyncUsersMap();
+  let csMap = getCloudSyncUsersMap();
   const key = rawTarget.toLowerCase();
-  const csUser = csMap.get(key) || null;
+  let csUser = csMap.get(key) || null;
+  if (!csUser) {
+    csMap = getCloudSyncUsersMap(true);
+    csUser = csMap.get(key) || null;
+  }
 
   // Cross-check against CloudSync database
   if (csMap.size > 0 && !csUser) {
@@ -2551,14 +2558,17 @@ app.post("/api/chat/send", async (req, res) => {
       if (!parts.includes(authUser.username.toLowerCase())) {
         return res.status(403).json({ success: false, error: "Cannot send DM into another user's channel" });
       }
-      const csMap = getCloudSyncUsersMap();
+      let csMap = getCloudSyncUsersMap();
       if (csMap.size > 0) {
         for (const cleanPart of parts) {
           if (!cleanPart || !csMap.has(cleanPart)) {
-            return res.status(404).json({
-              success: false,
-              error: `user "@${cleanPart}" does not exist in cloudsync`,
-            });
+            csMap = getCloudSyncUsersMap(true);
+            if (!cleanPart || !csMap.has(cleanPart)) {
+              return res.status(404).json({
+                success: false,
+                error: `user "@${cleanPart}" does not exist in cloudsync`,
+              });
+            }
           }
         }
       }
