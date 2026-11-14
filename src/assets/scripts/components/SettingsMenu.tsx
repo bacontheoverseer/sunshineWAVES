@@ -543,28 +543,7 @@ export default function SettingsMenu() {
             </div>
             <div class="settings-item">
               <label>you have reached the end!</label>
-              <p>
-                thank you so much for using{" "}
-                <a href="https://sunshine.lat/" target="_blank" class="hover-link">
-                  Operation Cookie
-                </a>{" "}
-                if you have any suggestions or issues, please contact us on our{" "}
-                <a
-                  href="https://discord.gg/dJvdkPRheV"
-                  target="_blank"
-                  class="hover-link"
-                >
-                  discord server
-                </a>{" "}
-                or open an issue on our{" "}
-                <a
-                  href="https://github.com/l4uy/sunshine"
-                  target="_blank"
-                  class="hover-link"
-                >
-                  github repository
-                </a>
-              </p>
+              <p>thank you so much for using Operation Cookie!</p>
             </div>
           </div>
         </div>
