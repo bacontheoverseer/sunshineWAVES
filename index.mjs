@@ -3,6 +3,8 @@ dotenv.config();
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import net from "net";
+import dns from "dns";
 import { createServer, request } from "http";
 import { Database } from "bun:sqlite";
 import express from "express";
@@ -195,14 +197,294 @@ app.use((req, res, next) => {
   next();
 });
 
-// Mochi proxy: always active (platforms without Caddy need this)
+// Mochi proxy: tries MOCHI_HOST:MOCHI_PORT first, with an in-process SSRF-safe
+// fallback for /!cover!/ and /!!/ when mochi is not running (e.g. single-container 512MB deploys).
+const MOCHI_HOST = process.env.MOCHI_HOST || "127.0.0.1";
+const MOCHI_PORT = parseInt(process.env.MOCHI_PORT || "4000", 10);
+const MOCHI_XOR_KEY = Buffer.from("q7Zx!9pL", "utf8");
+const MOCHI_FALLBACK_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const mochiCoverCache = CACHING_ENABLED
+  ? new LRUCache({
+      maxSize: Math.min(4, Math.max(1, parseInt(process.env.FILE_CACHE_MAX_MB || "8", 10))) * 1024 * 1024,
+      ttl: 1000 * 60 * 30,
+      ttlAutopurge: true,
+      sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
+    })
+  : null;
+let mochiDownUntil = 0;
+
+function decodeMochiToken(token) {
+  if (!token) return null;
+  try {
+    let b64 = token.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4 !== 0) b64 += "=";
+    const buf = Buffer.from(b64, "base64");
+    for (let i = 0; i < buf.length; i++) {
+      buf[i] ^= MOCHI_XOR_KEY[i % MOCHI_XOR_KEY.length];
+    }
+    const decoded = decodeURIComponent(buf.toString("utf8"));
+    if (decoded.startsWith("http://") || decoded.startsWith("https://")) {
+      return decoded;
+    }
+  } catch {}
+  return null;
+}
+
+function decodeMochiTarget(reqUrl) {
+  const isCover = reqUrl.startsWith("/!cover!/");
+  const prefix = isCover ? "/!cover!/" : "/!!/";
+  const rawTarget = reqUrl.slice(prefix.length);
+  if (!rawTarget) return null;
+
+  if (rawTarget.startsWith("http://") || rawTarget.startsWith("https://")) {
+    return rawTarget;
+  }
+
+  const qIdx = rawTarget.indexOf("?");
+  const pathOnly = (qIdx >= 0 ? rawTarget.slice(0, qIdx) : rawTarget).replace(/\/+$/, "");
+  const outerQuery = qIdx >= 0 ? rawTarget.slice(qIdx) : "";
+  const slashIdx = pathOnly.indexOf("/");
+  const token = slashIdx >= 0 ? pathOnly.slice(0, slashIdx) : pathOnly;
+  let remainder = slashIdx >= 0 ? pathOnly.slice(slashIdx + 1) : "";
+  if (remainder.startsWith("!a!")) remainder = remainder.slice(3);
+
+  const decodedBase = decodeMochiToken(token);
+  if (decodedBase) {
+    if (!remainder && !outerQuery) return decodedBase;
+    try {
+      let baseForJoin = decodedBase;
+      const basePathNoQuery = baseForJoin.split("?")[0] || "";
+      const lastSeg = basePathNoQuery.split("/").pop() || "";
+      if (remainder && !baseForJoin.endsWith("/") && !lastSeg.includes(".")) {
+        baseForJoin += "/";
+      }
+      const resolved = remainder ? new URL(remainder, baseForJoin).toString() : decodedBase;
+      return outerQuery && !resolved.includes("?") ? `${resolved}${outerQuery}` : resolved;
+    } catch {
+      return decodedBase;
+    }
+  }
+
+  try {
+    const plain = decodeURIComponent(pathOnly);
+    if (plain.startsWith("http://") || plain.startsWith("https://")) {
+      return `${plain}${outerQuery}`;
+    }
+  } catch {}
+  return null;
+}
+
+function isBlockedIp(ip) {
+  if (!ip) return true;
+  let addr = ip.toLowerCase().split("%")[0];
+  if (addr.startsWith("::ffff:")) {
+    const mapped = addr.slice(7);
+    if (net.isIPv4(mapped)) {
+      addr = mapped;
+    } else if (mapped.includes(":")) {
+      const parts = mapped.split(":");
+      if (parts.length === 2) {
+        const hi = parseInt(parts[0], 16);
+        const lo = parseInt(parts[1], 16);
+        if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+          addr = `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+        }
+      }
+    }
+  }
+  if (net.isIPv4(addr)) {
+    const o = addr.split(".").map((n) => parseInt(n, 10));
+    if (o.length !== 4 || o.some((n) => Number.isNaN(n))) return true;
+    if (o[0] === 0) return true; // 0.0.0.0/8
+    if (o[0] === 10) return true; // 10.0.0.0/8
+    if (o[0] === 127) return true; // 127.0.0.0/8 loopback
+    if (o[0] === 169 && o[1] === 254) return true; // 169.254.0.0/16 link-local / metadata
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true; // 172.16.0.0/12
+    if (o[0] === 192 && o[1] === 168) return true; // 192.168.0.0/16
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true; // 100.64.0.0/10 CGNAT
+    if (o[0] >= 224) return true; // multicast / reserved
+    return false;
+  }
+  if (net.isIPv6(addr)) {
+    if (addr === "::" || addr === "::1") return true;
+    const first = parseInt(addr.split(":")[0] || "0", 16);
+    if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+    if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    if ((first & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+    return false;
+  }
+  return true;
+}
+
+async function validatePublicHttpUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (
+    !host ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return null;
+  }
+  if (net.isIP(host)) {
+    return isBlockedIp(host) ? null : parsed;
+  }
+  try {
+    const records = await dns.promises.lookup(host, { all: true });
+    if (!records || records.length === 0) return null;
+    if (records.some((r) => isBlockedIp(r.address))) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function readLimitedResponseBuffer(upstreamRes, maxBytes) {
+  const clHeader = parseInt(upstreamRes.headers.get("content-length") || "0", 10);
+  if (clHeader > maxBytes) {
+    try { await upstreamRes.body?.cancel(); } catch {}
+    return null;
+  }
+  if (!upstreamRes.body) return Buffer.alloc(0);
+  const reader = upstreamRes.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch {}
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function handleMochiFallback(req, res) {
+  const isCover = req.url.startsWith("/!cover!/");
+  if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
+    return res.status(502).json({ error: "make sure mochi is running!" });
+  }
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    return res.status(204).end();
+  }
+
+  const targetStr = decodeMochiTarget(req.url);
+  if (!targetStr) {
+    return res.status(400).json({ error: "invalid mochi target url" });
+  }
+
+  if (isCover && req.method === "GET" && mochiCoverCache) {
+    const cached = mochiCoverCache.get(targetStr);
+    if (cached) {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Content-Type", cached.contentType || "application/octet-stream");
+      res.setHeader("X-Cache", "HIT");
+      return res.status(cached.status).send(cached.body);
+    }
+  }
+
+  try {
+    let currentUrl = await validatePublicHttpUrl(targetStr);
+    if (!currentUrl) {
+      return res.status(403).json({ error: "blocked target url" });
+    }
+
+    let upstreamRes = null;
+    for (let hop = 0; hop < 5; hop++) {
+      const origin = currentUrl.origin;
+      upstreamRes = await fetch(currentUrl.toString(), {
+        method: req.method === "HEAD" ? "HEAD" : "GET",
+        redirect: "manual",
+        signal: AbortSignal.timeout(15000),
+        headers: {
+          "User-Agent": MOCHI_FALLBACK_UA,
+          Accept: isCover
+            ? "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            : "*/*",
+          Referer: `${origin}/`,
+        },
+      });
+      if (upstreamRes.status >= 300 && upstreamRes.status < 400) {
+        const loc = upstreamRes.headers.get("location");
+        try { await upstreamRes.body?.cancel(); } catch {}
+        if (!loc) break;
+        const nextUrl = new URL(loc, currentUrl);
+        currentUrl = await validatePublicHttpUrl(nextUrl.toString());
+        if (!currentUrl) {
+          return res.status(403).json({ error: "blocked redirect target" });
+        }
+        upstreamRes = null;
+        continue;
+      }
+      break;
+    }
+
+    if (!upstreamRes) {
+      return res.status(502).json({ error: "too many redirects" });
+    }
+
+    const contentType = upstreamRes.headers.get("content-type") || "application/octet-stream";
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", contentType);
+    res.setHeader(
+      "Cache-Control",
+      isCover ? "public, max-age=86400" : "public, max-age=300",
+    );
+
+    if (req.method === "HEAD") {
+      try { await upstreamRes.body?.cancel(); } catch {}
+      return res.status(upstreamRes.status).end();
+    }
+
+    const maxBytes = isCover ? 5 * 1024 * 1024 : 20 * 1024 * 1024;
+    const body = await readLimitedResponseBuffer(upstreamRes, maxBytes);
+    if (!body) {
+      return res.status(502).json({ error: "upstream response too large" });
+    }
+
+    if (isCover && upstreamRes.ok && body.length <= 512 * 1024 && mochiCoverCache) {
+      mochiCoverCache.set(targetStr, { status: upstreamRes.status, contentType, body });
+    }
+    return res.status(upstreamRes.status).send(body);
+  } catch (err) {
+    console.error(`mochi fallback failed for ${targetStr}: ${err?.message || err}`);
+    if (!res.headersSent) {
+      return res.status(502).json({ error: "upstream fetch failed" });
+    }
+    res.destroy();
+  }
+}
+
 app.use((req, res, next) => {
   if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') return next();
   if (!req.url.startsWith("/!!/") && !req.url.startsWith("/!cover!/")) return next();
 
+  if (Date.now() < mochiDownUntil && (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS")) {
+    return void handleMochiFallback(req, res);
+  }
+
   const options = {
-    hostname: "127.0.0.1",
-    port: 4000,
+    hostname: MOCHI_HOST,
+    port: MOCHI_PORT,
     path: req.url,
     method: req.method,
     headers: req.headers,
@@ -216,6 +498,10 @@ app.use((req, res, next) => {
   });
 
   proxyReq.on("error", (e) => {
+    mochiDownUntil = Date.now() + 10000;
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+      return void handleMochiFallback(req, res);
+    }
     console.error(`mochi forwarding failed: ${e.message}`);
     if (!res.headersSent)
       res.status(502).json({ error: "make sure mochi is running!" });
