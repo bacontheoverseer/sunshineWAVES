@@ -17,6 +17,7 @@ const NewTabModal = lazy(() => import("./components/NewTabModal.tsx"));
 const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
 const ChatModal = lazy(() => import("./components/ChatModal.tsx"));
 const AdminPanel = lazy(() => import("./components/AdminPanel.tsx"));
+const WelcomeTour = lazy(() => import("./components/WelcomeTour.tsx"));
 
 export default function App() {
   return (
@@ -64,6 +65,9 @@ export default function App() {
       </Suspense>
       <Suspense fallback={null}>
         <AdminPanel />
+      </Suspense>
+      <Suspense fallback={null}>
+        <WelcomeTour />
       </Suspense>
       <div id="overlay" class="overlay" />
     </>

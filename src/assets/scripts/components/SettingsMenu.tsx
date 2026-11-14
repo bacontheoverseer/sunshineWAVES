@@ -477,6 +477,22 @@ export default function SettingsMenu() {
                 }
               />
             </div>
+            <div class="settings-item">
+              <label>welcome tour</label>
+              <p>take a quick guided walkthrough of operation cookie features.</p>
+              <button
+                type="button"
+                class="legal-pill-btn"
+                onClick={() => {
+                  toggleMenu();
+                  window.setTimeout(() => {
+                    document.dispatchEvent(new CustomEvent("startSunshineTour"));
+                  }, 180);
+                }}
+              >
+                <i class="fa-solid fa-compass" /> replay tour
+              </button>
+            </div>
           </div>
 
           <div

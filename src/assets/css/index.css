@@ -1191,3 +1191,209 @@ body:has(#auth-gate-backdrop) .sunshine-ad-node {
         scroll-behavior: auto;
     }
 }
+
+.tour-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 999990;
+    pointer-events: auto;
+    user-select: none;
+}
+
+.tour-backdrop-svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: pointer;
+}
+
+.tour-spotlight-ring {
+    position: absolute;
+    border-radius: 14px;
+    border: 2px solid var(--border-focus);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+    transition: left 0.2s ease, top 0.2s ease, width 0.2s ease, height 0.2s ease;
+}
+
+.tour-card {
+    position: absolute;
+    width: min(348px, calc(100% - 24px));
+    background-color: var(--bg-surface-4);
+    border: 1px solid var(--border-faint);
+    border-radius: 16px;
+    padding: 16px 18px 15px;
+    color: var(--text-primary);
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.58);
+    box-sizing: border-box;
+    pointer-events: auto;
+    transition: left 0.2s ease, top 0.2s ease;
+    animation: tourFadeIn 0.16s ease-out;
+}
+
+@keyframes tourFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.tour-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.tour-card-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    background-color: var(--bg-surface-7);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: lowercase;
+}
+
+.tour-card-badge i {
+    font-size: 11px;
+    color: var(--text-primary);
+}
+
+.tour-close-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--color-icon-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.tour-close-btn:hover {
+    background-color: var(--hover-bg);
+    color: var(--text-primary);
+}
+
+.tour-card-title {
+    margin: 0 0 6px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-white);
+    text-transform: lowercase;
+}
+
+.tour-card-body {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    text-transform: lowercase;
+}
+
+.tour-dots {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 14px;
+}
+
+.tour-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    border: none;
+    padding: 0;
+    background-color: var(--bg-surface-active);
+    cursor: pointer;
+    transition: width 0.15s ease, background-color 0.15s ease;
+}
+
+.tour-dot.active {
+    width: 18px;
+    background-color: var(--border-focus);
+}
+
+.tour-card-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.tour-skip-btn {
+    background: transparent;
+    border: none;
+    padding: 6px 4px;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    text-transform: lowercase;
+    transition: color 0.12s ease;
+}
+
+.tour-skip-btn:hover {
+    color: var(--text-primary);
+}
+
+.tour-nav-btns {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tour-btn-secondary,
+.tour-btn-primary {
+    border-radius: 10px;
+    padding: 7px 13px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    text-transform: lowercase;
+    transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+
+.tour-btn-secondary {
+    background-color: var(--bg-surface-7);
+    border: 1px solid var(--border-faint);
+    color: var(--text-secondary);
+}
+
+.tour-btn-secondary:hover {
+    background-color: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+.tour-btn-primary {
+    background-color: var(--border-focus);
+    border: 1px solid var(--border-focus);
+    color: var(--text-black);
+}
+
+.tour-btn-primary:hover {
+    opacity: 0.9;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tour-spotlight-ring,
+    .tour-card {
+        transition: none;
+        animation: none;
+    }
+}
