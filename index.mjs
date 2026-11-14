@@ -2595,6 +2595,135 @@ async function moderateTextWithOpenAI(text) {
   return { blocked: false, flagged: false, provider: apiKey.startsWith("sk-") ? "openai" : "local-moderation" };
 }
 
+const KLIPY_API_KEY = (process.env.KLIPY_API_KEY || process.env.KLIPY_APP_KEY || "").trim();
+const KLIPY_CONTENT_FILTER = (process.env.KLIPY_CONTENT_FILTER || "high").trim();
+
+function isAllowedKlipyMediaUrl(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s || s.length > 1000) return false;
+  try {
+    const parsed = new URL(s);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === "klipy.com" || host.endsWith(".klipy.com");
+  } catch {
+    return false;
+  }
+}
+
+function pickKlipyVariantUrl(container) {
+  if (!container || typeof container !== "object") return null;
+  if (typeof container.webp?.url === "string" && isAllowedKlipyMediaUrl(container.webp.url)) {
+    return { url: container.webp.url, width: Number(container.webp.width) || 0, height: Number(container.webp.height) || 0 };
+  }
+  if (typeof container.gif?.url === "string" && isAllowedKlipyMediaUrl(container.gif.url)) {
+    return { url: container.gif.url, width: Number(container.gif.width) || 0, height: Number(container.gif.height) || 0 };
+  }
+  return null;
+}
+
+function normalizeKlipyItem(item) {
+  if (!item || typeof item !== "object") return null;
+  const f = item.file && typeof item.file === "object" ? item.file : null;
+  const legacyFiles = item.files && typeof item.files === "object" ? item.files : null;
+
+  const previewCandidate =
+    pickKlipyVariantUrl(f?.sm) ||
+    pickKlipyVariantUrl(f?.xs) ||
+    pickKlipyVariantUrl(f?.md) ||
+    pickKlipyVariantUrl(legacyFiles) ||
+    (isAllowedKlipyMediaUrl(item.url) ? { url: item.url, width: Number(item.file_meta?.width) || 0, height: Number(item.file_meta?.height) || 0 } : null);
+
+  const sendCandidate =
+    pickKlipyVariantUrl(f?.md) ||
+    pickKlipyVariantUrl(f?.sm) ||
+    pickKlipyVariantUrl(f?.hd) ||
+    pickKlipyVariantUrl(legacyFiles) ||
+    previewCandidate;
+
+  if (!previewCandidate || !sendCandidate) return null;
+
+  return {
+    id: String(item.id || item.slug || sendCandidate.url),
+    title: String(item.title || item.slug || "GIF").slice(0, 120),
+    previewUrl: previewCandidate.url,
+    url: sendCandidate.url,
+    width: sendCandidate.width || previewCandidate.width || 0,
+    height: sendCandidate.height || previewCandidate.height || 0,
+  };
+}
+
+app.get("/api/chat/gifs", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  if (!KLIPY_API_KEY) {
+    return res.json({
+      success: true,
+      configured: false,
+      items: [],
+      hasNext: false,
+    });
+  }
+
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const q = String(req.query?.q || "").trim().slice(0, 80);
+    const page = Math.max(1, Math.min(25, parseInt(String(req.query?.page || "1"), 10) || 1));
+    const perPage = Math.max(6, Math.min(24, parseInt(String(req.query?.perPage || "18"), 10) || 18));
+    const customerId = String(authUser?.username || req.query?.customerId || "operation_cookie")
+      .replace(/[^a-zA-Z0-9_-]/g, "")
+      .slice(0, 48) || "operation_cookie";
+
+    const endpoint = q ? "search" : "trending";
+    const params = new URLSearchParams({
+      page: String(page),
+      per_page: String(perPage),
+      customer_id: customerId,
+      content_filter: KLIPY_CONTENT_FILTER,
+    });
+    if (q) params.set("q", q);
+
+    const klipyUrl = `https://api.klipy.com/api/v1/${encodeURIComponent(KLIPY_API_KEY)}/gifs/${endpoint}?${params.toString()}`;
+    const apiRes = await fetch(klipyUrl, { headers: { Accept: "application/json" } });
+    const json = await apiRes.json().catch(() => null);
+
+    if (!apiRes.ok || !json) {
+      return res.status(502).json({
+        success: false,
+        configured: true,
+        items: [],
+        error: json?.message || `KLIPY API error (${apiRes.status})`,
+      });
+    }
+
+    const rawList = Array.isArray(json?.data?.data)
+      ? json.data.data
+      : Array.isArray(json?.data)
+        ? json.data
+        : [];
+    const items = rawList.map(normalizeKlipyItem).filter(Boolean);
+    const hasNext = Boolean(
+      json?.data?.has_next ??
+      (json?.data?.total && page * perPage < Number(json.data.total)) ??
+      items.length >= perPage
+    );
+
+    return res.json({
+      success: true,
+      configured: true,
+      items,
+      page,
+      hasNext,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      configured: true,
+      items: [],
+      error: err?.message || "Failed to load GIFs from KLIPY.",
+    });
+  }
+});
+
 app.post("/api/chat/moderate", async (req, res) => {
   try {
     const { text } = req.body || {};
@@ -2782,14 +2911,27 @@ app.post("/api/chat/send", async (req, res) => {
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
     const { message } = req.body || {};
-    if (!message || !message.text || !message.author || !message.channel) {
+    const cleanText = String(message?.text || "").trim().slice(0, 2000);
+    const rawGifUrl = typeof message?.gifUrl === "string" ? message.gifUrl.trim() : "";
+    const hasValidGif = Boolean(rawGifUrl && isAllowedKlipyMediaUrl(rawGifUrl));
+
+    if (rawGifUrl && !hasValidGif) {
+      return res.status(400).json({ success: false, error: "Only valid KLIPY HTTPS GIF URLs are allowed" });
+    }
+    if (!message || !message.author || !message.channel || (!cleanText && !hasValidGif)) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
     const sanitizedMsg = {
       ...message,
       author: authUser ? authUser.username : String(message.author).trim().slice(0, 40),
-      text: String(message.text).slice(0, 2000),
+      text: cleanText,
+      ...(hasValidGif
+        ? {
+            gifUrl: rawGifUrl,
+            gifTitle: typeof message?.gifTitle === "string" ? message.gifTitle.trim().slice(0, 120) : "GIF",
+          }
+        : {}),
       channel: String(message.channel).trim().slice(0, 120),
     };
 
@@ -2820,14 +2962,16 @@ app.post("/api/chat/send", async (req, res) => {
 
     touchKnownUser(sanitizedMsg.author);
 
-    const mod = await moderateTextWithOpenAI(sanitizedMsg.text);
-    if (mod.flagged) {
-      return res.status(400).json({
-        success: false,
-        flagged: true,
-        category: mod.category,
-        error: mod.reason || "Message blocked by moderation",
-      });
+    if (sanitizedMsg.text) {
+      const mod = await moderateTextWithOpenAI(sanitizedMsg.text);
+      if (mod.flagged) {
+        return res.status(400).json({
+          success: false,
+          flagged: true,
+          category: mod.category,
+          error: mod.reason || "Message blocked by moderation",
+        });
+      }
     }
 
     chatHistory.push(sanitizedMsg);

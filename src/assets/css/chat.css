@@ -823,6 +823,7 @@
   padding: 12px 18px 16px 18px;
   flex-shrink: 0;
   background-color: var(--bg-body);
+  position: relative;
 }
 
 .chat-input-pill {
@@ -1481,4 +1482,161 @@
   .chat-sidebar {
     width: 195px;
   }
+}
+
+/* Klipy GIF Picker & Chat GIFs */
+.chat-gif-toggle-btn {
+  background-color: var(--bg-surface-5);
+  border: 1px solid var(--bg-surface-10);
+  color: var(--color-sublabel);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.chat-gif-toggle-btn:hover,
+.chat-gif-toggle-btn.active {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border-color: var(--btn-primary-bg);
+}
+
+.chat-gif-picker {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 18px;
+  width: min(420px, calc(100% - 36px));
+  height: 360px;
+  background-color: var(--bg-surface-2);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 14px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 30;
+}
+
+.chat-gif-picker-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-3);
+}
+
+.chat-gif-picker-search {
+  flex: 1;
+  background-color: var(--input-bg);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+  font-family: inherit;
+}
+
+.chat-gif-picker-search:focus {
+  border-color: var(--border-focus);
+}
+
+.chat-gif-grid-wrap {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.chat-gif-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.chat-gif-item {
+  border: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-4);
+  border-radius: 8px;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.chat-gif-item:hover {
+  transform: scale(1.02);
+  border-color: var(--border-focus);
+}
+
+.chat-gif-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.chat-gif-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  padding: 16px;
+  font-size: 12px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}
+
+.chat-gif-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-top: 1px solid var(--bg-surface-10);
+  font-size: 10.5px;
+  color: var(--color-sublabel);
+  background-color: var(--bg-surface-3);
+  text-transform: lowercase;
+}
+
+.chat-gif-more-btn {
+  background-color: var(--bg-surface-5);
+  border: 1px solid var(--bg-surface-10);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  cursor: pointer;
+  text-transform: lowercase;
+}
+
+.chat-gif-more-btn:hover {
+  background-color: var(--bg-surface-active);
+}
+
+.chat-entry-gif-wrap {
+  margin-top: 6px;
+}
+
+.chat-entry-gif {
+  display: block;
+  max-width: 260px;
+  max-height: 210px;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-3);
 }

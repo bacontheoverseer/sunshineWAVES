@@ -8,9 +8,32 @@ interface ChatMessage {
   author: string;
   avatarColor: string;
   text: string;
+  gifUrl?: string;
+  gifTitle?: string;
   timestamp: string;
   channel: string;
   recipient?: string | null;
+}
+
+interface KlipyGifItem {
+  id: string;
+  title: string;
+  previewUrl: string;
+  url: string;
+  width: number;
+  height: number;
+}
+
+function isAllowedKlipyUrl(rawUrl?: string): boolean {
+  if (!rawUrl || typeof rawUrl !== "string") return false;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:") return false;
+    const h = parsed.hostname.toLowerCase();
+    return h === "klipy.com" || h.endsWith(".klipy.com");
+  } catch {
+    return false;
+  }
 }
 
 interface OnlineUser {
@@ -230,6 +253,16 @@ export default function ChatModal() {
   const [activeChannel, setActiveChannel] = useState("general");
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [showGifPicker, setShowGifPicker] = useState(false);
+  const [gifSearch, setGifSearch] = useState("");
+  const [gifItems, setGifItems] = useState<KlipyGifItem[]>([]);
+  const [gifLoading, setGifLoading] = useState(false);
+  const [gifConfigured, setGifConfigured] = useState(true);
+  const [gifError, setGifError] = useState("");
+  const [gifPage, setGifPage] = useState(1);
+  const [gifHasNext, setGifHasNext] = useState(false);
+  const gifPickerRef = useRef<HTMLDivElement>(null);
+  const gifAbortRef = useRef<AbortController | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -585,7 +618,8 @@ export default function ChatModal() {
             (isDm || isMention) &&
             (!isOpenRef.current || activeChannelRef.current !== incoming.channel)
           ) {
-            notifyDmOrMentionToast(incoming.author, incoming.text, isDm, () => {
+            const toastPreview = incoming.text.trim() || (incoming.gifUrl ? "[gif]" : "");
+            notifyDmOrMentionToast(incoming.author, toastPreview, isDm, () => {
               setActiveChannel(incoming.channel);
               setIsOpen(true);
               setUnreadCounts((prev) => ({ ...prev, [incoming.channel]: 0 }));
@@ -1203,7 +1237,9 @@ export default function ChatModal() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isOpen) {
-        if (viewingProfileUsername) {
+        if (showGifPicker) {
+          setShowGifPicker(false);
+        } else if (viewingProfileUsername) {
           setViewingProfileUsername(null);
         } else {
           setIsOpen(false);
@@ -1233,7 +1269,83 @@ export default function ChatModal() {
       window.removeEventListener("keydown", handleKeyDown);
       broadcastRef.current?.close();
     };
-  }, [isOpen, viewingProfileUsername, ingestIncomingMessage, handleVoiceEvent]);
+  }, [isOpen, showGifPicker, viewingProfileUsername, ingestIncomingMessage, handleVoiceEvent]);
+
+  const fetchKlipyGifs = useCallback(
+    async (query: string, pageNum: number, append: boolean) => {
+      if (gifAbortRef.current) gifAbortRef.current.abort();
+      const ctrl = new AbortController();
+      gifAbortRef.current = ctrl;
+
+      setGifLoading(true);
+      setGifError("");
+      try {
+        const params = new URLSearchParams({
+          page: String(pageNum),
+          perPage: "18",
+          customerId: getClientId(),
+        });
+        if (query.trim()) params.set("q", query.trim());
+
+        const res = await fetch(`/api/chat/gifs?${params.toString()}`, {
+          cache: "no-store",
+          signal: ctrl.signal,
+        });
+        const data = await res.json().catch(() => null);
+        if (ctrl.signal.aborted) return;
+
+        if (!data || data.configured === false) {
+          setGifConfigured(false);
+          setGifItems([]);
+          setGifHasNext(false);
+          return;
+        }
+
+        setGifConfigured(true);
+        if (!res.ok || !data.success) {
+          setGifError(data?.error || "failed to load gifs from klipy");
+          return;
+        }
+
+        const nextItems = Array.isArray(data.items) ? data.items : [];
+        setGifItems((prev) => (append ? [...prev, ...nextItems] : nextItems));
+        setGifPage(pageNum);
+        setGifHasNext(Boolean(data.hasNext));
+      } catch (err: any) {
+        if (err?.name !== "AbortError") {
+          setGifError("could not load gifs right now");
+        }
+      } finally {
+        if (gifAbortRef.current === ctrl) {
+          setGifLoading(false);
+        }
+      }
+    },
+    []
+  );
+
+  // Lazy-load Klipy GIFs when picker opens or search changes
+  useEffect(() => {
+    if (!isOpen || !showGifPicker) return;
+    const timer = window.setTimeout(() => {
+      void fetchKlipyGifs(gifSearch, 1, false);
+    }, gifSearch ? 280 : 0);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, showGifPicker, gifSearch, fetchKlipyGifs]);
+
+  // Close GIF picker when clicking outside
+  useEffect(() => {
+    if (!showGifPicker) return;
+    const onDocClick = (e: MouseEvent) => {
+      const target = e.target as Element | null;
+      if (!target) return;
+      if (gifPickerRef.current?.contains(target)) return;
+      if (target.closest(".chat-gif-toggle-btn")) return;
+      setShowGifPicker(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [showGifPicker]);
 
   // Scroll to bottom when messages change or channel changes
   useEffect(() => {
@@ -1247,11 +1359,14 @@ export default function ChatModal() {
     }
   }, [messages, isOpen, activeChannel]);
 
-  const handleSendMessage = async (e?: Event) => {
-    if (e) e.preventDefault();
+  const sendChatMessage = async (
+    rawText: string,
+    gif?: { url: string; title?: string }
+  ) => {
     if (!cloudUser || isSending) return;
-    const text = inputText.trim();
-    if (!text) return;
+    const text = rawText.trim();
+    const validGif = gif && isAllowedKlipyUrl(gif.url) ? gif : undefined;
+    if (!text && !validGif) return;
 
     // Prevent sending DM to a user you have blocked or who does not exist in CloudSync
     if (activeChannel.startsWith("dm:")) {
@@ -1272,11 +1387,13 @@ export default function ChatModal() {
 
     setIsSending(true);
     try {
-      const modResult = await moderateChatMessage(text);
-      if (modResult.blocked) {
-        notifyToast(modResult.reason || "message blocked by openai moderation", "error");
-        setIsSending(false);
-        return;
+      if (text) {
+        const modResult = await moderateChatMessage(text);
+        if (modResult.blocked) {
+          notifyToast(modResult.reason || "message blocked by openai moderation", "error");
+          setIsSending(false);
+          return;
+        }
       }
 
       const recipient = activeChannel.startsWith("dm:")
@@ -1288,13 +1405,17 @@ export default function ChatModal() {
         author: cloudUser,
         avatarColor: stringToColor(cloudUser),
         text,
+        ...(validGif
+          ? { gifUrl: validGif.url, gifTitle: validGif.title || "GIF" }
+          : {}),
         timestamp: formatClockTime(new Date()),
         channel: activeChannel,
         recipient,
       };
 
       ingestIncomingMessage(newMsg);
-      setInputText("");
+      if (text) setInputText("");
+      if (validGif) setShowGifPicker(false);
 
       try {
         broadcastRef.current?.postMessage({ type: "NEW_MESSAGE", message: newMsg });
@@ -1325,6 +1446,15 @@ export default function ChatModal() {
     } finally {
       setIsSending(false);
     }
+  };
+
+  const handleSendMessage = async (e?: Event) => {
+    if (e) e.preventDefault();
+    await sendChatMessage(inputText);
+  };
+
+  const handleSendGif = async (gif: KlipyGifItem) => {
+    await sendChatMessage("", { url: gif.url, title: gif.title });
   };
 
   const handleOpenCloudSyncModal = () => {
@@ -2165,7 +2295,20 @@ export default function ChatModal() {
                         </span>
                         <span class="chat-entry-time">{msg.timestamp}</span>
                       </div>
-                      <div class="chat-entry-text">{renderFormattedText(msg.text)}</div>
+                      {msg.text && (
+                        <div class="chat-entry-text">{renderFormattedText(msg.text)}</div>
+                      )}
+                      {isAllowedKlipyUrl(msg.gifUrl) && (
+                        <div class="chat-entry-gif-wrap">
+                          <img
+                            class="chat-entry-gif"
+                            src={msg.gifUrl}
+                            alt={msg.gifTitle || "GIF"}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        </div>
+                      )}
                     </div>
 
                     {/* Hover actions on each message */}
@@ -2265,6 +2408,14 @@ export default function ChatModal() {
                   maxLength={500}
                 />
                 <button
+                  type="button"
+                  class={`chat-gif-toggle-btn${showGifPicker ? " active" : ""}`}
+                  title="Send a GIF via KLIPY"
+                  onClick={() => setShowGifPicker((v) => !v)}
+                >
+                  GIF
+                </button>
+                <button
                   type="submit"
                   class="chat-submit-btn"
                   disabled={!inputText.trim() || isSending}
@@ -2273,6 +2424,89 @@ export default function ChatModal() {
                   <i class="fa-solid fa-paper-plane"></i>
                 </button>
               </form>
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showGifPicker && (
+              <div class="chat-gif-picker" ref={gifPickerRef}>
+                <div class="chat-gif-picker-header">
+                  <input
+                    type="text"
+                    class="chat-gif-picker-search"
+                    placeholder="search klipy gifs..."
+                    value={gifSearch}
+                    autoFocus
+                    onInput={(e) =>
+                      setGifSearch((e.target as HTMLInputElement).value)
+                    }
+                  />
+                  <button
+                    type="button"
+                    class="chat-gif-more-btn"
+                    onClick={() => setShowGifPicker(false)}
+                    title="Close GIF picker"
+                  >
+                    <i class="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+
+                <div class="chat-gif-grid-wrap">
+                  {!gifConfigured ? (
+                    <div class="chat-gif-empty">
+                      <i class="fa-solid fa-film" style={{ fontSize: "20px" }}></i>
+                      <span>
+                        klipy gifs not configured yet — set KLIPY_API_KEY on the server.
+                      </span>
+                    </div>
+                  ) : gifLoading && gifItems.length === 0 ? (
+                    <div class="chat-gif-empty">
+                      <i class="fa-solid fa-spinner fa-spin" style={{ fontSize: "18px" }}></i>
+                      <span>loading gifs...</span>
+                    </div>
+                  ) : gifError && gifItems.length === 0 ? (
+                    <div class="chat-gif-empty">
+                      <span>{gifError}</span>
+                    </div>
+                  ) : gifItems.length === 0 ? (
+                    <div class="chat-gif-empty">
+                      <span>no matching gifs found</span>
+                    </div>
+                  ) : (
+                    <div class="chat-gif-grid">
+                      {gifItems.map((gif) => (
+                        <button
+                          key={gif.id}
+                          type="button"
+                          class="chat-gif-item"
+                          title={gif.title}
+                          disabled={isSending}
+                          onClick={() => void handleSendGif(gif)}
+                        >
+                          <img
+                            src={gif.previewUrl}
+                            alt={gif.title}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div class="chat-gif-footer">
+                  <span>powered by klipy</span>
+                  {gifConfigured && gifHasNext && (
+                    <button
+                      type="button"
+                      class="chat-gif-more-btn"
+                      disabled={gifLoading}
+                      onClick={() => void fetchKlipyGifs(gifSearch, gifPage + 1, true)}
+                    >
+                      {gifLoading ? "loading..." : "load more"}
+                    </button>
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </div>
