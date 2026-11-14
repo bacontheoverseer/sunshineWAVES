@@ -661,6 +661,33 @@ app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
   res.json({ success: true, count, target, action });
 });
 
+app.get("/api/live/audio-proxy", async (req, res) => {
+  try {
+    const rawUrl = (req.query.url || "").toString().trim();
+    if (!rawUrl || (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://"))) {
+      return res.status(400).send("Invalid audio url");
+    }
+    const upstream = await fetch(rawUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        Accept: "audio/*,*/*;q=0.9",
+      },
+    });
+    if (!upstream.ok) {
+      return res.status(upstream.status).send("Upstream audio failed");
+    }
+    const contentType = upstream.headers.get("content-type") || "audio/mpeg";
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(buf);
+  } catch (err) {
+    res.status(500).send("Audio proxy error");
+  }
+});
+
 app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
   try {
     const { name, filename, data } = req.body || {};
@@ -668,21 +695,21 @@ app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
       return res.status(400).json({ success: false, error: "Missing sound file data" });
     }
 
-    const soundDir = path.join(publicPath, "custom-sounds");
+    const soundDir = path.join(publicPath, "assets", "sounds");
     if (!fs.existsSync(soundDir)) {
       fs.mkdirSync(soundDir, { recursive: true });
     }
 
     const ext = path.extname(filename).toLowerCase() || ".mp3";
     const baseClean = path.basename(filename, ext).replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 32);
-    const safeFilename = `${Date.now()}_${baseClean}${ext}`;
+    const safeFilename = `upload_${Date.now()}_${baseClean}${ext}`;
     const targetPath = path.join(soundDir, safeFilename);
 
     const cleanBase64 = data.replace(/^data:[^;]+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
     fs.writeFileSync(targetPath, buffer);
 
-    const soundUrl = `/custom-sounds/${safeFilename}`;
+    const soundUrl = `/assets/sounds/${safeFilename}`;
     res.json({
       success: true,
       url: soundUrl,
@@ -724,7 +751,8 @@ app.get("/api/admin/myinstants-search", verifyAdmin, async (req, res) => {
       const fullUrl = soundPath.startsWith("http") ? soundPath : `https://www.myinstants.com${soundPath}`;
       results.push({
         name: soundName,
-        url: fullUrl,
+        url: `/api/live/audio-proxy?url=${encodeURIComponent(fullUrl)}`,
+        rawUrl: fullUrl,
         source: "myinstants",
       });
     }
@@ -743,25 +771,36 @@ app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing url" });
     }
 
-    if (/\.(mp3|wav|ogg|m4a)(\?.*)?$/i.test(rawUrl)) {
-      return res.json({ success: true, url: rawUrl });
-    }
+    let resolvedMp3 = rawUrl;
 
-    if (rawUrl.includes("myinstants.com/")) {
+    if (rawUrl.includes("myinstants.com/") && !rawUrl.endsWith(".mp3")) {
       const pageRes = await fetch(rawUrl, {
         headers: { "User-Agent": "Mozilla/5.0" },
       });
       const html = await pageRes.text();
       const match = html.match(/onclick="play\('(\/media\/sounds\/[^']+)'/);
       if (match) {
-        return res.json({
-          success: true,
-          url: `https://www.myinstants.com${match[1]}`,
-        });
+        resolvedMp3 = `https://www.myinstants.com${match[1]}`;
       }
     }
 
-    res.json({ success: true, url: rawUrl });
+    // Download and cache into /assets/sounds/ so it works 100% same-origin
+    try {
+      const soundDir = path.join(publicPath, "assets", "sounds");
+      if (!fs.existsSync(soundDir)) fs.mkdirSync(soundDir, { recursive: true });
+      const audioRes = await fetch(resolvedMp3, { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (audioRes.ok) {
+        const buf = Buffer.from(await audioRes.arrayBuffer());
+        const safeFilename = `cached_${Date.now()}.mp3`;
+        fs.writeFileSync(path.join(soundDir, safeFilename), buf);
+        return res.json({ success: true, url: `/assets/sounds/${safeFilename}` });
+      }
+    } catch {}
+
+    const proxied = resolvedMp3.startsWith("http")
+      ? `/api/live/audio-proxy?url=${encodeURIComponent(resolvedMp3)}`
+      : resolvedMp3;
+    res.json({ success: true, url: proxied });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

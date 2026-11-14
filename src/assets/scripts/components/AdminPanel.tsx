@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
-import { playAudioUrl, clearChaosEffects } from "../core/liveClient";
+import { playAudioUrl, clearChaosEffects, normalizeSoundUrl } from "../core/liveClient";
 
 interface ClientRecord {
   id: string;
@@ -16,53 +16,59 @@ export interface SoundItem {
   name: string;
   url: string;
   source: "preset" | "myinstants" | "upload" | "custom";
-  icon?: string;
 }
 
 const DEFAULT_PRESET_SOUNDS: SoundItem[] = [
-  { id: "vine-boom", name: "Vine Boom", url: "https://www.myinstants.com/media/sounds/vine-boom.mp3", source: "preset", icon: "💥" },
-  { id: "bruh", name: "Bruh Sound", url: "https://www.myinstants.com/media/sounds/movie_1.mp3", source: "preset", icon: "🗿" },
-  { id: "metal-pipe", name: "Metal Pipe Drop", url: "https://www.myinstants.com/media/sounds/metal-pipe-falling-sound-effect.mp3", source: "preset", icon: "🔩" },
-  { id: "discord-ping", name: "Discord Notification", url: "https://www.myinstants.com/media/sounds/discord-notification.mp3", source: "preset", icon: "🔔" },
-  { id: "reverb-fart", name: "Reverb Fart", url: "https://www.myinstants.com/media/sounds/fart-with-reverb.mp3", source: "preset", icon: "💨" },
-  { id: "taco-bell", name: "Taco Bell Bong", url: "https://www.myinstants.com/media/sounds/taco-bell-bong-sfx.mp3", source: "preset", icon: "🔔" },
-  { id: "fbi-open-up", name: "FBI Open Up", url: "https://www.myinstants.com/media/sounds/fbi-open-up_mI4PDIx.mp3", source: "preset", icon: "🚨" },
-  { id: "airhorn", name: "MLG Airhorn", url: "https://www.myinstants.com/media/sounds/mlg-airhorn.mp3", source: "preset", icon: "📢" },
-  { id: "emotional-damage", name: "Emotional Damage", url: "https://www.myinstants.com/media/sounds/emotional-damage-meme.mp3", source: "preset", icon: "💔" },
-  { id: "xp-error", name: "Windows XP Error", url: "https://www.myinstants.com/media/sounds/windows-xp-error.mp3", source: "preset", icon: "❌" },
-  { id: "roblox-oof", name: "Roblox Death (Oof)", url: "https://www.myinstants.com/media/sounds/roblox-death-sound_1.mp3", source: "preset", icon: "💀" },
-  { id: "sad-violin", name: "Sad Violin", url: "https://www.myinstants.com/media/sounds/sad-violin.mp3", source: "preset", icon: "🎻" },
-  { id: "what-da-dog", name: "What Da Dog Doin", url: "https://www.myinstants.com/media/sounds/what-da-dog-doin.mp3", source: "preset", icon: "🐶" },
-  { id: "run-meme", name: "Run Meme Song", url: "https://www.myinstants.com/media/sounds/run-vine-sound-effect.mp3", source: "preset", icon: "🏃" },
-  { id: "door-knock", name: "Realistic Door Knock", url: "https://www.myinstants.com/media/sounds/knocking-on-door_1.mp3", source: "preset", icon: "🚪" },
-  { id: "rickroll", name: "Rickroll Never Gonna", url: "https://www.myinstants.com/media/sounds/rick-roll.mp3", source: "preset", icon: "🕺" },
-  { id: "screamer", name: "Loud Screamer", url: "https://www.myinstants.com/media/sounds/screamer-sound.mp3", source: "preset", icon: "😱" },
-  { id: "snore-mimimi", name: "Cartoon Snore (Mimimi)", url: "https://www.myinstants.com/media/sounds/snore-mimimi.mp3", source: "preset", icon: "😴" },
+  { id: "vine-boom", name: "vine boom", url: "/assets/sounds/vine-boom.mp3", source: "preset" },
+  { id: "bruh", name: "bruh", url: "/assets/sounds/bruh.mp3", source: "preset" },
+  { id: "metal-pipe", name: "metal pipe", url: "/assets/sounds/metal-pipe.mp3", source: "preset" },
+  { id: "discord-ping", name: "discord ping", url: "/assets/sounds/discord-ping.mp3", source: "preset" },
+  { id: "reverb-fart", name: "reverb fart", url: "/assets/sounds/reverb-fart.mp3", source: "preset" },
+  { id: "taco-bell", name: "taco bell bong", url: "/assets/sounds/taco-bell.mp3", source: "preset" },
+  { id: "fbi-open-up", name: "fbi open up", url: "/assets/sounds/fbi-open-up.mp3", source: "preset" },
+  { id: "airhorn", name: "mlg airhorn", url: "/assets/sounds/airhorn.mp3", source: "preset" },
+  { id: "emotional-damage", name: "emotional damage", url: "/assets/sounds/emotional-damage.mp3", source: "preset" },
+  { id: "xp-error", name: "windows xp error", url: "/assets/sounds/xp-error.mp3", source: "preset" },
+  { id: "roblox-oof", name: "roblox oof", url: "/assets/sounds/roblox-oof.mp3", source: "preset" },
+  { id: "sad-violin", name: "sad violin", url: "/assets/sounds/sad-violin.mp3", source: "preset" },
+  { id: "what-da-dog", name: "what da dog doin", url: "/assets/sounds/what-da-dog.mp3", source: "preset" },
+  { id: "run-meme", name: "run meme", url: "/assets/sounds/run-meme.mp3", source: "preset" },
+  { id: "door-knock", name: "3d door knock", url: "/assets/sounds/door-knock.mp3", source: "preset" },
+  { id: "rickroll", name: "rickroll", url: "/assets/sounds/rickroll.mp3", source: "preset" },
+  { id: "screamer", name: "loud screamer", url: "/assets/sounds/screamer.mp3", source: "preset" },
+  { id: "snore-mimimi", name: "snore mimimi", url: "/assets/sounds/snore-mimimi.mp3", source: "preset" },
 ];
 
 const PRANK_LIST = [
-  { id: "earthquake", icon: "🌋", title: "Earthquake Shake", desc: "Violently shakes their entire screen for 5 seconds" },
-  { id: "screen-flip", icon: "🔄", title: "180° Screen Flip", desc: "Turns their entire browser viewport upside down" },
-  { id: "eyelash", icon: "🪶", title: "Monitor Eyelash", desc: "Spawns a hyper-realistic curved hair on their screen" },
-  { id: "dead-pixel", icon: "🔴", title: "Dead Pixel Dot", desc: "Injects a bright red hot pixel in the center of their display" },
-  { id: "fake-battery", icon: "🪫", title: "Low Battery Alert", desc: "Windows 11 notification card: 'Battery critically low (3%)'" },
-  { id: "admin-monitor", icon: "👁️", title: "Admin Monitor Banner", desc: "Top red banner warning their session is being recorded" },
-  { id: "panic-doc", icon: "📄", title: "Google Doc Disguise", desc: "Instant full-screen AP History research essay disguise" },
-  { id: "ghost-cursor", icon: "👻", title: "Ghost Cursor", desc: "Animated Windows mouse pointer drifting erratically" },
-  { id: "flash-title", icon: "🚨", title: "Flashing Tab Title", desc: "Cycles tab title with '⚠️ VIOLATION DETECTED'" },
-  { id: "invert-colors", icon: "🌓", title: "Invert Colors", desc: "High-contrast inverted color scheme" },
-  { id: "matrix-rain", icon: "💻", title: "Matrix Code Rain", desc: "Falling green digital matrix code characters" },
-  { id: "blur", icon: "🌫️", title: "Drunk Blur", desc: "Applies a heavy gaussian blur over the entire website" },
+  { id: "earthquake", icon: "fa-house-crack", title: "earthquake", desc: "violently shakes the viewport for 5 seconds." },
+  { id: "screen-flip", icon: "fa-rotate", title: "180° screen flip", desc: "turns the browser viewport upside down." },
+  { id: "eyelash", icon: "fa-feather", title: "monitor eyelash", desc: "places a realistic curved hair on their screen." },
+  { id: "dead-pixel", icon: "fa-circle-dot", title: "dead pixel", desc: "places a bright red hot pixel on their display." },
+  { id: "fake-battery", icon: "fa-battery-empty", title: "low battery alert", desc: "shows a critical 3% low battery warning." },
+  { id: "admin-monitor", icon: "fa-eye", title: "admin monitor banner", desc: "displays a live session recording banner." },
+  { id: "panic-doc", icon: "fa-file-lines", title: "google doc disguise", desc: "covers the screen with a fake history essay." },
+  { id: "ghost-cursor", icon: "fa-arrow-pointer", title: "ghost cursor", desc: "spawns an erratic possessed mouse pointer." },
+  { id: "flash-title", icon: "fa-bell", title: "flashing tab title", desc: "flashes warning alerts in the browser tab." },
+  { id: "invert-colors", icon: "fa-circle-half-stroke", title: "invert colors", desc: "inverts all colors across the page." },
+  { id: "matrix-rain", icon: "fa-terminal", title: "matrix rain", desc: "overlays falling green digital code rain." },
+  { id: "blur", icon: "fa-droplet", title: "screen blur", desc: "applies a heavy blur filter to the page." },
 ];
 
 const TTS_PRESETS = [
-  "Attention: Administrator bacon has assumed remote control of your screen.",
-  "I see you playing games during class. Tab closing in 5 seconds.",
-  "Sunshine Security Protocol Activated. Please look behind you.",
-  "Warning: Inappropriate homework evasion detected.",
-  "Your microphone is currently broadcasting to the main hall.",
-  "Bro, stop clicking so fast.",
+  "attention: administrator has assumed remote control.",
+  "i see you playing games during class.",
+  "security protocol activated. please look behind you.",
+  "warning: homework evasion detected.",
+  "your microphone is currently broadcasting.",
+  "bro, stop clicking so fast.",
 ];
+
+function toast(type: "success" | "error", msg: string) {
+  const w = window as unknown as { showToast?: (t: string, m: string) => void };
+  if (typeof w.showToast === "function") {
+    w.showToast(type, msg);
+  }
+}
 
 export default function AdminPanel() {
   const [isOpen, setIsOpen] = useState(false);
@@ -73,38 +79,44 @@ export default function AdminPanel() {
   const [authError, setAuthError] = useState("");
   const [activeTab, setActiveTab] = useState<"soundboard" | "tts" | "pranks" | "users">("soundboard");
   const [target, setTarget] = useState<string>("all");
+  const [targetDropdownOpen, setTargetDropdownOpen] = useState(false);
   const [clients, setClients] = useState<ClientRecord[]>([]);
-  const [feedback, setFeedback] = useState<string | null>(null);
 
-  // Soundboard State
+  // Soundboard State (v3 uses local /assets/sounds/*.mp3 paths)
   const [sounds, setSounds] = useState<SoundItem[]>(() => {
     try {
-      const stored = localStorage.getItem("cookie_admin_soundboard_v2");
+      const stored = localStorage.getItem("cookie_admin_soundboard_v3");
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((s: SoundItem) => ({
+            ...s,
+            url: normalizeSoundUrl(s.url),
+          }));
+        }
       }
     } catch {}
     return DEFAULT_PRESET_SOUNDS;
   });
 
   const [soundFilter, setSoundFilter] = useState("");
-  const [isAddDrawerOpen, setIsAddDrawerOpen] = useState(false);
-  const [addDrawerTab, setAddDrawerTab] = useState<"myinstants" | "upload" | "url">("myinstants");
+  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [addMode, setAddMode] = useState<"myinstants" | "upload" | "url">("myinstants");
   const [sfxVolume, setSfxVolume] = useState(1.0);
 
-  // Add Drawer - MyInstants Search
-  const [myinstantsQuery, setMyinstantsQuery] = useState("");
-  const [myinstantsLoading, setMyinstantsLoading] = useState(false);
-  const [myinstantsResults, setMyinstantsResults] = useState<{ name: string; url: string }[]>([]);
+  // MyInstants Search State
+  const [miQuery, setMiQuery] = useState("");
+  const [miLoading, setMiLoading] = useState(false);
+  const [miResults, setMiResults] = useState<{ name: string; url: string; rawUrl?: string }[]>([]);
+  const [miCustomName, setMiCustomName] = useState("");
 
-  // Add Drawer - Upload Form
+  // Upload MP3 State
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Add Drawer - Paste URL Form
+  // Custom URL State
   const [customUrl, setCustomUrl] = useState("");
   const [customUrlName, setCustomUrlName] = useState("");
   const [resolvingUrl, setResolvingUrl] = useState(false);
@@ -114,14 +126,12 @@ export default function AdminPanel() {
   const [ttsPitch, setTtsPitch] = useState(1.0);
   const [ttsRate, setTtsRate] = useState(1.0);
 
-  // Save sounds to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem("cookie_admin_soundboard_v2", JSON.stringify(sounds));
+      localStorage.setItem("cookie_admin_soundboard_v3", JSON.stringify(sounds));
     } catch {}
   }, [sounds]);
 
-  // Check saved session key on mount
   useEffect(() => {
     const savedKey = sessionStorage.getItem("sunshine_admin_key");
     if (savedKey) {
@@ -130,18 +140,17 @@ export default function AdminPanel() {
     }
   }, []);
 
-  // Keyboard shortcut listener: Ctrl+Shift+Alt+A or custom event or 5 clicks on logo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.shiftKey && e.altKey && (e.key === "A" || e.key === "a")) {
         e.preventDefault();
         setIsOpen((prev) => !prev);
+      } else if (e.key === "Escape" && isOpen) {
+        setIsOpen(false);
       }
     };
 
-    const handleCustomOpen = () => {
-      setIsOpen(true);
-    };
+    const handleCustomOpen = () => setIsOpen(true);
 
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("open-admin-panel", handleCustomOpen);
@@ -171,9 +180,8 @@ export default function AdminPanel() {
       window.removeEventListener("open-admin-panel", handleCustomOpen);
       document.removeEventListener("click", handleLogoClick);
     };
-  }, []);
+  }, [isOpen]);
 
-  // Fetch online clients
   const fetchClients = useCallback(async () => {
     if (!adminKey) return;
     try {
@@ -192,7 +200,6 @@ export default function AdminPanel() {
     } catch {}
   }, [adminKey]);
 
-  // Poll clients while open
   useEffect(() => {
     if (isOpen && isAuthenticated) {
       void fetchClients();
@@ -203,13 +210,12 @@ export default function AdminPanel() {
     }
   }, [isOpen, isAuthenticated, fetchClients]);
 
-  // Handle Admin Login
   const handleLogin = async (e: Event) => {
     e.preventDefault();
     setAuthError("");
     const key = keyInput.trim();
     if (!key) {
-      setAuthError("Enter the master key");
+      setAuthError("enter your secret key");
       return;
     }
 
@@ -226,15 +232,15 @@ export default function AdminPanel() {
         setAdminUsername(data.username || "bacon");
         setIsAuthenticated(true);
         setKeyInput("");
+        toast("success", "admin unlocked");
       } else {
-        setAuthError(data.error || "Access Denied: Invalid Key");
+        setAuthError(data.error?.toLowerCase() || "invalid secret key");
       }
     } catch {
-      setAuthError("Failed to reach server");
+      setAuthError("failed to reach server");
     }
   };
 
-  // Dispatches actions to clients
   const triggerRemote = async (action: string, data: Record<string, unknown>) => {
     if (!adminKey) return;
     try {
@@ -248,15 +254,12 @@ export default function AdminPanel() {
       });
       const resData = await res.json();
       if (resData.success) {
-        setFeedback(`⚡ Dispatched to ${resData.count} client(s)`);
-        window.setTimeout(() => setFeedback(null), 3000);
+        toast("success", `sent ${action} to ${resData.count} user(s)`);
       } else {
-        setFeedback(`❌ Error: ${resData.error || "Failed"}`);
-        window.setTimeout(() => setFeedback(null), 3000);
+        toast("error", resData.error || "failed to trigger");
       }
     } catch {
-      setFeedback("❌ Network request failed");
-      window.setTimeout(() => setFeedback(null), 3000);
+      toast("error", "network error");
     }
   };
 
@@ -265,7 +268,6 @@ export default function AdminPanel() {
     await triggerRemote("clear", {});
   };
 
-  // Soundboard Actions
   const handlePlayLocal = (sound: SoundItem) => {
     playAudioUrl(sound.url, sfxVolume);
   };
@@ -276,67 +278,121 @@ export default function AdminPanel() {
 
   const handleDeleteSound = (id: string) => {
     setSounds((prev) => prev.filter((s) => s.id !== id));
+    toast("success", "sound removed");
   };
 
-  // Search MyInstants
+  const handleResetPresets = () => {
+    setSounds(DEFAULT_PRESET_SOUNDS);
+    toast("success", "default sounds restored");
+  };
+
+  // Search MyInstants (with automatic client-side CORS fallback if dev server wasn't restarted)
   const handleSearchMyinstants = async (e?: Event) => {
     if (e) e.preventDefault();
-    const query = myinstantsQuery.trim();
+    const query = miQuery.trim();
     if (!query || !adminKey) return;
-    setMyinstantsLoading(true);
+    setMiLoading(true);
     try {
       const res = await fetch(`/api/admin/myinstants-search?query=${encodeURIComponent(query)}`, {
         headers: { "x-admin-key": adminKey },
       });
-      const data = await res.json();
-      if (data.results) {
-        setMyinstantsResults(data.results);
+      const ct = res.headers.get("content-type") || "";
+      if (res.ok && ct.includes("application/json")) {
+        const data = await res.json();
+        if (data.results) {
+          setMiResults(data.results);
+          setMiLoading(false);
+          return;
+        }
+      }
+
+      // Fallback to allorigins if backend route isn't loaded yet
+      const targetUrl = `https://www.myinstants.com/en/search/?name=${encodeURIComponent(query)}`;
+      const fallbackRes = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
+      if (fallbackRes.ok) {
+        const json = await fallbackRes.json();
+        const html = (json.contents || "") as string;
+        const regex = /<button class="small-button" onclick="play\('([^']+)'[^>]*title="Play ([^"]+) sound"/g;
+        const parsed: { name: string; url: string; rawUrl: string }[] = [];
+        let match;
+        while ((match = regex.exec(html)) !== null && parsed.length < 30) {
+          const soundPath = match[1];
+          const soundName = match[2].trim();
+          const fullUrl = soundPath.startsWith("http") ? soundPath : `https://www.myinstants.com${soundPath}`;
+          parsed.push({
+            name: soundName,
+            url: fullUrl,
+            rawUrl: fullUrl,
+          });
+        }
+        setMiResults(parsed);
+      } else {
+        toast("error", "failed to search myinstants");
       }
     } catch {
-      setFeedback("❌ Failed to query MyInstants");
-      window.setTimeout(() => setFeedback(null), 3000);
+      toast("error", "failed to search myinstants");
     } finally {
-      setMyinstantsLoading(false);
+      setMiLoading(false);
     }
   };
 
-  // Add Sound from MyInstants Search Result
-  const handleAddFromMyinstants = (item: { name: string; url: string }) => {
-    const customTitle = prompt("Enter custom name for this sound:", item.name) || item.name;
+  const handleAddFromMyinstants = async (item: { name: string; url: string; rawUrl?: string }) => {
+    const customTitle = (miCustomName.trim() || item.name).toLowerCase();
+    let finalUrl = item.url;
+
+    // Cache locally via resolve-sound if available
+    if (item.rawUrl) {
+      try {
+        const res = await fetch("/api/admin/resolve-sound", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-admin-key": adminKey,
+          },
+          body: JSON.stringify({ url: item.rawUrl }),
+        });
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("application/json")) {
+          const data = await res.json();
+          if (data.url) finalUrl = data.url;
+        }
+      } catch {}
+    }
+
     const newSound: SoundItem = {
       id: "mi_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6),
-      name: customTitle.trim(),
-      url: item.url,
+      name: customTitle,
+      url: finalUrl,
       source: "myinstants",
-      icon: "🎵",
     };
     setSounds((prev) => [newSound, ...prev]);
-    setFeedback(`✅ Added "${newSound.name}" to Soundboard!`);
-    window.setTimeout(() => setFeedback(null), 3000);
+    setMiCustomName("");
+    toast("success", `added "${newSound.name}"`);
   };
 
-  // Handle File Upload (MP3, WAV, etc.)
   const handleFileChange = (e: Event) => {
     const input = e.target as HTMLInputElement;
     if (input.files && input.files[0]) {
       const file = input.files[0];
       setUploadFile(file);
-      const cleanName = file.name.replace(/\.[^/.]+$/, "").replace(/[_-]/g, " ");
+      const cleanName = file.name.replace(/\.[^/.]+$/, "").replace(/[_-]/g, " ").toLowerCase();
       if (!uploadName) {
         setUploadName(cleanName);
       }
     }
   };
 
-  const handleUploadSubmit = async (e: Event) => {
+  const handleUploadSubmit = (e: Event) => {
     e.preventDefault();
     if (!uploadFile || !adminKey) return;
     setUploading(true);
 
-    try {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const base64Data = reader.result as string;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64Data = reader.result as string;
+      const customTitle = (uploadName.trim() || uploadFile.name.replace(/\.[^/.]+$/, "")).toLowerCase();
+
+      try {
         const res = await fetch("/api/admin/upload-sound", {
           method: "POST",
           headers: {
@@ -344,45 +400,60 @@ export default function AdminPanel() {
             "x-admin-key": adminKey,
           },
           body: JSON.stringify({
-            name: uploadName.trim() || uploadFile.name,
+            name: customTitle,
             filename: uploadFile.name,
             data: base64Data,
           }),
         });
 
-        const data = await res.json();
-        if (data.success && data.url) {
-          const newSound: SoundItem = {
-            id: "up_" + Date.now(),
-            name: uploadName.trim() || data.name,
-            url: data.url,
-            source: "upload",
-            icon: "📁",
-          };
-          setSounds((prev) => [newSound, ...prev]);
-          setFeedback(`✅ Uploaded "${newSound.name}"!`);
-          setUploadFile(null);
-          setUploadName("");
-          if (fileInputRef.current) fileInputRef.current.value = "";
-          setIsAddDrawerOpen(false);
-        } else {
-          setFeedback(`❌ Upload failed: ${data.error || "Unknown"}`);
+        const ct = res.headers.get("content-type") || "";
+        if (res.ok && ct.includes("application/json")) {
+          const data = await res.json();
+          if (data.success && data.url) {
+            const newSound: SoundItem = {
+              id: "up_" + Date.now(),
+              name: customTitle,
+              url: data.url,
+              source: "upload",
+            };
+            setSounds((prev) => [newSound, ...prev]);
+            toast("success", `uploaded "${newSound.name}"`);
+            setUploadFile(null);
+            setUploadName("");
+            if (fileInputRef.current) fileInputRef.current.value = "";
+            setIsAddOpen(false);
+            setUploading(false);
+            return;
+          }
         }
-        setUploading(false);
+      } catch {}
+
+      // Automatic client-side DataURL fallback so uploaded MP3 works even without server restart
+      const fallbackSound: SoundItem = {
+        id: "up_" + Date.now(),
+        name: customTitle,
+        url: base64Data,
+        source: "upload",
       };
-      reader.readAsDataURL(uploadFile);
-    } catch {
+      setSounds((prev) => [fallbackSound, ...prev]);
+      toast("success", `added "${fallbackSound.name}"`);
+      setUploadFile(null);
+      setUploadName("");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setIsAddOpen(false);
       setUploading(false);
-      setFeedback("❌ Failed to read audio file");
-    }
+    };
+    reader.readAsDataURL(uploadFile);
   };
 
-  // Handle Custom URL
   const handleUrlSubmit = async (e: Event) => {
     e.preventDefault();
     const raw = customUrl.trim();
     if (!raw || !adminKey) return;
     setResolvingUrl(true);
+
+    const displayName = (customUrlName.trim() || "custom sound").toLowerCase();
+    let finalUrl = normalizeSoundUrl(raw);
 
     try {
       const res = await fetch("/api/admin/resolve-sound", {
@@ -393,239 +464,236 @@ export default function AdminPanel() {
         },
         body: JSON.stringify({ url: raw }),
       });
-      const data = await res.json();
-      const resolvedUrl = data.url || raw;
-      const displayName = customUrlName.trim() || "Custom Sound";
+      const ct = res.headers.get("content-type") || "";
+      if (res.ok && ct.includes("application/json")) {
+        const data = await res.json();
+        if (data.url) finalUrl = data.url;
+      }
+    } catch {}
 
-      const newSound: SoundItem = {
-        id: "url_" + Date.now(),
-        name: displayName,
-        url: resolvedUrl,
-        source: raw.includes("myinstants.com") ? "myinstants" : "custom",
-        icon: "🔗",
-      };
+    const newSound: SoundItem = {
+      id: "url_" + Date.now(),
+      name: displayName,
+      url: finalUrl,
+      source: raw.includes("myinstants.com") ? "myinstants" : "custom",
+    };
 
-      setSounds((prev) => [newSound, ...prev]);
-      setFeedback(`✅ Added "${newSound.name}"!`);
-      setCustomUrl("");
-      setCustomUrlName("");
-      setIsAddDrawerOpen(false);
-    } catch {
-      setFeedback("❌ Could not resolve URL");
-    } finally {
-      setResolvingUrl(false);
-    }
+    setSounds((prev) => [newSound, ...prev]);
+    toast("success", `added "${newSound.name}"`);
+    setCustomUrl("");
+    setCustomUrlName("");
+    setIsAddOpen(false);
+    setResolvingUrl(false);
   };
+
+  if (!isOpen) return null;
 
   const filteredSounds = sounds.filter((s) =>
     s.name.toLowerCase().includes(soundFilter.toLowerCase()),
   );
 
-  if (!isOpen) return null;
+  const selectedTargetLabel =
+    target === "all"
+      ? `everyone (${clients.length} online)`
+      : (() => {
+          const found = clients.find((c) => c.id === target);
+          return found ? `${found.username} (${found.game || found.page})` : target;
+        })();
+
+  const tabs = [
+    { id: "soundboard" as const, icon: "fa-volume-high", label: "soundboard" },
+    { id: "tts" as const, icon: "fa-microphone-lines", label: "voice of god" },
+    { id: "pranks" as const, icon: "fa-wand-magic-sparkles", label: "visual trolls" },
+    { id: "users" as const, icon: "fa-users", label: `users (${clients.length})` },
+  ];
 
   return (
-    <div class="admin-modal-overlay" onClick={() => setIsOpen(false)}>
-      <div class="admin-panel-card" onClick={(e) => e.stopPropagation()}>
-        {!isAuthenticated ? (
-          <div class="admin-auth-card" style={{ margin: "auto" }}>
-            <div class="auth-icon-wrap">☀️</div>
-            <div class="auth-title">Sunshine Control Center</div>
-            <div class="auth-desc">Master Administrator Authentication Required</div>
-            <form onSubmit={handleLogin} style={{ width: "100%" }}>
-              <div class="auth-input-wrap">
-                <input
-                  type="password"
-                  class="auth-input"
-                  placeholder="Enter Master Secret Key..."
-                  value={keyInput}
-                  onInput={(e) => setKeyInput((e.target as HTMLInputElement).value)}
-                  autoFocus
-                />
-              </div>
-              {authError && <div class="auth-error">{authError}</div>}
-              <button type="submit" class="auth-submit-btn">Unlock Console</button>
-            </form>
-          </div>
-        ) : (
-          <>
-            {/* Header */}
-            <div class="admin-header">
-              <div class="admin-title-wrap">
-                <span class="admin-badge">Admin</span>
-                <h2 class="admin-title">
-                  <span>☀️</span> Sunshine Chaos & Control Center
-                </h2>
-                {feedback && (
-                  <span style={{ color: "#ffaa33", fontSize: "12px", fontWeight: "bold" }}>
-                    {feedback}
-                  </span>
-                )}
-              </div>
-              <div class="admin-header-actions">
-                <button class="killswitch-btn" onClick={handleKillswitch}>
-                  🚨 RESET ALL EFFECTS
-                </button>
-                <button class="admin-close-btn" onClick={() => setIsOpen(false)}>
-                  ✕
-                </button>
-              </div>
-            </div>
+    <>
+      <div class="admin-backdrop" onClick={() => setIsOpen(false)} />
 
-            {/* Target Selector Bar */}
-            <div class="admin-target-bar">
-              <div class="target-label">
-                <span>🎯 Target Player:</span>
-                <select
-                  class="target-select"
-                  value={target}
-                  onChange={(e) => setTarget((e.target as HTMLSelectElement).value)}
+      {!isAuthenticated ? (
+        <div class="admin-auth-popup" onClick={(e) => e.stopPropagation()}>
+          <h2>admin authentication</h2>
+          <p>enter your master secret key to unlock the admin panel.</p>
+          <form onSubmit={handleLogin} class="input-container">
+            <input
+              type="password"
+              class="admin-input"
+              placeholder="secret key"
+              value={keyInput}
+              onInput={(e) => setKeyInput((e.target as HTMLInputElement).value)}
+              style={{ marginBottom: "10px" }}
+              autoFocus
+            />
+            {authError && (
+              <p style={{ color: "var(--toast-danger-text)", marginBottom: "10px" }}>
+                {authError}
+              </p>
+            )}
+            <button type="submit" class="auth-action-btn">
+              unlock
+            </button>
+          </form>
+          <button class="admin-close-btn" onClick={() => setIsOpen(false)}>
+            <i class="fa-regular fa-times" />
+          </button>
+        </div>
+      ) : (
+        <div class="admin-menu" onClick={(e) => e.stopPropagation()}>
+          <h2>admin</h2>
+
+          <div class="admin-container">
+            {/* Left Sidebar Tabs (Identical to SettingsMenu) */}
+            <div class="admin-tabs">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  class={`tab-button${activeTab === t.id ? " active" : ""}`}
+                  onClick={() => setActiveTab(t.id)}
                 >
-                  <option value="all">🌐 Broadcast to ALL Players ({clients.length} online)</option>
-                  {clients.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      👤 {c.username} ({c.ip}) - {c.game || c.page}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div class="target-stats">
-                Admin: <strong>{adminUsername}</strong> | Online: <span>{clients.length}</span>
+                  <i class={`${activeTab === t.id ? "fa-solid" : "fa-regular"} ${t.icon}`} />{" "}
+                  {t.label}
+                </button>
+              ))}
+
+              <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <button class="admin-btn-danger" onClick={handleKillswitch} style={{ width: "100%" }}>
+                  <i class="fa-solid fa-rotate-left" /> reset effects
+                </button>
+                <div class="settings-bottom">
+                  {adminUsername} • {clients.length} online
+                </div>
               </div>
             </div>
 
-            {/* Navigation Tabs */}
-            <div class="admin-nav">
-              <button
-                class={`admin-nav-tab ${activeTab === "soundboard" ? "active" : ""}`}
-                onClick={() => setActiveTab("soundboard")}
-              >
-                🔊 Soundboard ({sounds.length})
-              </button>
-              <button
-                class={`admin-nav-tab ${activeTab === "tts" ? "active" : ""}`}
-                onClick={() => setActiveTab("tts")}
-              >
-                🗣️ Voice of God (TTS)
-              </button>
-              <button
-                class={`admin-nav-tab ${activeTab === "pranks" ? "active" : ""}`}
-                onClick={() => setActiveTab("pranks")}
-              >
-                🎭 Visual Pranks & Chaos
-              </button>
-              <button
-                class={`admin-nav-tab ${activeTab === "users" ? "active" : ""}`}
-                onClick={() => setActiveTab("users")}
-              >
-                👥 Live Intelligence Radar ({clients.length})
-              </button>
-            </div>
-
-            {/* Tab Viewport */}
-            <div class="admin-tab-body">
-              {/* SOUNDBOARD TAB */}
-              {activeTab === "soundboard" && (
-                <>
-                  {/* Toolbar */}
-                  <div class="soundboard-toolbar">
-                    <div class="soundboard-search-wrap">
-                      <span class="soundboard-search-icon">🔍</span>
-                      <input
-                        type="text"
-                        class="soundboard-search-input"
-                        placeholder="Search soundboard sounds..."
-                        value={soundFilter}
-                        onInput={(e) => setSoundFilter((e.target as HTMLInputElement).value)}
-                      />
-                    </div>
-
-                    <div class="soundboard-actions">
-                      <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#a1a1aa" }}>
-                        <span>🔊 Vol:</span>
-                        <input
-                          type="range"
-                          min="0.1"
-                          max="1.0"
-                          step="0.05"
-                          value={sfxVolume}
-                          onInput={(e) => setSfxVolume(parseFloat((e.target as HTMLInputElement).value))}
-                          style={{ width: "70px", accentColor: "#ff9800" }}
-                        />
-                      </div>
-
-                      <button
-                        class={`btn-add-sound ${isAddDrawerOpen ? "open" : ""}`}
-                        onClick={() => setIsAddDrawerOpen((prev) => !prev)}
+            {/* Right Content Area */}
+            <div class="admin-content-wrapper">
+              {/* Target Selector Item */}
+              <div class="admin-section" style={{ paddingBottom: "6px" }}>
+                <label>target user</label>
+                <p>choose who receives your sound effects and visual trolls.</p>
+                <div class="admin-selector">
+                  <div
+                    class="admin-selected"
+                    onClick={() => setTargetDropdownOpen((prev) => !prev)}
+                  >
+                    <span>{selectedTargetLabel}</span>
+                    <i class="fa-solid fa-chevron-down" style={{ fontSize: "11px", color: "var(--color-icon-muted)" }} />
+                  </div>
+                  {targetDropdownOpen && (
+                    <div class="admin-options">
+                      <div
+                        onClick={() => {
+                          setTarget("all");
+                          setTargetDropdownOpen(false);
+                        }}
                       >
-                        {isAddDrawerOpen ? "✕ Close Add Sound" : "+ Add Sound to Board"}
+                        everyone ({clients.length} online)
+                      </div>
+                      {clients.map((c) => (
+                        <div
+                          key={c.id}
+                          onClick={() => {
+                            setTarget(c.id);
+                            setTargetDropdownOpen(false);
+                          }}
+                        >
+                          {c.username} ({c.ip}) — {c.game || c.page}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* TAB 1: SOUNDBOARD */}
+              {activeTab === "soundboard" && (
+                <div class="admin-section">
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }}>
+                    <div>
+                      <label>soundboard</label>
+                      <p style={{ marginBottom: "6px" }}>play custom sounds or myinstants clips through target speakers.</p>
+                    </div>
+                    <div style={{ display: "flex", gap: "6px" }}>
+                      <button
+                        class={isAddOpen ? "admin-btn-primary" : "admin-btn-secondary"}
+                        onClick={() => setIsAddOpen((prev) => !prev)}
+                      >
+                        <i class={`fa-solid ${isAddOpen ? "fa-xmark" : "fa-plus"}`} />{" "}
+                        {isAddOpen ? "close" : "add sound"}
                       </button>
                     </div>
                   </div>
 
-                  {/* Add Sound Drawer */}
-                  {isAddDrawerOpen && (
-                    <div class="add-sound-drawer">
-                      <div class="drawer-tabs">
+                  {/* Add Custom Sound Box */}
+                  {isAddOpen && (
+                    <div class="admin-add-box">
+                      <div class="admin-subtabs">
                         <button
-                          class={`drawer-tab ${addDrawerTab === "myinstants" ? "active" : ""}`}
-                          onClick={() => setAddDrawerTab("myinstants")}
+                          type="button"
+                          class={`admin-subtab${addMode === "myinstants" ? " active" : ""}`}
+                          onClick={() => setAddMode("myinstants")}
                         >
-                          🔍 Search MyInstants
+                          <i class="fa-solid fa-magnifying-glass" /> myinstants
                         </button>
                         <button
-                          class={`drawer-tab ${addDrawerTab === "upload" ? "active" : ""}`}
-                          onClick={() => setAddDrawerTab("upload")}
+                          type="button"
+                          class={`admin-subtab${addMode === "upload" ? " active" : ""}`}
+                          onClick={() => setAddMode("upload")}
                         >
-                          📁 Upload MP3 / Audio File
+                          <i class="fa-solid fa-upload" /> upload mp3
                         </button>
                         <button
-                          class={`drawer-tab ${addDrawerTab === "url" ? "active" : ""}`}
-                          onClick={() => setAddDrawerTab("url")}
+                          type="button"
+                          class={`admin-subtab${addMode === "url" ? " active" : ""}`}
+                          onClick={() => setAddMode("url")}
                         >
-                          🔗 Paste Sound or MyInstants URL
+                          <i class="fa-solid fa-link" /> sound url
                         </button>
                       </div>
 
-                      {/* Search MyInstants Tab */}
-                      {addDrawerTab === "myinstants" && (
+                      {addMode === "myinstants" && (
                         <div>
-                          <form class="myinstants-search-row" onSubmit={handleSearchMyinstants}>
+                          <form class="admin-toolbar-row" onSubmit={handleSearchMyinstants} style={{ marginBottom: "8px" }}>
                             <input
                               type="text"
-                              class="myinstants-search-input"
-                              placeholder="Search MyInstants (e.g. vine boom, metal pipe, fart, scream)..."
-                              value={myinstantsQuery}
-                              onInput={(e) => setMyinstantsQuery((e.target as HTMLInputElement).value)}
-                              autoFocus
+                              class="admin-input"
+                              placeholder="search myinstants (e.g. vine boom, fart, airhorn)..."
+                              value={miQuery}
+                              onInput={(e) => setMiQuery((e.target as HTMLInputElement).value)}
                             />
-                            <button type="submit" class="btn-search-myinstants" disabled={myinstantsLoading}>
-                              {myinstantsLoading ? "Searching..." : "Search"}
+                            <button type="submit" class="admin-btn-primary" disabled={miLoading} style={{ flexShrink: 0 }}>
+                              {miLoading ? "..." : "search"}
                             </button>
                           </form>
-
-                          {myinstantsResults.length > 0 && (
-                            <div class="myinstants-results-grid">
-                              {myinstantsResults.map((item, idx) => (
-                                <div key={idx} class="myinstants-result-item">
-                                  <span class="myinstants-result-title" title={item.name}>
-                                    🎵 {item.name}
-                                  </span>
-                                  <div class="myinstants-btn-group">
+                          <input
+                            type="text"
+                            class="admin-input"
+                            placeholder="optional custom name before clicking add..."
+                            value={miCustomName}
+                            onInput={(e) => setMiCustomName((e.target as HTMLInputElement).value)}
+                          />
+                          {miResults.length > 0 && (
+                            <div class="admin-search-results">
+                              {miResults.map((item, idx) => (
+                                <div key={idx} class="admin-search-row">
+                                  <span class="admin-search-name">{item.name.toLowerCase()}</span>
+                                  <div style={{ display: "flex", gap: "6px" }}>
                                     <button
                                       type="button"
-                                      class="btn-preview-mini"
-                                      title="Preview locally"
+                                      class="admin-btn-secondary"
+                                      style={{ padding: "5px 10px", fontSize: "12px" }}
                                       onClick={() => playAudioUrl(item.url, sfxVolume)}
                                     >
-                                      🎧 Test
+                                      test
                                     </button>
                                     <button
                                       type="button"
-                                      class="btn-add-mini"
-                                      title="Add to your soundboard"
+                                      class="admin-btn-primary"
+                                      style={{ padding: "5px 10px", fontSize: "12px" }}
                                       onClick={() => handleAddFromMyinstants(item)}
                                     >
-                                      + Add
+                                      add
                                     </button>
                                   </div>
                                 </div>
@@ -635,165 +703,161 @@ export default function AdminPanel() {
                         </div>
                       )}
 
-                      {/* Upload MP3 File Tab */}
-                      {addDrawerTab === "upload" && (
-                        <form class="drawer-form" onSubmit={handleUploadSubmit}>
-                          <div class="form-field-group">
-                            <label class="form-field-label">Choose Audio File (.mp3, .wav, .ogg, .m4a):</label>
-                            <input
-                              type="file"
-                              ref={fileInputRef}
-                              accept="audio/*,.mp3,.wav,.ogg,.m4a"
-                              onChange={handleFileChange}
-                              style={{ color: "#d4d4d8", fontSize: "13px" }}
-                            />
-                          </div>
-                          <div class="form-field-group">
-                            <label class="form-field-label">Custom Display Name:</label>
-                            <input
-                              type="text"
-                              class="form-field-input"
-                              placeholder="e.g. My Secret Troll Sound"
-                              value={uploadName}
-                              onInput={(e) => setUploadName((e.target as HTMLInputElement).value)}
-                              required
-                            />
-                          </div>
-                          <button
-                            type="submit"
-                            class="btn-submit-drawer"
-                            disabled={!uploadFile || uploading}
-                          >
-                            {uploading ? "Uploading Audio..." : "📁 Upload to Server & Add to Board"}
+                      {addMode === "upload" && (
+                        <form onSubmit={handleUploadSubmit} style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          <input
+                            type="file"
+                            ref={fileInputRef}
+                            accept="audio/*,.mp3,.wav,.ogg,.m4a"
+                            onChange={handleFileChange}
+                            class="admin-input"
+                          />
+                          <input
+                            type="text"
+                            class="admin-input"
+                            placeholder="custom sound name..."
+                            value={uploadName}
+                            onInput={(e) => setUploadName((e.target as HTMLInputElement).value)}
+                            required
+                          />
+                          <button type="submit" class="admin-btn-primary" disabled={!uploadFile || uploading}>
+                            <i class="fa-solid fa-upload" /> {uploading ? "uploading..." : "save to soundboard"}
                           </button>
                         </form>
                       )}
 
-                      {/* Paste Sound URL Tab */}
-                      {addDrawerTab === "url" && (
-                        <form class="drawer-form" onSubmit={handleUrlSubmit}>
-                          <div class="form-field-group">
-                            <label class="form-field-label">
-                              Audio File URL or MyInstants Link:
-                            </label>
-                            <input
-                              type="url"
-                              class="form-field-input"
-                              placeholder="https://www.myinstants.com/en/instant/... or https://example.com/sound.mp3"
-                              value={customUrl}
-                              onInput={(e) => setCustomUrl((e.target as HTMLInputElement).value)}
-                              required
-                            />
-                          </div>
-                          <div class="form-field-group">
-                            <label class="form-field-label">Custom Display Name:</label>
-                            <input
-                              type="text"
-                              class="form-field-input"
-                              placeholder="e.g. Discord Join Chime"
-                              value={customUrlName}
-                              onInput={(e) => setCustomUrlName((e.target as HTMLInputElement).value)}
-                              required
-                            />
-                          </div>
-                          <button
-                            type="submit"
-                            class="btn-submit-drawer"
-                            disabled={!customUrl.trim() || resolvingUrl}
-                          >
-                            {resolvingUrl ? "Resolving Sound..." : "🔗 Add to Soundboard"}
+                      {addMode === "url" && (
+                        <form onSubmit={handleUrlSubmit} style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          <input
+                            type="url"
+                            class="admin-input"
+                            placeholder="paste mp3 link or myinstants page url..."
+                            value={customUrl}
+                            onInput={(e) => setCustomUrl((e.target as HTMLInputElement).value)}
+                            required
+                          />
+                          <input
+                            type="text"
+                            class="admin-input"
+                            placeholder="custom sound name..."
+                            value={customUrlName}
+                            onInput={(e) => setCustomUrlName((e.target as HTMLInputElement).value)}
+                            required
+                          />
+                          <button type="submit" class="admin-btn-primary" disabled={!customUrl.trim() || resolvingUrl}>
+                            <i class="fa-solid fa-plus" /> {resolvingUrl ? "adding..." : "add to soundboard"}
                           </button>
                         </form>
                       )}
                     </div>
                   )}
 
-                  {/* Soundboard Cards Grid */}
-                  <div class="sfx-grid">
-                    {filteredSounds.map((sound) => (
-                      <div key={sound.id} class="sfx-card">
-                        <div class="sfx-header">
-                          <div class="sfx-title-area">
-                            <span class="sfx-icon">{sound.icon || "🎵"}</span>
-                            <span class="sfx-title" title={sound.name}>
-                              {sound.name}
-                            </span>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                            <span class={`sfx-source-badge ${sound.source}`}>
-                              {sound.source === "myinstants" ? "MyInstants" : sound.source === "upload" ? "Upload" : "Preset"}
-                            </span>
-                            <button
-                              class="sfx-delete-btn"
-                              title="Delete from soundboard"
-                              onClick={() => handleDeleteSound(sound.id)}
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </div>
+                  {/* Search & Volume Toolbar */}
+                  <div class="admin-toolbar-row">
+                    <input
+                      type="text"
+                      class="admin-input"
+                      placeholder="filter sounds..."
+                      value={soundFilter}
+                      onInput={(e) => setSoundFilter((e.target as HTMLInputElement).value)}
+                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: "120px" }}>
+                      <i class="fa-solid fa-volume-low" style={{ color: "var(--color-icon-dim)", fontSize: "12px" }} />
+                      <input
+                        type="range"
+                        class="admin-range"
+                        min="0.1"
+                        max="1.0"
+                        step="0.05"
+                        value={sfxVolume}
+                        onInput={(e) => setSfxVolume(parseFloat((e.target as HTMLInputElement).value))}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      class="admin-btn-secondary"
+                      title="restore default sounds"
+                      onClick={handleResetPresets}
+                      style={{ flexShrink: 0, padding: "8px 10px" }}
+                    >
+                      <i class="fa-solid fa-rotate" />
+                    </button>
+                  </div>
 
-                        <div class="sfx-btn-row">
+                  {/* Soundboard Grid */}
+                  <div class="admin-list-grid">
+                    {filteredSounds.map((sound) => (
+                      <div key={sound.id} class="admin-item-card">
+                        <div class="admin-item-top">
+                          <div style={{ overflow: "hidden" }}>
+                            <div class="admin-item-title" title={sound.name}>
+                              {sound.name}
+                            </div>
+                            <div class="admin-item-sub">{sound.source}</div>
+                          </div>
                           <button
-                            class="sfx-btn-test"
-                            title="Preview sound locally"
+                            class="admin-icon-btn"
+                            title="remove sound"
+                            onClick={() => handleDeleteSound(sound.id)}
+                          >
+                            <i class="fa-regular fa-trash-can" />
+                          </button>
+                        </div>
+                        <div class="admin-item-actions">
+                          <button
+                            type="button"
+                            class="admin-btn-secondary"
                             onClick={() => handlePlayLocal(sound)}
                           >
-                            🎧 Test
+                            <i class="fa-solid fa-headphones" /> test
                           </button>
                           <button
-                            class="sfx-btn-fire"
-                            title="Blast through target user's computer speakers!"
+                            type="button"
+                            class="admin-btn-primary"
                             onClick={() => handleFireRemote(sound)}
                           >
-                            ⚡ FIRE REMOTE
+                            <i class="fa-solid fa-play" /> play
                           </button>
                         </div>
                       </div>
                     ))}
                   </div>
-                </>
+                </div>
               )}
 
-              {/* VOICE OF GOD (TTS) */}
+              {/* TAB 2: VOICE OF GOD (TTS) */}
               {activeTab === "tts" && (
-                <div class="tts-container">
-                  <div class="tts-input-wrap">
-                    <label class="tts-label">Voice of God Message to Target:</label>
-                    <textarea
-                      class="tts-textarea"
-                      value={ttsText}
-                      onInput={(e) => setTtsText((e.target as HTMLTextAreaElement).value)}
-                      placeholder="Type words that will be spoken aloud by their computer..."
-                    />
+                <div class="admin-section">
+                  <label>voice of god (tts)</label>
+                  <p>speak a custom message aloud through the target user's speakers.</p>
+
+                  <textarea
+                    class="admin-textarea"
+                    value={ttsText}
+                    onInput={(e) => setTtsText((e.target as HTMLTextAreaElement).value)}
+                    placeholder="type message to speak..."
+                    style={{ marginBottom: "10px" }}
+                  />
+
+                  <div class="admin-chips">
+                    {TTS_PRESETS.map((preset, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        class="admin-chip"
+                        onClick={() => setTtsText(preset)}
+                      >
+                        {preset}
+                      </button>
+                    ))}
                   </div>
 
-                  <div>
-                    <label class="tts-label" style={{ marginBottom: "8px", display: "block" }}>
-                      Quick Prank Phrases:
-                    </label>
-                    <div class="tts-presets">
-                      {TTS_PRESETS.map((preset, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          class="tts-preset-chip"
-                          onClick={() => setTtsText(preset)}
-                        >
-                          {preset}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div class="tts-sliders">
-                    <div class="slider-group">
-                      <div class="slider-header">
-                        <span>Pitch: {ttsPitch.toFixed(1)}x</span>
-                        <span style={{ color: "#8c8c8c" }}>(0.5 = Demon, 1.8 = Chipmunk)</span>
-                      </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", marginBottom: "14px" }}>
+                    <div>
+                      <p style={{ marginBottom: "4px" }}>pitch ({ttsPitch.toFixed(1)}x)</p>
                       <input
                         type="range"
+                        class="admin-range"
                         min="0.4"
                         max="1.8"
                         step="0.1"
@@ -801,13 +865,11 @@ export default function AdminPanel() {
                         onInput={(e) => setTtsPitch(parseFloat((e.target as HTMLInputElement).value))}
                       />
                     </div>
-                    <div class="slider-group">
-                      <div class="slider-header">
-                        <span>Speed / Rate: {ttsRate.toFixed(1)}x</span>
-                        <span style={{ color: "#8c8c8c" }}>(0.6 = Slow, 1.4 = Fast)</span>
-                      </div>
+                    <div>
+                      <p style={{ marginBottom: "4px" }}>speed ({ttsRate.toFixed(1)}x)</p>
                       <input
                         type="range"
+                        class="admin-range"
                         min="0.5"
                         max="1.6"
                         step="0.1"
@@ -817,10 +879,11 @@ export default function AdminPanel() {
                     </div>
                   </div>
 
-                  <div class="tts-actions">
+                  <div style={{ display: "flex", gap: "8px" }}>
                     <button
-                      class="sfx-btn-test"
-                      style={{ padding: "11px", fontSize: "13px" }}
+                      type="button"
+                      class="admin-btn-secondary"
+                      style={{ flex: 1 }}
                       onClick={() => {
                         if ("speechSynthesis" in window) {
                           window.speechSynthesis.cancel();
@@ -831,102 +894,94 @@ export default function AdminPanel() {
                         }
                       }}
                     >
-                      🎧 Test Local Voice
+                      <i class="fa-solid fa-headphones" /> test local
                     </button>
                     <button
-                      class="tts-speak-btn"
+                      type="button"
+                      class="admin-btn-primary"
+                      style={{ flex: 1.5 }}
                       onClick={() => triggerRemote("tts", { text: ttsText, pitch: ttsPitch, rate: ttsRate })}
                     >
-                      🗣️ Speak to Target Remote Speakers
+                      <i class="fa-solid fa-microphone-lines" /> speak on target
                     </button>
                   </div>
                 </div>
               )}
 
-              {/* VISUAL PRANKS & CHAOS */}
+              {/* TAB 3: VISUAL TROLLS */}
               {activeTab === "pranks" && (
-                <div class="pranks-grid">
-                  {PRANK_LIST.map((prank) => (
-                    <div key={prank.id} class="prank-card">
-                      <div class="prank-header">
-                        <span class="prank-icon">{prank.icon}</span>
-                        <span class="prank-title">{prank.title}</span>
+                <div class="admin-section">
+                  <label>visual trolls</label>
+                  <p>trigger visual effects and screen pranks on the target user.</p>
+
+                  <div class="admin-list-grid">
+                    {PRANK_LIST.map((prank) => (
+                      <div key={prank.id} class="admin-item-card">
+                        <div>
+                          <div class="admin-item-title">
+                            <i class={`fa-solid ${prank.icon}`} style={{ marginRight: "6px", color: "var(--color-icon-muted)" }} />
+                            {prank.title}
+                          </div>
+                          <div class="admin-item-sub" style={{ marginTop: "3px" }}>
+                            {prank.desc}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          class="admin-btn-primary"
+                          onClick={() => triggerRemote("effect", { effect: prank.id, from: adminUsername })}
+                        >
+                          <i class="fa-solid fa-bolt" /> trigger
+                        </button>
                       </div>
-                      <div class="prank-desc">{prank.desc}</div>
-                      <button
-                        class="prank-trigger-btn"
-                        onClick={() => triggerRemote("effect", { effect: prank.id, from: adminUsername })}
-                      >
-                        ⚡ Trigger Prank
-                      </button>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               )}
 
-              {/* LIVE USER INTELLIGENCE */}
+              {/* TAB 4: LIVE USERS */}
               {activeTab === "users" && (
-                <div class="users-table-wrap">
-                  <table class="users-table">
-                    <thead>
-                      <tr>
-                        <th>Status</th>
-                        <th>User</th>
-                        <th>Client ID</th>
-                        <th>IP Address</th>
-                        <th>Current Page / Game</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {clients.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} style={{ textAlign: "center", padding: "32px", color: "#8c8c8c" }}>
-                            No active online players connected to the live stream yet.
-                          </td>
-                        </tr>
-                      ) : (
-                        clients.map((c) => (
-                          <tr key={c.id}>
-                            <td>
-                              <span class="user-status-dot"></span>
-                              <span style={{ color: "#10b981", fontSize: "12px" }}>Online</span>
-                            </td>
-                            <td>
-                              <strong style={{ color: "#fff" }}>{c.username}</strong>
-                            </td>
-                            <td>
-                              <code style={{ fontSize: "11px", color: "#8c8c8c" }}>{c.id}</code>
-                            </td>
-                            <td>
-                              <span style={{ fontSize: "12px", color: "#8c8c8c" }}>{c.ip}</span>
-                            </td>
-                            <td>
-                              <span style={{ color: "#ffaa33", fontSize: "12px" }}>{c.game || c.page}</span>
-                            </td>
-                            <td>
-                              <button
-                                class="btn-target-user"
-                                onClick={() => {
-                                  setTarget(c.id);
-                                  setFeedback(`Target locked: ${c.username}`);
-                                  window.setTimeout(() => setFeedback(null), 2500);
-                                }}
-                              >
-                                🎯 Target
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
+                <div class="admin-section">
+                  <label>online users</label>
+                  <p>active sessions currently connected to the live stream.</p>
+
+                  {clients.length === 0 ? (
+                    <p>no active users connected yet.</p>
+                  ) : (
+                    clients.map((c) => (
+                      <div key={c.id} class="admin-user-row">
+                        <div class="admin-user-info">
+                          <div class="admin-user-name">
+                            <span class="admin-online-dot" />
+                            <span>{c.username}</span>
+                          </div>
+                          <div class="admin-user-meta">
+                            {c.ip} • {c.game || c.page} • id: {c.id}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          class={target === c.id ? "admin-btn-primary" : "admin-btn-secondary"}
+                          onClick={() => {
+                            setTarget(c.id);
+                            toast("success", `targeted ${c.username}`);
+                          }}
+                        >
+                          {target === c.id ? "selected" : "target"}
+                        </button>
+                      </div>
+                    ))
+                  )}
                 </div>
               )}
             </div>
-          </>
-        )}
-      </div>
-    </div>
+          </div>
+
+          <button class="admin-close-btn" onClick={() => setIsOpen(false)}>
+            <i class="fa-regular fa-times" />
+          </button>
+        </div>
+      )}
+    </>
   );
 }

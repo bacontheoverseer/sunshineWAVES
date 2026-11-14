@@ -456,25 +456,117 @@ export function playRickroll(): void {
   }
 }
 
-export function playAudioUrl(url: string, volume = 1.0): void {
-  try {
-    unlockAudio();
-    const audio = new Audio(url);
-    audio.volume = Math.max(0, Math.min(1, volume));
-    const playPromise = audio.play();
-    if (playPromise !== undefined) {
-      playPromise.catch((err) => {
-        console.warn("Audio element play error:", err);
-      });
-    }
-  } catch (err) {
-    console.warn("Failed to create audio for url:", url, err);
+const PRESET_MAP: Record<string, string> = {
+  "https://www.myinstants.com/media/sounds/vine-boom.mp3": "/assets/sounds/vine-boom.mp3",
+  "https://www.myinstants.com/media/sounds/movie_1.mp3": "/assets/sounds/bruh.mp3",
+  "https://www.myinstants.com/media/sounds/metal-pipe-falling-sound-effect.mp3": "/assets/sounds/metal-pipe.mp3",
+  "https://www.myinstants.com/media/sounds/discord-notification.mp3": "/assets/sounds/discord-ping.mp3",
+  "https://www.myinstants.com/media/sounds/fart-with-reverb.mp3": "/assets/sounds/reverb-fart.mp3",
+  "https://www.myinstants.com/media/sounds/taco-bell-bong-sfx.mp3": "/assets/sounds/taco-bell.mp3",
+  "https://www.myinstants.com/media/sounds/fbi-open-up_mI4PDIx.mp3": "/assets/sounds/fbi-open-up.mp3",
+  "https://www.myinstants.com/media/sounds/mlg-airhorn.mp3": "/assets/sounds/airhorn.mp3",
+  "https://www.myinstants.com/media/sounds/emotional-damage-meme.mp3": "/assets/sounds/emotional-damage.mp3",
+  "https://www.myinstants.com/media/sounds/windows-xp-error.mp3": "/assets/sounds/xp-error.mp3",
+  "https://www.myinstants.com/media/sounds/roblox-death-sound_1.mp3": "/assets/sounds/roblox-oof.mp3",
+  "https://www.myinstants.com/media/sounds/sad-violin.mp3": "/assets/sounds/sad-violin.mp3",
+  "https://www.myinstants.com/media/sounds/what-da-dog-doin.mp3": "/assets/sounds/what-da-dog.mp3",
+  "https://www.myinstants.com/media/sounds/run-vine-sound-effect.mp3": "/assets/sounds/run-meme.mp3",
+  "https://www.myinstants.com/media/sounds/knocking-on-door_1.mp3": "/assets/sounds/door-knock.mp3",
+  "https://www.myinstants.com/media/sounds/rick-roll.mp3": "/assets/sounds/rickroll.mp3",
+  "https://www.myinstants.com/media/sounds/screamer-sound.mp3": "/assets/sounds/screamer.mp3",
+  "https://www.myinstants.com/media/sounds/snore-mimimi.mp3": "/assets/sounds/snore-mimimi.mp3",
+};
+
+export function normalizeSoundUrl(url: string): string {
+  if (!url) return "/assets/sounds/vine-boom.mp3";
+  if (PRESET_MAP[url]) return PRESET_MAP[url];
+  if (url.startsWith("/api/live/audio-proxy?url=")) {
+    try {
+      const inner = decodeURIComponent(url.split("url=")[1] || "");
+      if (PRESET_MAP[inner]) return PRESET_MAP[inner];
+    } catch {}
   }
+  return url;
+}
+
+const blobAudioCache = new Map<string, string>();
+
+async function resolvePlayableUrl(url: string): Promise<string> {
+  const norm = normalizeSoundUrl(url);
+  if (
+    norm.startsWith("/assets/sounds/") ||
+    norm.startsWith("/custom-sounds/") ||
+    norm.startsWith("data:audio") ||
+    norm.startsWith("blob:")
+  ) {
+    return norm;
+  }
+
+  let rawExternal = norm;
+  if (norm.startsWith("/api/live/audio-proxy?url=")) {
+    try {
+      rawExternal = decodeURIComponent(norm.split("url=")[1] || "");
+    } catch {}
+  }
+
+  const cachedBlob = blobAudioCache.get(rawExternal);
+  if (cachedBlob) return cachedBlob;
+
+  // 1. Try local backend audio-proxy first
+  try {
+    const proxyUrl = `/api/live/audio-proxy?url=${encodeURIComponent(rawExternal)}`;
+    const res = await fetch(proxyUrl);
+    const ct = res.headers.get("content-type") || "";
+    if (res.ok && !ct.includes("text/html")) {
+      const buf = await res.arrayBuffer();
+      const blobUrl = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+      blobAudioCache.set(rawExternal, blobUrl);
+      return blobUrl;
+    }
+  } catch {}
+
+  // 2. Fallback to CORS proxy blob if server hasn't restarted yet
+  try {
+    const fallbackRes = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(rawExternal)}`);
+    if (fallbackRes.ok) {
+      const buf = await fallbackRes.arrayBuffer();
+      const blobUrl = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+      blobAudioCache.set(rawExternal, blobUrl);
+      return blobUrl;
+    }
+  } catch {}
+
+  return norm;
+}
+
+export function playAudioUrl(url: string, volume = 1.0): void {
+  unlockAudio();
+  void resolvePlayableUrl(url)
+    .then((playableUrl) => {
+      const audio = new Audio(playableUrl);
+      audio.volume = Math.max(0, Math.min(1, volume));
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn("Audio element play error:", err);
+        });
+      }
+    })
+    .catch((err) => {
+      console.warn("Failed to resolve audio for url:", url, err);
+    });
 }
 
 export function playSfxByName(nameOrUrl: string, volume = 1.0): void {
   unlockAudio();
-  if (nameOrUrl.startsWith("http://") || nameOrUrl.startsWith("https://") || nameOrUrl.startsWith("/custom-sounds/") || nameOrUrl.startsWith("data:audio")) {
+  if (
+    nameOrUrl.startsWith("http://") ||
+    nameOrUrl.startsWith("https://") ||
+    nameOrUrl.startsWith("/assets/sounds/") ||
+    nameOrUrl.startsWith("/custom-sounds/") ||
+    nameOrUrl.startsWith("/api/live/audio-proxy") ||
+    nameOrUrl.startsWith("data:audio")
+  ) {
     playAudioUrl(nameOrUrl, volume);
     return;
   }
