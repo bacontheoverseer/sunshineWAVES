@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "preact/hooks";
 import { moderateChatMessage } from "../core/contentFilter.ts";
 import { getClientId, detectCurrentGameSession } from "../core/liveClient.ts";
+import { formatPlayTime } from "../core/cookieCoins.ts";
 
 interface ChatMessage {
   id: string;
@@ -21,6 +22,42 @@ interface OnlineUser {
   isPlayingGame?: boolean;
   gameStartedAt?: number;
   lastSeen?: number;
+  bio?: string;
+  statusText?: string;
+  createdAt?: string | null;
+}
+
+interface UserProfileDetails {
+  id: number | null;
+  username: string;
+  createdAt: string | null;
+  cloudSyncVerified: boolean;
+  bio: string;
+  statusText: string;
+  online: boolean;
+  game: string;
+  isPlayingGame: boolean;
+  gameStartedAt: number;
+  lastSeen: number;
+  stats: {
+    totalSeconds: number;
+    totalPlays: number;
+    gamesPlayedCount: number;
+    topGames: {
+      game: string;
+      seconds: number;
+      plays: number;
+      highScore: number;
+      lastPlayed: string;
+    }[];
+  };
+  studio: {
+    name: string;
+    tagline: string;
+    color: string;
+    icon: string;
+  } | null;
+  publishedGamesCount: number;
 }
 
 interface VoiceParticipant {
@@ -249,9 +286,18 @@ export default function ChatModal() {
     return [];
   });
 
-  // Server-reported online and offline users
+  // Server-reported online, offline, and registered CloudSync users
   const [serverOnlineUsers, setServerOnlineUsers] = useState<OnlineUser[]>([]);
   const [serverOfflineUsers, setServerOfflineUsers] = useState<OnlineUser[]>([]);
+  const [registeredCloudSyncUsers, setRegisteredCloudSyncUsers] = useState<string[]>([]);
+
+  // User Profile Modal state (view own profile or any other user's profile)
+  const [viewingProfileUsername, setViewingProfileUsername] = useState<string | null>(null);
+  const [profileData, setProfileData] = useState<UserProfileDetails | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [editingBio, setEditingBio] = useState("");
+  const [editingStatusText, setEditingStatusText] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
 
   // Voice Chat state
   const [activeVoiceRoom, setActiveVoiceRoom] = useState<string | null>(null);
@@ -310,28 +356,157 @@ export default function ChatModal() {
     [cloudUser]
   );
 
+  const openUserProfile = useCallback(
+    async (targetUsername: string) => {
+      const clean = targetUsername.trim().replace(/^@/, "");
+      if (!clean) return;
+      setViewingProfileUsername(clean);
+      setProfileLoading(true);
+      try {
+        const res = await fetch(
+          `/api/chat/user-profile?username=${encodeURIComponent(clean)}`
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.exists === false) {
+            notifyToast(
+              data.error || `user "@${clean}" does not exist in cloudsync`,
+              "error"
+            );
+            setViewingProfileUsername(null);
+            setProfileData(null);
+            return;
+          }
+          if (data?.profile) {
+            setProfileData(data.profile);
+            if (cloudUser && clean.toLowerCase() === cloudUser.toLowerCase()) {
+              setEditingBio(data.profile.bio || "");
+              setEditingStatusText(data.profile.statusText || "");
+            }
+          }
+        }
+      } catch {
+        // Fallback profile card if offline
+      } finally {
+        setProfileLoading(false);
+      }
+    },
+    [cloudUser]
+  );
+
+  const handleSaveMyProfile = useCallback(
+    async (e?: Event) => {
+      if (e) e.preventDefault();
+      if (!cloudUser || savingProfile) return;
+      setSavingProfile(true);
+      try {
+        const res = await fetch("/api/chat/user-profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: cloudUser,
+            bio: editingBio,
+            statusText: editingStatusText,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not update profile", "error");
+          return;
+        }
+        setProfileData((prev) =>
+          prev
+            ? {
+                ...prev,
+                bio: data.profile?.bio ?? editingBio,
+                statusText: data.profile?.statusText ?? editingStatusText,
+              }
+            : prev
+        );
+        notifyToast("profile updated!", "success");
+      } catch {
+        notifyToast("failed to save profile", "error");
+      } finally {
+        setSavingProfile(false);
+      }
+    },
+    [cloudUser, editingBio, editingStatusText, savingProfile]
+  );
+
   const openDirectMessage = useCallback(
-    (targetUsername: string) => {
-      const clean = targetUsername.trim();
+    async (targetUsername: string) => {
+      const clean = targetUsername.trim().replace(/^@/, "");
       if (!clean) return;
       if (cloudUser && clean.toLowerCase() === cloudUser.toLowerCase()) {
-        notifyToast("you cannot direct message yourself", "info");
+        openUserProfile(clean);
         return;
       }
+
       const peerLower = clean.toLowerCase();
+
+      // Verify target user exists in the CloudSync database before allowing DM
+      let canonicalTarget = clean;
+      if (registeredCloudSyncUsers.length > 0) {
+        const foundInRegistry = registeredCloudSyncUsers.find(
+          (u) => u.toLowerCase() === peerLower
+        );
+        if (!foundInRegistry) {
+          // Double-check live with server in case user just registered seconds ago
+          try {
+            const checkRes = await fetch(
+              `/api/chat/user-profile?username=${encodeURIComponent(clean)}`
+            );
+            const checkData = await checkRes.json().catch(() => null);
+            if (!checkData || checkData.exists === false) {
+              notifyToast(
+                `user "@${clean}" does not exist in cloudsync`,
+                "error"
+              );
+              return;
+            }
+            if (checkData.profile?.username) {
+              canonicalTarget = checkData.profile.username;
+            }
+          } catch {
+            notifyToast(`user "@${clean}" does not exist in cloudsync`, "error");
+            return;
+          }
+        } else {
+          canonicalTarget = foundInRegistry;
+        }
+      } else {
+        try {
+          const checkRes = await fetch(
+            `/api/chat/user-profile?username=${encodeURIComponent(clean)}`
+          );
+          const checkData = await checkRes.json().catch(() => null);
+          if (checkData && checkData.exists === false) {
+            notifyToast(
+              checkData.error || `user "@${clean}" does not exist in cloudsync`,
+              "error"
+            );
+            return;
+          }
+          if (checkData?.profile?.username) {
+            canonicalTarget = checkData.profile.username;
+          }
+        } catch {}
+      }
+
       setDmPeers((prev) => {
         if (prev.some((p) => p.toLowerCase() === peerLower)) return prev;
-        const next = [clean, ...prev];
+        const next = [canonicalTarget, ...prev];
         try {
           localStorage.setItem("cookie_chat_dm_peers_v1", JSON.stringify(next));
         } catch {}
         return next;
       });
-      const dmChannel = makeDmChannelId(cloudUser || "guest", clean);
+      const dmChannel = makeDmChannelId(cloudUser || "guest", canonicalTarget);
       setActiveChannel(dmChannel);
+      setViewingProfileUsername(null);
       setUnreadCounts((prev) => ({ ...prev, [dmChannel]: 0 }));
     },
-    [cloudUser]
+    [cloudUser, registeredCloudSyncUsers, openUserProfile]
   );
 
   // Sync audio element volumes and mute states when deafened / blocked / volume slider changes
@@ -940,6 +1115,27 @@ export default function ChatModal() {
           if (Array.isArray(data.offlineUsers)) {
             setServerOfflineUsers(data.offlineUsers);
           }
+          if (Array.isArray(data.registeredUsers)) {
+            setRegisteredCloudSyncUsers(data.registeredUsers);
+            if (data.registeredUsers.length > 0) {
+              const validSet = new Set(
+                data.registeredUsers.map((u: string) => u.toLowerCase())
+              );
+              setDmPeers((prev) => {
+                const filtered = prev.filter((p) => validSet.has(p.toLowerCase()));
+                if (filtered.length !== prev.length) {
+                  try {
+                    localStorage.setItem(
+                      "cookie_chat_dm_peers_v1",
+                      JSON.stringify(filtered)
+                    );
+                  } catch {}
+                  return filtered;
+                }
+                return prev;
+              });
+            }
+          }
         })
         .catch(() => {});
     };
@@ -973,6 +1169,9 @@ export default function ChatModal() {
       if (Array.isArray(detail.offlineUsers)) {
         setServerOfflineUsers(detail.offlineUsers);
       }
+      if (Array.isArray(detail.registeredUsers)) {
+        setRegisteredCloudSyncUsers(detail.registeredUsers);
+      }
     };
 
     document.addEventListener("toggleChatModal", handleToggle);
@@ -982,7 +1181,13 @@ export default function ChatModal() {
     window.addEventListener("sunshine-presence-event", onSsePresence);
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen) setIsOpen(false);
+      if (e.key === "Escape" && isOpen) {
+        if (viewingProfileUsername) {
+          setViewingProfileUsername(null);
+        } else {
+          setIsOpen(false);
+        }
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
 
@@ -1007,7 +1212,7 @@ export default function ChatModal() {
       window.removeEventListener("keydown", handleKeyDown);
       broadcastRef.current?.close();
     };
-  }, [isOpen, ingestIncomingMessage, handleVoiceEvent]);
+  }, [isOpen, viewingProfileUsername, ingestIncomingMessage, handleVoiceEvent]);
 
   // Scroll to bottom when messages change or channel changes
   useEffect(() => {
@@ -1027,11 +1232,19 @@ export default function ChatModal() {
     const text = inputText.trim();
     if (!text) return;
 
-    // Prevent sending DM to a user you have blocked
+    // Prevent sending DM to a user you have blocked or who does not exist in CloudSync
     if (activeChannel.startsWith("dm:")) {
       const partner = getDmPartnerName(activeChannel, cloudUser);
       if (isUserBlocked(partner)) {
         notifyToast(`unblock ${partner} before sending a direct message`, "error");
+        return;
+      }
+      if (
+        registeredCloudSyncUsers.length > 0 &&
+        !registeredCloudSyncUsers.some((u) => u.toLowerCase() === partner.toLowerCase())
+      ) {
+        notifyToast(`user "@${partner}" does not exist in cloudsync`, "error");
+        setActiveChannel("general");
         return;
       }
     }
@@ -1073,7 +1286,16 @@ export default function ChatModal() {
         body: JSON.stringify({
           message: newMsg,
         }),
-      }).catch(() => {});
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const errData = await res.json().catch(() => null);
+            if (errData?.error) {
+              notifyToast(errData.error, "error");
+            }
+          }
+        })
+        .catch(() => {});
     } finally {
       setIsSending(false);
     }
@@ -1106,6 +1328,9 @@ export default function ChatModal() {
   const onlineUsers = useMemo(() => {
     const map = new Map<string, OnlineUser>();
     if (cloudUser) {
+      const myServerRecord = serverOnlineUsers.find(
+        (u) => u.username.toLowerCase() === cloudUser.toLowerCase()
+      );
       map.set(cloudUser.toLowerCase(), {
         username: cloudUser,
         color: stringToColor(cloudUser),
@@ -1114,13 +1339,15 @@ export default function ChatModal() {
         game: myGameSession.game,
         isPlayingGame: myGameSession.isPlayingGame,
         gameStartedAt: myGameSession.gameStartedAt,
+        bio: myServerRecord?.bio || "",
+        statusText: myServerRecord?.statusText || "",
+        createdAt: myServerRecord?.createdAt || null,
       });
     }
     for (const su of serverOnlineUsers) {
       if (!su || !su.username) continue;
       const k = su.username.toLowerCase();
       if (cloudUser && k === cloudUser.toLowerCase()) {
-        // Keep local self entry authoritative for instant game tracking
         continue;
       }
       if (!map.has(k)) {
@@ -1131,26 +1358,37 @@ export default function ChatModal() {
           game: su.game || "browsing",
           isPlayingGame: Boolean(su.isPlayingGame),
           gameStartedAt: Number(su.gameStartedAt) || 0,
+          bio: su.bio || "",
+          statusText: su.statusText || "",
+          createdAt: su.createdAt || null,
         });
       }
     }
     return Array.from(map.values());
   }, [cloudUser, serverOnlineUsers, myGameSession]);
 
-  // Offline users: known users from serverOfflineUsers, DM peers, and message authors who are not currently online
+  // Offline users: registered CloudSync users who are not currently online
   const offlineUsers = useMemo(() => {
     const onlineKeys = new Set(onlineUsers.map((u) => u.username.toLowerCase()));
+    const validSet =
+      registeredCloudSyncUsers.length > 0
+        ? new Set(registeredCloudSyncUsers.map((u) => u.toLowerCase()))
+        : null;
     const map = new Map<string, OnlineUser>();
 
     for (const off of serverOfflineUsers) {
       if (!off || !off.username) continue;
       const k = off.username.toLowerCase();
+      if (validSet && !validSet.has(k)) continue;
       if (!onlineKeys.has(k) && !map.has(k)) {
         map.set(k, {
           username: off.username,
           color: off.color || stringToColor(off.username),
           status: "offline",
           lastSeen: off.lastSeen,
+          bio: off.bio || "",
+          statusText: off.statusText || "",
+          createdAt: off.createdAt || null,
         });
       }
     }
@@ -1159,6 +1397,7 @@ export default function ChatModal() {
       const clean = peer.trim();
       if (!clean) continue;
       const k = clean.toLowerCase();
+      if (validSet && !validSet.has(k)) continue;
       if (!onlineKeys.has(k) && !map.has(k)) {
         map.set(k, {
           username: clean,
@@ -1168,20 +1407,8 @@ export default function ChatModal() {
       }
     }
 
-    for (const msg of messages) {
-      if (!msg.author) continue;
-      const k = msg.author.toLowerCase();
-      if (!onlineKeys.has(k) && !map.has(k)) {
-        map.set(k, {
-          username: msg.author,
-          color: msg.avatarColor || stringToColor(msg.author),
-          status: "offline",
-        });
-      }
-    }
-
     return Array.from(map.values());
-  }, [onlineUsers, serverOfflineUsers, dmPeers, messages]);
+  }, [onlineUsers, serverOfflineUsers, dmPeers, registeredCloudSyncUsers]);
 
   // Active channel metadata
   const activeChannelDef = useMemo(() => {
@@ -1548,8 +1775,15 @@ export default function ChatModal() {
             </div>
           )}
 
-          {/* User profile footer */}
-          <div class="chat-sidebar-user">
+          {/* User profile footer (click to view your own profile) */}
+          <div
+            class="chat-sidebar-user"
+            style={cloudUser ? { cursor: "pointer" } : undefined}
+            title={cloudUser ? "Click to view & edit your profile" : undefined}
+            onClick={() => {
+              if (cloudUser) openUserProfile(cloudUser);
+            }}
+          >
             {cloudUser ? (
               <>
                 <div class="chat-user-avatar-wrap">
@@ -1587,6 +1821,18 @@ export default function ChatModal() {
                     </div>
                   )}
                 </div>
+                <button
+                  type="button"
+                  class="chat-user-mini-btn"
+                  title="View your profile"
+                  style={{ opacity: 0.85 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openUserProfile(cloudUser);
+                  }}
+                >
+                  <i class="fa-solid fa-id-card"></i>
+                </button>
               </>
             ) : (
               <button
@@ -1606,7 +1852,20 @@ export default function ChatModal() {
           {/* Header */}
           <div class="chat-main-header">
             <div class="chat-main-header-left">
-              <div class="chat-main-channel-name">
+              <div
+                class="chat-main-channel-name"
+                style={activeChannelDef.isDm ? { cursor: "pointer" } : undefined}
+                title={
+                  activeChannelDef.isDm
+                    ? `Click to view @${activeChannelDef.name}'s profile`
+                    : undefined
+                }
+                onClick={() => {
+                  if (activeChannelDef.isDm && currentDmPartner) {
+                    openUserProfile(currentDmPartner);
+                  }
+                }}
+              >
                 <i class={`fa-solid ${activeChannelDef.icon}`}></i>
                 <span>{activeChannelDef.name}</span>
               </div>
@@ -1614,9 +1873,18 @@ export default function ChatModal() {
             </div>
 
             <div class="chat-main-header-actions">
-              {/* DM Header Actions: Voice Call & Block/Unblock */}
+              {/* DM Header Actions: View Profile, Voice Call & Block/Unblock */}
               {activeChannelDef.isDm && currentDmPartner && (
                 <>
+                  <button
+                    type="button"
+                    class="chat-header-btn"
+                    title={`View @${currentDmPartner}'s profile`}
+                    onClick={() => openUserProfile(currentDmPartner)}
+                  >
+                    <i class="fa-solid fa-id-card"></i>
+                    <span>profile</span>
+                  </button>
                   <button
                     type="button"
                     class={`chat-header-btn ${
@@ -1771,11 +2039,17 @@ export default function ChatModal() {
                       >
                         <div
                           class="chat-voice-card-avatar"
-                          style={{ backgroundColor: p.avatarColor }}
+                          style={{ backgroundColor: p.avatarColor, cursor: "pointer" }}
+                          title={`View @${p.username}'s profile`}
+                          onClick={() => openUserProfile(p.username)}
                         >
                           {p.username.slice(0, 1).toLowerCase()}
                         </div>
-                        <div class="chat-voice-card-name">
+                        <div
+                          class="chat-voice-card-name"
+                          style={{ cursor: "pointer" }}
+                          onClick={() => openUserProfile(p.username)}
+                        >
                           <span>{p.username}</span>
                           {isMe && <span class="chat-you-pill">you</span>}
                         </div>
@@ -1849,10 +2123,8 @@ export default function ChatModal() {
                       style={{
                         backgroundColor: msg.avatarColor || stringToColor(msg.author),
                       }}
-                      title={isSelf ? msg.author : `Message @${msg.author}`}
-                      onClick={() => {
-                        if (!isSelf) openDirectMessage(msg.author);
-                      }}
+                      title={`View @${msg.author}'s profile`}
+                      onClick={() => openUserProfile(msg.author)}
                     >
                       {msg.author.slice(0, 1).toLowerCase()}
                     </div>
@@ -1860,9 +2132,8 @@ export default function ChatModal() {
                       <div class="chat-entry-header">
                         <span
                           class={`chat-entry-author ${isSelf ? "is-self" : ""}`}
-                          onClick={() => {
-                            if (!isSelf) openDirectMessage(msg.author);
-                          }}
+                          title={`View @${msg.author}'s profile`}
+                          onClick={() => openUserProfile(msg.author)}
                         >
                           {msg.author}
                         </span>
@@ -1872,40 +2143,50 @@ export default function ChatModal() {
                     </div>
 
                     {/* Hover actions on each message */}
-                    {!isSelf && (
-                      <div class="chat-entry-actions">
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn"
-                          title={`Reply to @${msg.author}`}
-                          onClick={() =>
-                            setInputText((prev) =>
-                              prev.includes(`@${msg.author}`)
-                                ? prev
-                                : `@${msg.author} ${prev}`
-                            )
-                          }
-                        >
-                          <i class="fa-solid fa-reply"></i>
-                        </button>
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn"
-                          title={`Direct message @${msg.author}`}
-                          onClick={() => openDirectMessage(msg.author)}
-                        >
-                          <i class="fa-solid fa-paper-plane"></i>
-                        </button>
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn danger"
-                          title={`Block @${msg.author}`}
-                          onClick={() => toggleBlockUser(msg.author)}
-                        >
-                          <i class="fa-solid fa-ban"></i>
-                        </button>
-                      </div>
-                    )}
+                    <div class="chat-entry-actions">
+                      <button
+                        type="button"
+                        class="chat-entry-action-btn"
+                        title={`View @${msg.author}'s profile`}
+                        onClick={() => openUserProfile(msg.author)}
+                      >
+                        <i class="fa-solid fa-id-card"></i>
+                      </button>
+                      {!isSelf && (
+                        <>
+                          <button
+                            type="button"
+                            class="chat-entry-action-btn"
+                            title={`Reply to @${msg.author}`}
+                            onClick={() =>
+                              setInputText((prev) =>
+                                prev.includes(`@${msg.author}`)
+                                  ? prev
+                                  : `@${msg.author} ${prev}`
+                              )
+                            }
+                          >
+                            <i class="fa-solid fa-reply"></i>
+                          </button>
+                          <button
+                            type="button"
+                            class="chat-entry-action-btn"
+                            title={`Direct message @${msg.author}`}
+                            onClick={() => openDirectMessage(msg.author)}
+                          >
+                            <i class="fa-solid fa-paper-plane"></i>
+                          </button>
+                          <button
+                            type="button"
+                            class="chat-entry-action-btn danger"
+                            title={`Block @${msg.author}`}
+                            onClick={() => toggleBlockUser(msg.author)}
+                          >
+                            <i class="fa-solid fa-ban"></i>
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 );
               })
@@ -1996,9 +2277,8 @@ export default function ChatModal() {
                   <div key={`online_${u.username}`} class="chat-user-item">
                     <div
                       class="chat-user-avatar-wrap"
-                      onClick={() => {
-                        if (!u.isSelf) openDirectMessage(u.username);
-                      }}
+                      title={`View @${u.username}'s profile`}
+                      onClick={() => openUserProfile(u.username)}
                     >
                       <div
                         class="chat-user-avatar"
@@ -2013,9 +2293,8 @@ export default function ChatModal() {
                     </div>
                     <div
                       class="chat-user-meta"
-                      onClick={() => {
-                        if (!u.isSelf) openDirectMessage(u.username);
-                      }}
+                      title={`View @${u.username}'s profile`}
+                      onClick={() => openUserProfile(u.username)}
                     >
                       <div class="chat-user-name-row">
                         <span
@@ -2038,30 +2317,42 @@ export default function ChatModal() {
                           </span>
                         </div>
                       ) : (
-                        <div class="chat-user-status-sub">online</div>
+                        <div class="chat-user-status-sub">
+                          {u.statusText ? u.statusText : "online"}
+                        </div>
                       )}
                     </div>
 
-                    {!u.isSelf && (
-                      <div class="chat-user-actions">
-                        <button
-                          type="button"
-                          class="chat-user-mini-btn"
-                          title={`Direct message ${u.username}`}
-                          onClick={() => openDirectMessage(u.username)}
-                        >
-                          <i class="fa-solid fa-comment-dots"></i>
-                        </button>
-                        <button
-                          type="button"
-                          class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
-                          title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
-                          onClick={() => toggleBlockUser(u.username)}
-                        >
-                          <i class="fa-solid fa-ban"></i>
-                        </button>
-                      </div>
-                    )}
+                    <div class="chat-user-actions">
+                      <button
+                        type="button"
+                        class="chat-user-mini-btn"
+                        title={u.isSelf ? "View your profile" : `View @${u.username}'s profile`}
+                        onClick={() => openUserProfile(u.username)}
+                      >
+                        <i class="fa-solid fa-id-card"></i>
+                      </button>
+                      {!u.isSelf && (
+                        <>
+                          <button
+                            type="button"
+                            class="chat-user-mini-btn"
+                            title={`Direct message ${u.username}`}
+                            onClick={() => openDirectMessage(u.username)}
+                          >
+                            <i class="fa-solid fa-comment-dots"></i>
+                          </button>
+                          <button
+                            type="button"
+                            class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
+                            title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
+                            onClick={() => toggleBlockUser(u.username)}
+                          >
+                            <i class="fa-solid fa-ban"></i>
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 );
               })
@@ -2090,7 +2381,8 @@ export default function ChatModal() {
                     <div key={`offline_${u.username}`} class="chat-user-item offline">
                       <div
                         class="chat-user-avatar-wrap"
-                        onClick={() => openDirectMessage(u.username)}
+                        title={`View @${u.username}'s profile`}
+                        onClick={() => openUserProfile(u.username)}
                       >
                         <div
                           class="chat-user-avatar"
@@ -2105,7 +2397,8 @@ export default function ChatModal() {
                       </div>
                       <div
                         class="chat-user-meta"
-                        onClick={() => openDirectMessage(u.username)}
+                        title={`View @${u.username}'s profile`}
+                        onClick={() => openUserProfile(u.username)}
                       >
                         <div class="chat-user-name-row">
                           <span
@@ -2118,10 +2411,20 @@ export default function ChatModal() {
                             {u.username}
                           </span>
                         </div>
-                        <div class="chat-user-status-sub offline">offline</div>
+                        <div class="chat-user-status-sub offline">
+                          {u.statusText ? u.statusText : "offline"}
+                        </div>
                       </div>
 
                       <div class="chat-user-actions">
+                        <button
+                          type="button"
+                          class="chat-user-mini-btn"
+                          title={`View @${u.username}'s profile`}
+                          onClick={() => openUserProfile(u.username)}
+                        >
+                          <i class="fa-solid fa-id-card"></i>
+                        </button>
                         <button
                           type="button"
                           class="chat-user-mini-btn"
@@ -2183,6 +2486,257 @@ export default function ChatModal() {
             )}
           </div>
         </div>
+
+        {/* ── USER PROFILE OVERLAY MODAL (View Own Profile or Any User's Profile) ── */}
+        {viewingProfileUsername && (
+          <div
+            class="chat-profile-modal-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setViewingProfileUsername(null);
+            }}
+          >
+            {(() => {
+              const targetName = profileData?.username || viewingProfileUsername;
+              const isViewingSelf = Boolean(
+                cloudUser && targetName.toLowerCase() === cloudUser.toLowerCase()
+              );
+              const onlineMatch = onlineUsers.find(
+                (u) => u.username.toLowerCase() === targetName.toLowerCase()
+              );
+              const isOnlineNow = isViewingSelf || Boolean(onlineMatch || profileData?.online);
+              const activeGameName = isViewingSelf
+                ? myGameSession.isPlayingGame
+                  ? myGameSession.game
+                  : ""
+                : onlineMatch?.isPlayingGame
+                ? onlineMatch.game || ""
+                : profileData?.isPlayingGame
+                ? profileData.game
+                : "";
+              const activeGameStart = isViewingSelf
+                ? myGameSession.gameStartedAt
+                : onlineMatch?.gameStartedAt || profileData?.gameStartedAt || 0;
+              const avatarCol = stringToColor(targetName);
+              const blocked = isUserBlocked(targetName);
+
+              return (
+                <div class="chat-profile-card">
+                  <div
+                    class="chat-profile-banner"
+                    style={{
+                      background: `linear-gradient(135deg, ${avatarCol}, #18181b)`,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      class="chat-profile-close-btn"
+                      title="Close profile"
+                      onClick={() => setViewingProfileUsername(null)}
+                    >
+                      <i class="fa-solid fa-xmark"></i>
+                    </button>
+                  </div>
+
+                  <div class="chat-profile-body">
+                    <div class="chat-profile-top-row">
+                      <div class="chat-profile-avatar-lg" style={{ backgroundColor: avatarCol }}>
+                        {targetName.slice(0, 1).toLowerCase()}
+                        <span
+                          class={`chat-profile-status-dot ${isOnlineNow ? "online" : "offline"}`}
+                        ></span>
+                      </div>
+
+                      <div class="chat-profile-badges">
+                        {(profileData?.cloudSyncVerified ?? true) && (
+                          <span class="chat-profile-badge verified">
+                            <i class="fa-solid fa-cloud"></i> cloudsync verified
+                          </span>
+                        )}
+                        {isViewingSelf && (
+                          <span class="chat-profile-badge self">you</span>
+                        )}
+                        <span
+                          class={`chat-profile-badge ${isOnlineNow ? "online" : "offline"}`}
+                        >
+                          {isOnlineNow ? "● online" : "○ offline"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div class="chat-profile-identity">
+                      <h3 class="chat-profile-username">@{targetName}</h3>
+                      {profileData?.statusText && !isViewingSelf && (
+                        <div class="chat-profile-custom-status">{profileData.statusText}</div>
+                      )}
+                      {profileData?.createdAt && (
+                        <div class="chat-profile-joined">
+                          <i class="fa-regular fa-calendar"></i> member since{" "}
+                          {new Date(profileData.createdAt).toLocaleDateString()}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Live Game Activity Section */}
+                    {activeGameName && activeGameName !== "browsing" && (
+                      <div class="chat-profile-activity-box">
+                        <div class="chat-profile-activity-label">
+                          <i class="fa-solid fa-gamepad"></i> currently playing
+                        </div>
+                        <div class="chat-profile-activity-main">
+                          <span class="chat-profile-activity-game">{activeGameName}</span>
+                          <span class="chat-profile-activity-time">
+                            {formatElapsedDuration(activeGameStart, nowMs)} elapsed
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Bio / About Section (Editable for Own Profile) */}
+                    {isViewingSelf ? (
+                      <form class="chat-profile-edit-form" onSubmit={handleSaveMyProfile}>
+                        <div class="chat-profile-section-title">your status & bio</div>
+                        <input
+                          type="text"
+                          class="chat-mod-input"
+                          placeholder="custom status (e.g. grinding slope)..."
+                          maxLength={60}
+                          value={editingStatusText}
+                          onInput={(e) =>
+                            setEditingStatusText((e.target as HTMLInputElement).value)
+                          }
+                        />
+                        <textarea
+                          class="chat-mod-input chat-profile-bio-textarea"
+                          placeholder="write a short bio for your profile..."
+                          maxLength={220}
+                          rows={2}
+                          value={editingBio}
+                          onInput={(e) =>
+                            setEditingBio((e.target as HTMLTextAreaElement).value)
+                          }
+                        />
+                        <button
+                          type="submit"
+                          class="chat-auth-login-btn"
+                          disabled={savingProfile}
+                          style={{ alignSelf: "flex-end", padding: "6px 14px" }}
+                        >
+                          {savingProfile ? "saving..." : "save profile"}
+                        </button>
+                      </form>
+                    ) : (
+                      <div class="chat-profile-section">
+                        <div class="chat-profile-section-title">about me</div>
+                        <div class="chat-profile-bio-text">
+                          {profileData?.bio || "no bio set yet."}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Game & Leaderboard Stats */}
+                    <div class="chat-profile-section">
+                      <div class="chat-profile-section-title">game & studio stats</div>
+                      {profileLoading && !profileData ? (
+                        <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                          loading profile stats...
+                        </div>
+                      ) : (
+                        <>
+                          <div class="chat-profile-stats-grid">
+                            <div class="chat-profile-stat-pill">
+                              <span class="chat-profile-stat-val">
+                                {formatPlayTime(profileData?.stats?.totalSeconds || 0)}
+                              </span>
+                              <span class="chat-profile-stat-lbl">total time played</span>
+                            </div>
+                            <div class="chat-profile-stat-pill">
+                              <span class="chat-profile-stat-val">
+                                {profileData?.stats?.totalPlays || 0}
+                              </span>
+                              <span class="chat-profile-stat-lbl">total game sessions</span>
+                            </div>
+                            <div class="chat-profile-stat-pill">
+                              <span class="chat-profile-stat-val">
+                                {profileData?.publishedGamesCount || 0}
+                              </span>
+                              <span class="chat-profile-stat-lbl">published games</span>
+                            </div>
+                          </div>
+
+                          {profileData?.studio && (
+                            <div class="chat-profile-studio-row">
+                              <i
+                                class={`fa-solid ${profileData.studio.icon || "fa-rocket"}`}
+                                style={{ color: profileData.studio.color || "#60a5fa" }}
+                              ></i>
+                              <div>
+                                <div style={{ fontWeight: 600, fontSize: "12px" }}>
+                                  {profileData.studio.name}
+                                </div>
+                                <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                                  {profileData.studio.tagline}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {profileData?.stats?.topGames &&
+                            profileData.stats.topGames.length > 0 && (
+                              <div class="chat-profile-top-games">
+                                {profileData.stats.topGames.slice(0, 3).map((g) => (
+                                  <div key={g.game} class="chat-profile-top-game-row">
+                                    <span class="chat-profile-top-game-name">{g.game}</span>
+                                    <span class="chat-profile-top-game-time">
+                                      {formatPlayTime(g.seconds)}
+                                      {g.highScore > 0 ? ` · score ${g.highScore}` : ""}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                        </>
+                      )}
+                    </div>
+
+                    {/* Actions for other users */}
+                    {!isViewingSelf && (
+                      <div class="chat-profile-actions-row">
+                        <button
+                          type="button"
+                          class="chat-auth-login-btn"
+                          style={{ flex: 1 }}
+                          onClick={() => openDirectMessage(targetName)}
+                        >
+                          <i class="fa-solid fa-paper-plane"></i> direct message
+                        </button>
+                        <button
+                          type="button"
+                          class="chat-header-btn voice-active"
+                          onClick={() => {
+                            const dmChan = makeDmChannelId(cloudUser || "guest", targetName);
+                            setActiveChannel(dmChan);
+                            setViewingProfileUsername(null);
+                            joinVoiceRoom(`voice:${dmChan}`);
+                          }}
+                        >
+                          <i class="fa-solid fa-phone-volume"></i> call
+                        </button>
+                        <button
+                          type="button"
+                          class={`chat-header-btn ${blocked ? "danger" : ""}`}
+                          onClick={() => toggleBlockUser(targetName)}
+                        >
+                          <i class="fa-solid fa-ban"></i>{" "}
+                          {blocked ? "unblock" : "block"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
       </div>
     </div>
   );

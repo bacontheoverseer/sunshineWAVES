@@ -346,11 +346,6 @@ export default function ShopPage() {
       actionData = { ...actionData, text: cleanTts };
     }
 
-    if (!spendCookieCoins(item.cost)) {
-      notifyToast("insufficient cookie coins", "error");
-      return;
-    }
-
     setSendingId(item.id);
     const trollEventId = `troll_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     actionData = { ...actionData, trollEventId };
@@ -361,6 +356,39 @@ export default function ShopPage() {
       const isSelf =
         targetLower === meUser ||
         targetLower.replace(/[-_]/g, "") === meUser.replace(/[-_]/g, "");
+
+      // Send over backend SSE to target user first so we can verify target exists / is online
+      let resData: { success?: boolean; delivered?: number; userExists?: boolean; error?: string } | null = null;
+      try {
+        const res = await fetch("/api/shop/troll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            trollEventId,
+            targetUsername: targetUser,
+            action: item.action,
+            data: actionData,
+            sender: getActiveUser(),
+          }),
+        });
+        resData = await res.json();
+      } catch {}
+
+      if (!isSelf && resData) {
+        if (resData.userExists === false) {
+          notifyToast(`user "@${targetUser}" does not exist in cloudsync`, "error");
+          return;
+        }
+        if ((resData.delivered || 0) === 0) {
+          notifyToast(`@${targetUser} is currently offline — trolls can only hit online players`, "error");
+          return;
+        }
+      }
+
+      if (!spendCookieCoins(item.cost)) {
+        notifyToast("insufficient cookie coins", "error");
+        return;
+      }
 
       if (isSelf) {
         executeTrollAction(item.action, actionData, trollEventId);
@@ -377,19 +405,6 @@ export default function ShopPage() {
           sender: getActiveUser(),
         });
       } catch {}
-
-      // Send over backend SSE to target user
-      await fetch("/api/shop/troll", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          trollEventId,
-          targetUsername: targetUser,
-          action: item.action,
-          data: actionData,
-          sender: getActiveUser(),
-        }),
-      }).catch(() => {});
 
       notifyToast(
         `sent 1x "${item.name}" to @${targetUser} (-${item.cost} cookie coins)`,

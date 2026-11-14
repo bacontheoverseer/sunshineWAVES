@@ -3,6 +3,7 @@ dotenv.config();
 import fs from "fs";
 import path from "path";
 import { createServer, request } from "http";
+import { Database } from "bun:sqlite";
 import express from "express";
 import compression from "compression";
 import helmet from "helmet";
@@ -533,20 +534,79 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "bacon";
 
 const liveClients = new Map();
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
+const userProfiles = new Map(); // usernameLower -> { bio, statusText, updatedAt }
+
+function isTemporaryGuestName(name) {
+  if (!name) return true;
+  const lower = String(name).trim().toLowerCase();
+  if (!lower || lower === "guest") return true;
+  return /^guest[-_][a-z0-9]+$/i.test(lower);
+}
+
+function getCloudSyncUsersMap() {
+  const map = new Map();
+  const candidates = [
+    process.env.CLOUDSYNC_DB_PATH,
+    path.join(__dirname, "cloudsync", ".db"),
+    path.join(__dirname, ".db"),
+  ].filter(Boolean);
+
+  for (const dbFile of candidates) {
+    try {
+      if (!fs.existsSync(dbFile)) continue;
+      const db = new Database(dbFile, { readonly: true });
+      try {
+        const rows = db
+          .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
+          .all();
+        for (const r of rows) {
+          if (r && r.username) {
+            const clean = String(r.username).trim();
+            map.set(clean.toLowerCase(), {
+              id: Number(r.id),
+              username: clean,
+              createdAt: r.created_at || null,
+            });
+          }
+        }
+      } finally {
+        db.close();
+      }
+      if (map.size > 0) break;
+    } catch {
+      // ignore if DB not initialized yet
+    }
+  }
+  return map;
+}
+
+function getCloudSyncUser(username) {
+  if (!username) return null;
+  const clean = String(username).trim().toLowerCase();
+  if (!clean) return null;
+  const csMap = getCloudSyncUsersMap();
+  return csMap.get(clean) || null;
+}
 
 function touchKnownUser(username, extra = {}) {
   if (!username) return;
   const clean = String(username).trim();
   if (!clean) return;
   const key = clean.toLowerCase();
+  const csMap = getCloudSyncUsersMap();
+  if (isTemporaryGuestName(clean) && !csMap.has(key)) return;
+  if (csMap.size > 0 && !csMap.has(key)) return;
+
+  const csRecord = csMap.get(key);
+  const canonicalName = csRecord ? csRecord.username : clean;
   const prev = knownUsers.get(key) || {
-    username: clean,
+    username: canonicalName,
     lastSeen: Date.now(),
     game: "browsing",
     isPlayingGame: false,
     gameStartedAt: 0,
   };
-  prev.username = clean;
+  prev.username = canonicalName;
   prev.lastSeen = Date.now();
   if (typeof extra.game === "string") prev.game = extra.game;
   if (typeof extra.isPlayingGame === "boolean") prev.isPlayingGame = extra.isPlayingGame;
@@ -555,23 +615,58 @@ function touchKnownUser(username, extra = {}) {
 }
 
 function getPresenceSnapshot() {
+  const csMap = getCloudSyncUsersMap();
+  const now = Date.now();
+
+  // Remove any non-CloudSync or temporary guest entries from knownUsers
+  for (const [k] of knownUsers.entries()) {
+    if ((csMap.size > 0 && !csMap.has(k)) || (isTemporaryGuestName(k) && !csMap.has(k))) {
+      knownUsers.delete(k);
+    }
+  }
+
+  // Ensure every registered CloudSync user is in knownUsers
+  for (const [k, csUser] of csMap.entries()) {
+    if (!knownUsers.has(k)) {
+      knownUsers.set(k, {
+        username: csUser.username,
+        lastSeen: 0,
+        game: "browsing",
+        isPlayingGame: false,
+        gameStartedAt: 0,
+      });
+    } else {
+      knownUsers.get(k).username = csUser.username;
+    }
+  }
+
   const onlineByUsername = new Map();
   for (const c of liveClients.values()) {
+    if (now - (c.lastSeen || 0) > 25000) continue;
     const clean = String(c.username || "").trim();
     if (!clean) continue;
     const key = clean.toLowerCase();
+    if (isTemporaryGuestName(clean) && !csMap.has(key)) continue;
+    if (csMap.size > 0 && !csMap.has(key)) continue;
+
+    const csRecord = csMap.get(key);
+    const canonicalName = csRecord ? csRecord.username : clean;
+    const prof = userProfiles.get(key) || {};
     const existing = onlineByUsername.get(key);
     // Prefer the session that is actively playing a game or most recently seen
     if (!existing || (c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen) {
       onlineByUsername.set(key, {
         id: c.id,
-        username: clean,
+        username: canonicalName,
         online: true,
         page: c.page || "/",
         game: c.game || "browsing",
         isPlayingGame: Boolean(c.isPlayingGame),
         gameStartedAt: Number(c.gameStartedAt) || 0,
         lastSeen: c.lastSeen,
+        bio: prof.bio || "",
+        statusText: prof.statusText || "",
+        createdAt: csRecord?.createdAt || null,
       });
     }
   }
@@ -580,17 +675,24 @@ function getPresenceSnapshot() {
   const offlineUsers = [];
   for (const [key, u] of knownUsers.entries()) {
     if (!onlineByUsername.has(key)) {
+      const csRecord = csMap.get(key);
+      const prof = userProfiles.get(key) || {};
       offlineUsers.push({
-        username: u.username,
+        username: csRecord ? csRecord.username : u.username,
         online: false,
         game: "",
         isPlayingGame: false,
         gameStartedAt: 0,
-        lastSeen: u.lastSeen,
+        lastSeen: u.lastSeen || 0,
+        bio: prof.bio || "",
+        statusText: prof.statusText || "",
+        createdAt: csRecord?.createdAt || null,
       });
     }
   }
-  return { onlineUsers, offlineUsers };
+
+  const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
+  return { onlineUsers, offlineUsers, registeredUsers };
 }
 
 function verifyAdmin(req, res, next) {
@@ -1040,7 +1142,137 @@ app.get("/api/chat/state", (req, res) => {
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
     offlineUsers: presence.offlineUsers,
+    registeredUsers: presence.registeredUsers,
   });
+});
+
+app.get("/api/chat/user-profile", (req, res) => {
+  const rawTarget = (req.query.username || req.query.user || "").toString().trim();
+  if (!rawTarget) {
+    return res.status(400).json({ success: false, exists: false, error: "username is required" });
+  }
+
+  const csMap = getCloudSyncUsersMap();
+  const key = rawTarget.toLowerCase();
+  const csUser = csMap.get(key) || null;
+
+  // Cross-check against CloudSync database
+  if (csMap.size > 0 && !csUser) {
+    return res.json({
+      success: true,
+      exists: false,
+      error: `user "@${rawTarget}" does not exist in cloudsync`,
+    });
+  }
+  if (!csUser && isTemporaryGuestName(rawTarget)) {
+    return res.json({
+      success: true,
+      exists: false,
+      error: `user "@${rawTarget}" is not a registered cloudsync user`,
+    });
+  }
+
+  const canonicalName = csUser ? csUser.username : rawTarget;
+  const presence = getPresenceSnapshot();
+  const onlineEntry = presence.onlineUsers.find((u) => u.username.toLowerCase() === key);
+  const offlineEntry = presence.offlineUsers.find((u) => u.username.toLowerCase() === key);
+  const prof = userProfiles.get(key) || {};
+
+  // Gather per-game leaderboard stats for this user
+  let totalSeconds = 0;
+  let totalPlays = 0;
+  const topGames = [];
+  for (const [gameKey, board] of gameLeaderboards.entries()) {
+    const entry = board.get(key);
+    if (entry && (entry.seconds > 0 || entry.plays > 0)) {
+      totalSeconds += Number(entry.seconds) || 0;
+      totalPlays += Number(entry.plays) || 0;
+      topGames.push({
+        game: gameKey,
+        seconds: Number(entry.seconds) || 0,
+        plays: Number(entry.plays) || 0,
+        highScore: Number(entry.highScore) || 0,
+        lastPlayed: entry.lastPlayed,
+      });
+    }
+  }
+  topGames.sort((a, b) => b.seconds - a.seconds || b.plays - a.plays);
+
+  const userStudio =
+    customStudios.find((s) => (s.owner || "").toLowerCase() === key) || null;
+  const userPublishedGames = publishedStudioGames.filter(
+    (g) => (g.author || "").toLowerCase() === key
+  );
+
+  res.json({
+    success: true,
+    exists: true,
+    profile: {
+      id: csUser ? csUser.id : null,
+      username: canonicalName,
+      createdAt: csUser ? csUser.createdAt : null,
+      cloudSyncVerified: Boolean(csUser),
+      bio: prof.bio || "",
+      statusText: prof.statusText || "",
+      online: Boolean(onlineEntry),
+      game: onlineEntry ? onlineEntry.game || "browsing" : "",
+      isPlayingGame: Boolean(onlineEntry?.isPlayingGame),
+      gameStartedAt: Number(onlineEntry?.gameStartedAt) || 0,
+      lastSeen: onlineEntry?.lastSeen || offlineEntry?.lastSeen || 0,
+      stats: {
+        totalSeconds,
+        totalPlays,
+        gamesPlayedCount: topGames.length,
+        topGames: topGames.slice(0, 6),
+      },
+      studio: userStudio
+        ? {
+            name: userStudio.name,
+            tagline: userStudio.tagline,
+            color: userStudio.color,
+            icon: userStudio.icon,
+          }
+        : null,
+      publishedGamesCount: userPublishedGames.length,
+    },
+  });
+});
+
+app.post("/api/chat/user-profile", async (req, res) => {
+  try {
+    const { username, bio, statusText } = req.body || {};
+    const cleanUser = (username || "").toString().trim();
+    if (!cleanUser) {
+      return res.status(400).json({ success: false, error: "Missing username" });
+    }
+    const csMap = getCloudSyncUsersMap();
+    const key = cleanUser.toLowerCase();
+    if (csMap.size > 0 && !csMap.has(key)) {
+      return res.status(404).json({ success: false, error: "User not found in CloudSync" });
+    }
+
+    const cleanBio = (bio || "").toString().trim().slice(0, 220);
+    const cleanStatus = (statusText || "").toString().trim().slice(0, 60);
+
+    const modCheck = await moderateTextWithOpenAI(`${cleanStatus} ${cleanBio}`);
+    if (modCheck.blocked || modCheck.flagged) {
+      return res.status(400).json({
+        success: false,
+        error: modCheck.reason || "Profile bio/status blocked by moderation",
+      });
+    }
+
+    const updated = {
+      bio: cleanBio,
+      statusText: cleanStatus,
+      updatedAt: new Date().toISOString(),
+    };
+    userProfiles.set(key, updated);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    res.json({ success: true, profile: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.post("/api/chat/send", async (req, res) => {
@@ -1048,6 +1280,23 @@ app.post("/api/chat/send", async (req, res) => {
     const { message } = req.body || {};
     if (!message || !message.text || !message.author || !message.channel) {
       return res.status(400).json({ success: false, error: "Invalid message" });
+    }
+
+    // Validate DM recipients against the CloudSync database
+    if (message.channel.startsWith("dm:")) {
+      const csMap = getCloudSyncUsersMap();
+      if (csMap.size > 0) {
+        const parts = message.channel.slice(3).split(":");
+        for (const p of parts) {
+          const cleanPart = (p || "").trim().toLowerCase();
+          if (!cleanPart || !csMap.has(cleanPart)) {
+            return res.status(404).json({
+              success: false,
+              error: `user "@${p}" does not exist in cloudsync`,
+            });
+          }
+        }
+      }
     }
 
     touchKnownUser(message.author);
@@ -1321,7 +1570,7 @@ app.post("/api/studio/progress", (req, res) => {
       const lb = gameLeaderboards.get(gKey);
       const lbEntry = lb.get(userKey) || {
         username: cleanUser,
-        seconds: 5,
+        seconds: 1,
         plays: 1,
         highScore: 0,
         lastPlayed: new Date().toISOString(),
@@ -1455,6 +1704,7 @@ app.post("/api/shop/troll", async (req, res) => {
     };
 
     const normTarget = (targetUsername || "").trim().toLowerCase().replace(/[-_]/g, "");
+    const cloudUser = targetUsername ? getCloudSyncUser(targetUsername) : null;
     let delivered = 0;
     for (const [id, client] of liveClients.entries()) {
       const matchId = targetClientId && id === targetClientId;
@@ -1468,7 +1718,11 @@ app.post("/api/shop/troll", async (req, res) => {
       }
     }
 
-    res.json({ success: true, delivered });
+    res.json({
+      success: true,
+      delivered,
+      userExists: Boolean(cloudUser) || delivered > 0,
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
