@@ -379,6 +379,7 @@ if (CACHING_ENABLED) {
     "/assets",
     cachedStatic(path.join(publicPath, "assets"), IMMUTABLE_CC),
   );
+  app.use("/custom-sounds", express.static(path.join(publicPath, "custom-sounds"), { maxAge: 0 }));
   app.use("/b", cachedStatic(path.join(publicPath, "b"), IMMUTABLE_CC));
   app.use(cachedStatic(srcPath, IMMUTABLE_CC, { noIndex: true }));
 } else {
@@ -395,6 +396,7 @@ if (CACHING_ENABLED) {
     "/assets",
     express.static(path.join(publicPath, "assets"), staticOpts),
   );
+  app.use("/custom-sounds", express.static(path.join(publicPath, "custom-sounds"), { maxAge: 0 }));
   app.use("/b", express.static(path.join(publicPath, "b"), staticOpts));
   app.use(express.static(srcPath, { ...staticOpts, index: false }));
 }
@@ -413,7 +415,7 @@ app.use(
 );
 
 app.use("/api/", apiLimiter);
-app.use("/api/", express.json({ limit: "2mb" }));
+app.use("/api/", express.json({ limit: "30mb" }));
 
 app.use((req, res, next) => {
   if (!CACHING_ENABLED || req.method !== "GET") return next();
@@ -657,6 +659,112 @@ app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
 
   const count = broadcastToClients(payload, target);
   res.json({ success: true, count, target, action });
+});
+
+app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
+  try {
+    const { name, filename, data } = req.body || {};
+    if (!data || !filename) {
+      return res.status(400).json({ success: false, error: "Missing sound file data" });
+    }
+
+    const soundDir = path.join(publicPath, "custom-sounds");
+    if (!fs.existsSync(soundDir)) {
+      fs.mkdirSync(soundDir, { recursive: true });
+    }
+
+    const ext = path.extname(filename).toLowerCase() || ".mp3";
+    const baseClean = path.basename(filename, ext).replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 32);
+    const safeFilename = `${Date.now()}_${baseClean}${ext}`;
+    const targetPath = path.join(soundDir, safeFilename);
+
+    const cleanBase64 = data.replace(/^data:[^;]+;base64,/, "");
+    const buffer = Buffer.from(cleanBase64, "base64");
+    fs.writeFileSync(targetPath, buffer);
+
+    const soundUrl = `/custom-sounds/${safeFilename}`;
+    res.json({
+      success: true,
+      url: soundUrl,
+      name: name || baseClean.replace(/_/g, " "),
+      filename: safeFilename,
+    });
+  } catch (err) {
+    console.error("Upload sound error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/admin/myinstants-search", verifyAdmin, async (req, res) => {
+  try {
+    const query = (req.query.query || "").toString().trim();
+    if (!query) {
+      return res.json({ success: true, results: [] });
+    }
+
+    const searchUrl = `https://www.myinstants.com/en/search/?name=${encodeURIComponent(query)}`;
+    const response = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+
+    if (!response.ok) {
+      return res.status(response.status).json({ success: false, error: "MyInstants returned " + response.status });
+    }
+
+    const html = await response.text();
+    const regex = /<button class="small-button" onclick="play\('([^']+)'[^>]*title="Play ([^"]+) sound"/g;
+    const results = [];
+    let match;
+    while ((match = regex.exec(html)) !== null && results.length < 30) {
+      const soundPath = match[1];
+      const soundName = match[2].trim();
+      const fullUrl = soundPath.startsWith("http") ? soundPath : `https://www.myinstants.com${soundPath}`;
+      results.push({
+        name: soundName,
+        url: fullUrl,
+        source: "myinstants",
+      });
+    }
+
+    res.json({ success: true, results });
+  } catch (err) {
+    console.error("MyInstants search error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
+  try {
+    const rawUrl = (req.body?.url || "").toString().trim();
+    if (!rawUrl) {
+      return res.status(400).json({ success: false, error: "Missing url" });
+    }
+
+    if (/\.(mp3|wav|ogg|m4a)(\?.*)?$/i.test(rawUrl)) {
+      return res.json({ success: true, url: rawUrl });
+    }
+
+    if (rawUrl.includes("myinstants.com/")) {
+      const pageRes = await fetch(rawUrl, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      const html = await pageRes.text();
+      const match = html.match(/onclick="play\('(\/media\/sounds\/[^']+)'/);
+      if (match) {
+        return res.json({
+          success: true,
+          url: `https://www.myinstants.com${match[1]}`,
+        });
+      }
+    }
+
+    res.json({ success: true, url: rawUrl });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 function getBuiltModuleEntryPath() {

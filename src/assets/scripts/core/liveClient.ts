@@ -456,9 +456,29 @@ export function playRickroll(): void {
   }
 }
 
-export function playSfxByName(name: string): void {
+export function playAudioUrl(url: string, volume = 1.0): void {
+  try {
+    unlockAudio();
+    const audio = new Audio(url);
+    audio.volume = Math.max(0, Math.min(1, volume));
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch((err) => {
+        console.warn("Audio element play error:", err);
+      });
+    }
+  } catch (err) {
+    console.warn("Failed to create audio for url:", url, err);
+  }
+}
+
+export function playSfxByName(nameOrUrl: string, volume = 1.0): void {
   unlockAudio();
-  switch (name) {
+  if (nameOrUrl.startsWith("http://") || nameOrUrl.startsWith("https://") || nameOrUrl.startsWith("/custom-sounds/") || nameOrUrl.startsWith("data:audio")) {
+    playAudioUrl(nameOrUrl, volume);
+    return;
+  }
+  switch (nameOrUrl) {
     case "vine-boom":
       playVineBoom();
       break;
@@ -843,7 +863,11 @@ export function initLiveClient(): void {
 
       if (msg.type === "admin-chaos") {
         if (msg.action === "sfx") {
-          playSfxByName(msg.data?.sound || "vine-boom");
+          if (msg.data?.url) {
+            playAudioUrl(msg.data.url, msg.data?.volume);
+          } else {
+            playSfxByName(msg.data?.sound || "vine-boom", msg.data?.volume);
+          }
         } else if (msg.action === "tts") {
           speakTts(msg.data?.text || "Hello from the Sunshine administrator", msg.data?.pitch, msg.data?.rate, msg.data?.volume);
         } else if (msg.action === "effect") {
