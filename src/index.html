@@ -158,7 +158,10 @@
             var rawMaster = localStorage.getItem("cookie_master_status_v1");
             if (rawMaster) {
               var master = JSON.parse(rawMaster);
-              if (master && master.active === true) return true;
+              if (master && master.active === true) {
+                var mExp = Number(master.expiresAt || 0);
+                if (!mExp || mExp > Date.now()) return true;
+              }
             }
             return false;
           } catch (_e) {

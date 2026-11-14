@@ -703,6 +703,7 @@ app.use(
 
 app.use("/api/", apiLimiter);
 app.use("/api/", express.json({ limit: "8mb" }));
+app.use("/api/", express.urlencoded({ extended: true, limit: "1mb" }));
 
 app.use((req, res, next) => {
   if (!CACHING_ENABLED || req.method !== "GET") return next();
@@ -3303,127 +3304,319 @@ app.post("/api/shop/troll", async (req, res) => {
   }
 });
 
-// --- Cookie Master ($5/mo Subscription) & Gumroad Checkout Integration ---
-const GUMROAD_PRODUCT_URL = (
-  process.env.GUMROAD_CHECKOUT_URL ||
-  process.env.GUMROAD_PRODUCT_URL ||
-  ""
+// --- Cookie Master ($5/mo Subscription) & Ko-fi Checkout / Webhook Integration ---
+const KOFI_USERNAME = (process.env.KOFI_USERNAME || "").trim().replace(/^@+/, "");
+const KOFI_CHECKOUT_URL = (
+  process.env.KOFI_CHECKOUT_URL ||
+  process.env.KOFI_PRODUCT_URL ||
+  (KOFI_USERNAME ? `https://ko-fi.com/${encodeURIComponent(KOFI_USERNAME)}/tiers` : "")
 ).trim();
-const GUMROAD_PRODUCT_ID = (process.env.GUMROAD_PRODUCT_ID || "").trim();
-const GUMROAD_PRODUCT_PERMALINK = (process.env.GUMROAD_PRODUCT_PERMALINK || "").trim();
+const KOFI_VERIFICATION_TOKEN = (process.env.KOFI_VERIFICATION_TOKEN || "").trim();
+const KOFI_TIER_NAME = (process.env.KOFI_TIER_NAME || "").trim();
+const KOFI_SUB_DURATION_MS = 33 * 24 * 60 * 60 * 1000; // 31 days + 2 day renewal grace
+const KOFI_SUBS_FILE = path.join(__dirname, "data", "kofi-subscriptions.json");
 
-function buildGumroadCheckoutUrl() {
-  const base =
-    GUMROAD_PRODUCT_URL ||
-    (GUMROAD_PRODUCT_PERMALINK
-      ? `https://gumroad.com/l/${encodeURIComponent(GUMROAD_PRODUCT_PERMALINK)}`
-      : "");
-  if (!base) return "";
+let kofiSubscriptionsCache = null;
+
+function loadKofiSubscriptions() {
+  if (Array.isArray(kofiSubscriptionsCache)) return kofiSubscriptionsCache;
   try {
-    const u = new URL(base);
-    if (!u.searchParams.has("wanted")) {
-      u.searchParams.set("wanted", "true");
+    if (fs.existsSync(KOFI_SUBS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(KOFI_SUBS_FILE, "utf-8"));
+      if (Array.isArray(parsed)) {
+        kofiSubscriptionsCache = parsed;
+        return kofiSubscriptionsCache;
+      }
     }
-    return u.toString();
-  } catch {
-    const sep = base.includes("?") ? "&" : "?";
-    return base.includes("wanted=") ? base : `${base}${sep}wanted=true`;
+  } catch (e) {
+    console.warn("Ko-fi subscriptions load warning:", e.message);
   }
+  kofiSubscriptionsCache = [];
+  return kofiSubscriptionsCache;
+}
+
+function saveKofiSubscriptions(list) {
+  kofiSubscriptionsCache = list;
+  try {
+    const dir = path.dirname(KOFI_SUBS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(KOFI_SUBS_FILE, JSON.stringify(list, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("Ko-fi subscriptions save warning:", e.message);
+  }
+}
+
+function extractPossibleUsername(text) {
+  const clean = String(text || "").trim();
+  if (!clean) return "";
+  const atMatch = clean.match(/@([a-zA-Z0-9_.-]{2,32})/);
+  if (atMatch?.[1]) return atMatch[1].toLowerCase();
+  const singleWord = clean.match(/^([a-zA-Z0-9_.-]{2,32})$/);
+  return singleWord?.[1] ? singleWord[1].toLowerCase() : "";
+}
+
+async function persistKofiSubscriptionRecord(record) {
+  const list = loadKofiSubscriptions();
+  const idx = list.findIndex(
+    (r) => String(r.transactionId || "").toLowerCase() === record.transactionId.toLowerCase(),
+  );
+  if (idx >= 0) {
+    list[idx] = { ...list[idx], ...record };
+  } else {
+    list.push(record);
+  }
+  saveKofiSubscriptions(list);
+
+  if (USE_SUPABASE_CLOUDSYNC) {
+    try {
+      await supabaseRest("kofi_subscriptions?on_conflict=transaction_id", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          transaction_id: record.transactionId,
+          email_lower: record.emailLower,
+          from_name_lower: record.fromNameLower,
+          message_username_lower: record.messageUsernameLower,
+          claimed_username_lower: record.claimedUsernameLower || "",
+          tier_name: record.tierName,
+          amount: Number(record.amount) || 5,
+          verified_at: new Date(record.verifiedAt).toISOString(),
+          expires_at: new Date(record.expiresAt).toISOString(),
+        }),
+      });
+    } catch {}
+  }
+}
+
+async function findActiveKofiSubscription({ query = "", username = "" }) {
+  const qLower = String(query || "").trim().toLowerCase();
+  const userLower = String(username || "").trim().toLowerCase();
+  const now = Date.now();
+
+  const matchesRecord = (r) => {
+    const exp = typeof r.expiresAt === "number" ? r.expiresAt : Date.parse(r.expires_at || "") || 0;
+    if (exp <= now) return false;
+    const tx = String(r.transactionId || r.transaction_id || "").toLowerCase();
+    const em = String(r.emailLower || r.email_lower || "").toLowerCase();
+    const msgUser = String(r.messageUsernameLower || r.message_username_lower || "").toLowerCase();
+    const fromUser = String(r.fromNameLower || r.from_name_lower || "").toLowerCase();
+    const claimedUser = String(r.claimedUsernameLower || r.claimed_username_lower || "").toLowerCase();
+
+    if (qLower && (tx === qLower || em === qLower)) return true;
+    if (
+      userLower &&
+      (claimedUser === userLower || msgUser === userLower || fromUser === userLower)
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  if (USE_SUPABASE_CLOUDSYNC && (qLower || userLower)) {
+    try {
+      const filters = [];
+      if (qLower) {
+        const enc = encodeURIComponent(qLower);
+        filters.push(`transaction_id.ilike.${enc}`, `email_lower.eq.${enc}`);
+      }
+      if (userLower) {
+        const encU = encodeURIComponent(userLower);
+        filters.push(
+          `claimed_username_lower.eq.${encU}`,
+          `message_username_lower.eq.${encU}`,
+          `from_name_lower.eq.${encU}`,
+        );
+      }
+      const { ok, json } = await supabaseRest(
+        `kofi_subscriptions?or=(${filters.join(",")})&order=expires_at.desc&limit=5`,
+      );
+      if (ok && Array.isArray(json)) {
+        const match = json.find(matchesRecord);
+        if (match) {
+          return {
+            transactionId: String(match.transaction_id),
+            emailLower: String(match.email_lower || ""),
+            fromNameLower: String(match.from_name_lower || ""),
+            messageUsernameLower: String(match.message_username_lower || ""),
+            claimedUsernameLower: String(match.claimed_username_lower || ""),
+            tierName: String(match.tier_name || "Cookie Master"),
+            amount: Number(match.amount) || 5,
+            verifiedAt: Date.parse(match.verified_at) || now,
+            expiresAt: Date.parse(match.expires_at) || now + KOFI_SUB_DURATION_MS,
+          };
+        }
+      }
+    } catch {}
+  }
+
+  const localMatches = loadKofiSubscriptions()
+    .filter(matchesRecord)
+    .sort((a, b) => (b.expiresAt || 0) - (a.expiresAt || 0));
+  return localMatches[0] || null;
 }
 
 app.get("/api/cookie-master/config", (_req, res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
-  const checkoutUrl = buildGumroadCheckoutUrl();
   res.json({
-    configured: Boolean(checkoutUrl),
-    checkoutUrl,
-    hasLicenseVerification: Boolean(GUMROAD_PRODUCT_ID || GUMROAD_PRODUCT_PERMALINK),
+    configured: Boolean(KOFI_CHECKOUT_URL),
+    checkoutUrl: KOFI_CHECKOUT_URL,
+    hasWebhookVerification: Boolean(KOFI_VERIFICATION_TOKEN),
     priceMonthly: 5,
     dailyCoins: 1000,
+    tierName: KOFI_TIER_NAME || "Cookie Master",
   });
+});
+
+async function handleKofiWebhook(req, res) {
+  try {
+    const rawData = req.body?.data;
+    const payload =
+      typeof rawData === "string"
+        ? JSON.parse(rawData)
+        : rawData && typeof rawData === "object"
+          ? rawData
+          : req.body;
+
+    if (!payload || typeof payload !== "object") {
+      return res.status(400).send("Invalid Ko-fi webhook payload");
+    }
+
+    if (!KOFI_VERIFICATION_TOKEN) {
+      return res.status(503).send("KOFI_VERIFICATION_TOKEN not configured");
+    }
+
+    if (payload.verification_token !== KOFI_VERIFICATION_TOKEN) {
+      return res.status(401).send("Unauthorized: Invalid Ko-fi verification token");
+    }
+
+    const type = String(payload.type || "");
+    const isSub = payload.is_subscription_payment === true || type === "Subscription";
+    const amountNum = Number(payload.amount || 0);
+    const tierName = String(payload.tier_name || "").trim();
+
+    if (!isSub || amountNum < 4.5) {
+      return res.status(200).send("Ignored non-subscription or lower-tier payment");
+    }
+
+    if (
+      KOFI_TIER_NAME &&
+      tierName &&
+      tierName.toLowerCase() !== KOFI_TIER_NAME.toLowerCase()
+    ) {
+      return res.status(200).send("Ignored different Ko-fi tier");
+    }
+
+    const transactionId = String(payload.kofi_transaction_id || payload.message_id || "").trim();
+    if (!transactionId) {
+      return res.status(400).send("Missing Ko-fi transaction id");
+    }
+
+    const emailLower = String(payload.email || "").trim().toLowerCase();
+    const fromNameLower = String(payload.from_name || "").trim().toLowerCase();
+    const messageUsernameLower = extractPossibleUsername(payload.message);
+    const now = Date.now();
+
+    await persistKofiSubscriptionRecord({
+      transactionId,
+      emailLower,
+      fromNameLower,
+      messageUsernameLower,
+      claimedUsernameLower: messageUsernameLower || "",
+      tierName: tierName || "Cookie Master",
+      amount: amountNum,
+      verifiedAt: now,
+      expiresAt: now + KOFI_SUB_DURATION_MS,
+    });
+
+    return res.status(200).send("Ko-fi Cookie Master subscription recorded");
+  } catch (err) {
+    console.error("Ko-fi webhook error:", err);
+    return res.status(500).send("Webhook processing error");
+  }
+}
+
+app.post("/api/kofi/webhook", handleKofiWebhook);
+app.post("/api/cookie-master/webhook", handleKofiWebhook);
+
+app.get("/api/cookie-master/status", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const tx = String(req.query?.tx || "").trim();
+    const match = await findActiveKofiSubscription({
+      query: tx,
+      username: authUser?.username || "",
+    });
+    if (!match) {
+      return res.json({ success: true, active: false });
+    }
+    return res.json({
+      success: true,
+      active: true,
+      transactionId: match.transactionId,
+      email: match.emailLower || "",
+      tierName: match.tierName || "Cookie Master",
+      expiresAt: match.expiresAt,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, active: false, error: err?.message });
+  }
 });
 
 app.post("/api/cookie-master/verify", async (req, res) => {
   try {
-    const licenseKey = String(req.body?.licenseKey || "").trim();
-    const incrementUses = req.body?.incrementUses !== false;
-    if (!licenseKey || licenseKey.length < 6 || licenseKey.length > 128) {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const query = String(req.body?.emailOrCode || req.body?.licenseKey || "").trim();
+    if (!query && !authUser?.username) {
       return res.status(400).json({
         success: false,
         active: false,
-        error: "Please enter a valid Gumroad license key.",
+        error: "Enter your Ko-fi email or transaction ID (or sign in to CloudSync).",
       });
     }
 
-    if (!GUMROAD_PRODUCT_ID && !GUMROAD_PRODUCT_PERMALINK) {
+    if (!KOFI_VERIFICATION_TOKEN) {
       return res.status(503).json({
         success: false,
         active: false,
-        error: "Server is missing GUMROAD_PRODUCT_ID (or GUMROAD_PRODUCT_PERMALINK).",
+        error: "Server is missing KOFI_VERIFICATION_TOKEN.",
       });
     }
 
-    const params = new URLSearchParams({
-      license_key: licenseKey,
-      increment_uses_count: incrementUses ? "true" : "false",
+    const match = await findActiveKofiSubscription({
+      query,
+      username: authUser?.username || "",
     });
-    if (GUMROAD_PRODUCT_ID) {
-      params.set("product_id", GUMROAD_PRODUCT_ID);
-    } else {
-      params.set("product_permalink", GUMROAD_PRODUCT_PERMALINK);
-    }
 
-    const gumroadRes = await fetch("https://api.gumroad.com/v2/licenses/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params.toString(),
-    });
-    const data = await gumroadRes.json().catch(() => null);
-
-    if (!data || !data.success || !data.purchase) {
-      return res.status(400).json({
+    if (!match) {
+      return res.status(404).json({
         success: false,
         active: false,
-        error: data?.message || "Invalid or unrecognized Gumroad license key.",
+        error:
+          "No active Ko-fi Cookie Master membership found yet. Make sure your monthly $5 membership finished and wait a moment for Ko-fi webhook confirmation.",
       });
     }
 
-    const p = data.purchase;
-    if (p.refunded || p.disputed || p.chargebacked) {
-      return res.status(403).json({
-        success: false,
-        active: false,
-        error: "This purchase has been refunded, disputed, or chargebacked.",
-      });
-    }
-    if (p.subscription_ended_at) {
-      return res.status(403).json({
-        success: false,
-        active: false,
-        error: "This Cookie Master subscription has ended.",
-      });
-    }
-    if (p.subscription_failed_at) {
-      return res.status(403).json({
-        success: false,
-        active: false,
-        error: "Your latest Cookie Master renewal payment failed on Gumroad.",
-      });
+    if (authUser?.username && match.transactionId) {
+      await persistKofiSubscriptionRecord({
+        ...match,
+        claimedUsernameLower: authUser.username.toLowerCase(),
+      }).catch(() => {});
     }
 
     return res.json({
       success: true,
       active: true,
-      email: typeof p.email === "string" ? p.email : "",
-      cancelledAt: p.subscription_cancelled_at || null,
-      createdAt: p.created_at || null,
-      uses: Number(data.uses || 1),
+      transactionId: match.transactionId,
+      email: match.emailLower || "",
+      tierName: match.tierName || "Cookie Master",
+      expiresAt: match.expiresAt,
     });
   } catch (err) {
     return res.status(500).json({
       success: false,
       active: false,
-      error: err?.message || "Failed to verify license key with Gumroad.",
+      error: err?.message || "Failed to verify Ko-fi membership.",
     });
   }
 });

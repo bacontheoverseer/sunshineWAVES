@@ -6,9 +6,11 @@ import {
   canClaimDailyMasterCoins,
   claimDailyMasterCoins,
   formatDurationCompact,
+  getActiveUser,
   getCookieCoins,
   getCookieMasterState,
   getNextDailyClaimRemainingMs,
+  isCookieMasterActive,
   setCookieMasterState,
   syncAdFreeDomClass,
 } from "../core/cookieCoins.ts";
@@ -16,17 +18,19 @@ import {
 interface MasterConfig {
   configured: boolean;
   checkoutUrl: string;
-  hasLicenseVerification: boolean;
+  hasWebhookVerification: boolean;
   priceMonthly: number;
   dailyCoins: number;
+  tierName: string;
 }
 
 const DEFAULT_CONFIG: MasterConfig = {
   configured: false,
   checkoutUrl: "",
-  hasLicenseVerification: false,
+  hasWebhookVerification: false,
   priceMonthly: 5,
   dailyCoins: COOKIE_MASTER_DAILY_COINS,
+  tierName: "Cookie Master",
 };
 
 const REVERIFY_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -38,28 +42,15 @@ function notifyToast(message: string, type: "success" | "error" | "info" = "info
   }
 }
 
-let gumroadScriptPromise: Promise<void> | null = null;
-function ensureGumroadOverlayScript(): Promise<void> {
-  if (typeof document === "undefined") return Promise.resolve();
-  if (document.getElementById("sunshine-gumroad-js")) {
-    return gumroadScriptPromise || Promise.resolve();
+function maskReference(ref: string): string {
+  const clean = ref.trim();
+  if (!clean) return "verified";
+  if (clean.includes("@")) {
+    const [user, dom] = clean.split("@");
+    return `${(user || "").slice(0, 2)}•••@${dom || ""}`;
   }
-  gumroadScriptPromise = new Promise((resolve) => {
-    const script = document.createElement("script");
-    script.id = "sunshine-gumroad-js";
-    script.src = "https://gumroad.com/js/gumroad.js";
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => resolve();
-    document.head.appendChild(script);
-  });
-  return gumroadScriptPromise;
-}
-
-function maskLicenseKey(key: string): string {
-  const clean = key.trim();
   if (clean.length <= 10) return clean;
-  return `${clean.slice(0, 4)}-${"•".repeat(6)}-${clean.slice(-4)}`;
+  return `${clean.slice(0, 4)}-${"•".repeat(5)}-${clean.slice(-4)}`;
 }
 
 export default function CookieMasterPage() {
@@ -71,7 +62,7 @@ export default function CookieMasterPage() {
   );
   const [config, setConfig] = useState<MasterConfig>(DEFAULT_CONFIG);
   const [configLoaded, setConfigLoaded] = useState(false);
-  const [licenseInput, setLicenseInput] = useState("");
+  const [lookupInput, setLookupInput] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [claiming, setClaiming] = useState(false);
   const [claimRemainingMs, setClaimRemainingMs] = useState<number>(() =>
@@ -79,7 +70,7 @@ export default function CookieMasterPage() {
   );
 
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reverifiedRef = useRef(false);
+  const autoCheckedRef = useRef(false);
 
   const refreshState = useCallback(() => {
     syncAdFreeDomClass();
@@ -175,7 +166,7 @@ export default function CookieMasterPage() {
     };
   }, [show, hide, toggle, refreshState]);
 
-  // Fetch Gumroad config when the Cookie Master page opens
+  // Fetch Ko-fi config when Cookie Master opens
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
@@ -183,18 +174,15 @@ export default function CookieMasterPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
-        const next: MasterConfig = {
+        setConfig({
           configured: Boolean(data.configured),
           checkoutUrl: typeof data.checkoutUrl === "string" ? data.checkoutUrl : "",
-          hasLicenseVerification: Boolean(data.hasLicenseVerification),
+          hasWebhookVerification: Boolean(data.hasWebhookVerification),
           priceMonthly: Number(data.priceMonthly) || 5,
           dailyCoins: Number(data.dailyCoins) || COOKIE_MASTER_DAILY_COINS,
-        };
-        setConfig(next);
+          tierName: typeof data.tierName === "string" ? data.tierName : "Cookie Master",
+        });
         setConfigLoaded(true);
-        if (next.configured && next.checkoutUrl) {
-          void ensureGumroadOverlayScript();
-        }
       })
       .catch(() => {
         if (!cancelled) setConfigLoaded(true);
@@ -205,7 +193,7 @@ export default function CookieMasterPage() {
     };
   }, [visible]);
 
-  // Escape closes page and refresh daily claim timer every 30s while open
+  // Escape closes page and refresh daily claim countdown
   useEffect(() => {
     if (!visible) return;
     const onKey = (e: KeyboardEvent) => {
@@ -221,44 +209,43 @@ export default function CookieMasterPage() {
     };
   }, [visible, hide]);
 
-  // Background re-check for existing active license when stale (>12h)
+  // Auto-check active Ko-fi membership (for signed-in CloudSync users or renewal refresh)
   useEffect(() => {
-    if (!visible || !config.hasLicenseVerification || reverifiedRef.current) return;
+    if (!visible || !configLoaded || autoCheckedRef.current) return;
     const current = getCookieMasterState();
-    if (!current?.active || !current.licenseKey) return;
-    if (Date.now() - current.verifiedAt < REVERIFY_INTERVAL_MS) return;
+    const activeUser = getActiveUser();
+    const shouldCheckSignedIn = activeUser !== "guest" && !current?.active;
+    const shouldRefreshActive =
+      Boolean(current?.active && current?.licenseKey) &&
+      Date.now() - (current?.verifiedAt || 0) >= REVERIFY_INTERVAL_MS;
 
-    reverifiedRef.current = true;
-    fetch("/api/cookie-master/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ licenseKey: current.licenseKey, incrementUses: false }),
-    })
-      .then((r) => r.json().then((d) => ({ status: r.status, data: d })))
-      .then(({ status, data }) => {
-        if (status === 400 || status === 403) {
-          setCookieMasterState(null);
-          notifyToast(
-            data?.error || "Your Cookie Master subscription is no longer active.",
-            "info"
-          );
-        } else if (data?.success && data?.active) {
+    if (!shouldCheckSignedIn && !shouldRefreshActive) return;
+
+    autoCheckedRef.current = true;
+    const txParam = current?.licenseKey ? `?tx=${encodeURIComponent(current.licenseKey)}` : "";
+    fetch(`/api/cookie-master/status${txParam}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data?.success) return;
+        if (data.active) {
           setCookieMasterState({
-            ...current,
             active: true,
-            email: data.email || current.email,
-            cancelledAt: data.cancelledAt || null,
+            licenseKey: String(data.transactionId || current?.licenseKey || ""),
+            email: typeof data.email === "string" ? data.email : current?.email,
             verifiedAt: Date.now(),
+            expiresAt: Number(data.expiresAt) || current?.expiresAt || 0,
+            lastDailyClaimAt: current?.lastDailyClaimAt || 0,
           });
         }
       })
       .catch(() => {});
-  }, [visible, config.hasLicenseVerification]);
+  }, [visible, configLoaded]);
 
-  const verifyAndActivate = async (keyToVerify: string, incrementUses: boolean) => {
-    const trimmed = keyToVerify.trim();
-    if (!trimmed) {
-      notifyToast("paste your gumroad license key first", "error");
+  const verifyMembership = async (emailOrCode: string) => {
+    const trimmed = emailOrCode.trim();
+    const signedInUser = getActiveUser();
+    if (!trimmed && signedInUser === "guest") {
+      notifyToast("enter your ko-fi email or transaction id first", "error");
       return;
     }
 
@@ -267,12 +254,12 @@ export default function CookieMasterPage() {
       const res = await fetch("/api/cookie-master/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ licenseKey: trimmed, incrementUses }),
+        body: JSON.stringify({ emailOrCode: trimmed }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.success || !data?.active) {
         notifyToast(
-          data?.error || "could not verify that gumroad license key",
+          data?.error || "could not find an active ko-fi cookie master membership yet",
           "error"
         );
         return;
@@ -281,13 +268,13 @@ export default function CookieMasterPage() {
       const prev = getCookieMasterState();
       setCookieMasterState({
         active: true,
-        licenseKey: trimmed,
+        licenseKey: String(data.transactionId || trimmed || prev?.licenseKey || "kofi"),
         email: typeof data.email === "string" ? data.email : prev?.email,
         verifiedAt: Date.now(),
-        cancelledAt: data.cancelledAt || null,
+        expiresAt: Number(data.expiresAt) || 0,
         lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
       });
-      setLicenseInput("");
+      setLookupInput("");
       notifyToast(
         "cookie master activated! ad-free mode & daily cookie coins unlocked",
         "success"
@@ -301,7 +288,31 @@ export default function CookieMasterPage() {
 
   const handleActivateSubmit = (e: Event) => {
     e.preventDefault();
-    void verifyAndActivate(licenseInput, true);
+    void verifyMembership(lookupInput);
+  };
+
+  const handleOpenKofiCheckout = (e: MouseEvent) => {
+    if (!config.configured || !config.checkoutUrl) {
+      e.preventDefault();
+      notifyToast(
+        "Set KOFI_CHECKOUT_URL (or KOFI_USERNAME) and KOFI_VERIFICATION_TOKEN on the server to open Ko-fi checkout.",
+        "info"
+      );
+      return;
+    }
+    const width = 520;
+    const height = 740;
+    const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+    const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+    const popup = window.open(
+      config.checkoutUrl,
+      "kofiCookieMasterCheckout",
+      `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
+    );
+    if (popup) {
+      e.preventDefault();
+      popup.focus();
+    }
   };
 
   const handleClaimDaily = () => {
@@ -330,9 +341,10 @@ export default function CookieMasterPage() {
 
   if (!visible) return null;
 
-  const isActiveMaster = Boolean(masterState?.active);
+  const isActiveMaster = isCookieMasterActive();
   const canClaimNow = canClaimDailyMasterCoins();
   const dailyCoinsAmount = config.dailyCoins || COOKIE_MASTER_DAILY_COINS;
+  const activeUsername = getActiveUser();
 
   return (
     <section
@@ -388,7 +400,7 @@ export default function CookieMasterPage() {
         </div>
       </div>
 
-      {/* Product Hero Card (Native Operation Cookie Product Page + Gumroad Checkout) */}
+      {/* Product Hero Card (Native Operation Cookie Product Page + Ko-fi Checkout) */}
       <div
         class="studio-panel"
         style={{
@@ -457,15 +469,16 @@ export default function CookieMasterPage() {
                 maxWidth: "560px",
               }}
             >
-              upgrade your account with one simple monthly subscription. checkout runs securely
-              through gumroad checkout, then paste your receipt license key right below to unlock
-              cookie master immediately across CloudSync.
+              upgrade your account with one monthly membership powered by ko-fi checkout. include
+              your username
+              {activeUsername !== "guest" ? ` (@${activeUsername})` : ""} in the ko-fi message box
+              (or verify with your ko-fi email / transaction id below) to unlock cookie master.
             </p>
           </div>
 
           <div
             style={{
-              flex: "0 1 280px",
+              flex: "0 1 285px",
               display: "flex",
               flexDirection: "column",
               alignItems: "stretch",
@@ -499,51 +512,33 @@ export default function CookieMasterPage() {
               <span class="app-proxy-badge">cancel anytime</span>
             </div>
 
-            {config.configured && config.checkoutUrl ? (
-              <a
-                href={config.checkoutUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-gumroad-single-product="true"
-                class="apps-custom-btn"
-                style={{
-                  justifyContent: "center",
-                  padding: "12px 16px",
-                  fontSize: "13.5px",
-                  fontWeight: 600,
-                  textDecoration: "none",
-                  textAlign: "center",
-                }}
-              >
-                <i class="fa-solid fa-crown"></i>
-                <span>
-                  {isActiveMaster ? "manage / buy another pass" : "buy cookie master — $5/mo"}
-                </span>
-              </a>
-            ) : (
-              <button
-                type="button"
-                class="apps-custom-btn"
-                style={{
-                  justifyContent: "center",
-                  padding: "12px 16px",
-                  fontSize: "13.5px",
-                  fontWeight: 600,
-                  opacity: configLoaded ? 0.85 : 0.65,
-                }}
-                onClick={() =>
-                  notifyToast(
-                    "Set GUMROAD_CHECKOUT_URL (and GUMROAD_PRODUCT_ID) on the server to open live Gumroad checkout.",
-                    "info"
-                  )
-                }
-              >
-                <i class="fa-solid fa-crown"></i>
-                <span>
-                  {configLoaded ? "gumroad checkout not configured yet" : "loading checkout..."}
-                </span>
-              </button>
-            )}
+            <a
+              href={config.checkoutUrl || "#"}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={handleOpenKofiCheckout}
+              class="apps-custom-btn"
+              style={{
+                justifyContent: "center",
+                padding: "12px 16px",
+                fontSize: "13.5px",
+                fontWeight: 600,
+                textDecoration: "none",
+                textAlign: "center",
+                opacity: configLoaded && !config.configured ? 0.8 : 1,
+              }}
+            >
+              <i class="fa-solid fa-crown"></i>
+              <span>
+                {!configLoaded
+                  ? "loading checkout..."
+                  : config.configured
+                    ? isActiveMaster
+                      ? "manage on ko-fi"
+                      : "buy cookie master — $5/mo"
+                    : "ko-fi checkout not configured"}
+              </span>
+            </a>
 
             <div
               style={{
@@ -553,7 +548,7 @@ export default function CookieMasterPage() {
                 textTransform: "lowercase",
               }}
             >
-              powered by gumroad checkout · instant license key
+              checkout via ko-fi · synced with cloudsync
             </div>
           </div>
         </div>
@@ -579,8 +574,8 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              browse the homepage, play games, and switch themes with zero ads as long as your
-              cookie master subscription stays active.
+              browse the homepage, play games, and switch themes with zero ads while your cookie
+              master membership is active.
             </p>
           </article>
 
@@ -663,9 +658,11 @@ export default function CookieMasterPage() {
                   textTransform: "lowercase",
                 }}
               >
-                license: {maskLicenseKey(masterState?.licenseKey || "")}
-                {masterState?.email ? ` · ${masterState.email}` : ""}
-                {masterState?.cancelledAt ? " · cancelled (active until period ends)" : ""}
+                ko-fi pass: {maskReference(masterState?.licenseKey || masterState?.email || "")}
+                {masterState?.email ? ` · ${maskReference(masterState.email)}` : ""}
+                {masterState?.expiresAt && masterState.expiresAt > 0
+                  ? ` · renews / active until ${new Date(masterState.expiresAt).toLocaleDateString()}`
+                  : ""}
               </div>
             </div>
 
@@ -688,17 +685,15 @@ export default function CookieMasterPage() {
                 </span>
               </button>
 
-              {config.hasLicenseVerification && masterState?.licenseKey && (
-                <button
-                  type="button"
-                  class="studio-tab-btn"
-                  disabled={verifying}
-                  onClick={() => void verifyAndActivate(masterState.licenseKey, false)}
-                >
-                  <i class="fa-solid fa-rotate"></i>
-                  <span>{verifying ? "checking..." : "re-verify"}</span>
-                </button>
-              )}
+              <button
+                type="button"
+                class="studio-tab-btn"
+                disabled={verifying}
+                onClick={() => void verifyMembership(masterState?.licenseKey || masterState?.email || "")}
+              >
+                <i class="fa-solid fa-rotate"></i>
+                <span>{verifying ? "checking..." : "refresh status"}</span>
+              </button>
 
               <button
                 type="button"
@@ -706,7 +701,7 @@ export default function CookieMasterPage() {
                 onClick={handleDeactivateDevice}
               >
                 <i class="fa-solid fa-right-from-bracket"></i>
-                <span>unlink key</span>
+                <span>unlink</span>
               </button>
             </div>
           </div>
@@ -714,21 +709,21 @@ export default function CookieMasterPage() {
       ) : (
         <div class="apps-custom-launcher" style={{ padding: "16px 18px" }}>
           <div class="apps-custom-launcher-label">
-            <i class="fa-solid fa-key"></i>
-            <span>already checked out on gumroad? paste your license key to activate</span>
+            <i class="fa-solid fa-mug-hot"></i>
+            <span>already subscribed on ko-fi? verify with your email or transaction id</span>
           </div>
 
           <form
             class="apps-custom-launcher-form"
-            style={{ maxWidth: "460px" }}
+            style={{ maxWidth: "500px" }}
             onSubmit={handleActivateSubmit}
           >
             <input
               type="text"
               class="apps-custom-input"
-              placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
-              value={licenseInput}
-              onInput={(e) => setLicenseInput((e.target as HTMLInputElement).value)}
+              placeholder="ko-fi email or transaction id"
+              value={lookupInput}
+              onInput={(e) => setLookupInput((e.target as HTMLInputElement).value)}
               disabled={verifying}
             />
             <button
@@ -741,7 +736,7 @@ export default function CookieMasterPage() {
               }}
             >
               <i class="fa-solid fa-bolt"></i>
-              <span>{verifying ? "verifying..." : "activate pass"}</span>
+              <span>{verifying ? "checking..." : "activate pass"}</span>
             </button>
           </form>
         </div>

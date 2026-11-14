@@ -36,6 +36,7 @@ export interface CookieMasterState {
   licenseKey: string;
   email?: string;
   verifiedAt: number;
+  expiresAt?: number;
   cancelledAt?: string | null;
   lastDailyClaimAt: number;
 }
@@ -51,6 +52,7 @@ export function getCookieMasterState(): CookieMasterState | null {
       licenseKey: typeof parsed.licenseKey === "string" ? parsed.licenseKey : "",
       email: typeof parsed.email === "string" ? parsed.email : undefined,
       verifiedAt: Number(parsed.verifiedAt) || 0,
+      expiresAt: Number(parsed.expiresAt) || 0,
       cancelledAt: typeof parsed.cancelledAt === "string" ? parsed.cancelledAt : null,
       lastDailyClaimAt: Number(parsed.lastDailyClaimAt) || 0,
     };
@@ -61,7 +63,9 @@ export function getCookieMasterState(): CookieMasterState | null {
 
 export function isCookieMasterActive(): boolean {
   const st = getCookieMasterState();
-  return Boolean(st?.active);
+  if (!st?.active) return false;
+  if (st.expiresAt && st.expiresAt > 0 && st.expiresAt <= Date.now()) return false;
+  return true;
 }
 
 export function setCookieMasterState(next: CookieMasterState | null): void {
