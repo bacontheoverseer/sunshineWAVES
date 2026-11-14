@@ -2727,6 +2727,81 @@ app.get("/api/chat/gifs", async (req, res) => {
   }
 });
 
+const klipyMediaCache = new LRUCache({
+  maxSize: 24 * 1024 * 1024,
+  ttl: 1000 * 60 * 30,
+  ttlAutopurge: true,
+  sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
+});
+
+app.get("/api/chat/gif-proxy", async (req, res) => {
+  const rawUrl = String(req.query?.url || "").trim();
+  if (!isAllowedKlipyMediaUrl(rawUrl)) {
+    return res.status(400).send("Invalid KLIPY URL");
+  }
+
+  const cached = klipyMediaCache.get(rawUrl);
+  if (cached) {
+    res.setHeader("Content-Type", cached.contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.send(cached.body);
+  }
+
+  try {
+    let targetUrl = rawUrl;
+    let upstream = null;
+    for (let hops = 0; hops < 4; hops++) {
+      upstream = await fetch(targetUrl, {
+        redirect: "manual",
+        headers: {
+          "User-Agent": MOCHI_FALLBACK_UA,
+          Accept: "image/webp,image/gif,image/*,*/*;q=0.8",
+        },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (upstream.status >= 300 && upstream.status < 400) {
+        const loc = upstream.headers.get("location");
+        if (!loc) break;
+        const resolved = new URL(loc, targetUrl).href;
+        if (!isAllowedKlipyMediaUrl(resolved)) {
+          return res.status(403).send("Disallowed redirect target");
+        }
+        targetUrl = resolved;
+        continue;
+      }
+      break;
+    }
+
+    if (!upstream || !upstream.ok) {
+      return res.status(502).send("Failed to fetch KLIPY media");
+    }
+
+    const contentType = (upstream.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (!contentType.startsWith("image/")) {
+      return res.status(415).send("Unsupported media type");
+    }
+
+    const body = Buffer.from(await upstream.arrayBuffer());
+    if (body.length === 0 || body.length > 10 * 1024 * 1024) {
+      return res.status(413).send("GIF too large");
+    }
+
+    if (body.length <= 4 * 1024 * 1024) {
+      klipyMediaCache.set(rawUrl, { body, contentType });
+    }
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.send(body);
+  } catch {
+    return res.status(502).send("Failed to fetch KLIPY media");
+  }
+});
+
 app.post("/api/chat/moderate", async (req, res) => {
   try {
     const { text } = req.body || {};

@@ -36,6 +36,11 @@ function isAllowedKlipyUrl(rawUrl?: string): boolean {
   }
 }
 
+function getKlipyProxySrc(rawUrl?: string): string {
+  if (!isAllowedKlipyUrl(rawUrl)) return "";
+  return `/api/chat/gif-proxy?url=${encodeURIComponent(rawUrl!)}`;
+}
+
 interface OnlineUser {
   username: string;
   color: string;
@@ -2302,7 +2307,7 @@ export default function ChatModal() {
                         <div class="chat-entry-gif-wrap">
                           <img
                             class="chat-entry-gif"
-                            src={msg.gifUrl}
+                            src={getKlipyProxySrc(msg.gifUrl)}
                             alt={msg.gifTitle || "GIF"}
                             loading="lazy"
                             decoding="async"
@@ -2482,7 +2487,7 @@ export default function ChatModal() {
                           onClick={() => void handleSendGif(gif)}
                         >
                           <img
-                            src={gif.previewUrl}
+                            src={getKlipyProxySrc(gif.previewUrl)}
                             alt={gif.title}
                             loading="lazy"
                             decoding="async"
