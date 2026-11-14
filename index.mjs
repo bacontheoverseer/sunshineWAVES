@@ -1120,6 +1120,130 @@ app.post("/api/studio/games/:id/stat", (req, res) => {
   res.json({ success: true, game: found || null });
 });
 
+// Serve custom uploaded index.html studio game with CloudSync Player Tracking SDK bridge
+app.get("/api/studio/games/:id/play.html", (req, res) => {
+  const { id } = req.params;
+  const found = publishedStudioGames.find((g) => g.id === id);
+  if (!found || !found.customHtmlContent) {
+    return res.status(404).send("Custom HTML game not found");
+  }
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(found.customHtmlContent);
+});
+
+// --- CloudSync Player Progress & Telemetry Tracking per Studio Game ---
+const studioCloudProgress = new Map(); // gameId -> Map<usernameLower, ProgressRecord>
+
+app.get("/api/studio/progress", (req, res) => {
+  const gameId = ((req.query.gameId || "") + "").trim();
+  const username = ((req.query.user || "") + "").trim().toLowerCase();
+  if (!gameId) {
+    return res.json({ success: true, players: [], myProgress: null });
+  }
+  const gameMap = studioCloudProgress.get(gameId);
+  const players = gameMap
+    ? Array.from(gameMap.values()).sort(
+        (a, b) =>
+          b.highestLevel - a.highestLevel ||
+          b.bestScore - a.bestScore ||
+          b.completions - a.completions
+      )
+    : [];
+  const myProgress = username && gameMap ? gameMap.get(username) || null : null;
+  res.json({ success: true, gameId, players: players.slice(0, 100), myProgress });
+});
+
+app.post("/api/studio/progress", (req, res) => {
+  try {
+    const {
+      gameId,
+      gameTitle,
+      username,
+      cloudSynced,
+      levelReached,
+      score,
+      coinsAdded,
+      deathsAdded,
+      completedGame,
+      customData,
+    } = req.body || {};
+    if (!gameId || !username) {
+      return res.status(400).json({ success: false, error: "Missing gameId or username" });
+    }
+    const cleanUser = String(username).trim();
+    const userKey = cleanUser.toLowerCase();
+
+    if (!studioCloudProgress.has(gameId)) {
+      studioCloudProgress.set(gameId, new Map());
+    }
+    const gameMap = studioCloudProgress.get(gameId);
+    const prev = gameMap.get(userKey) || {
+      username: cleanUser,
+      cloudSynced: Boolean(cloudSynced),
+      currentLevel: 1,
+      highestLevel: 1,
+      bestScore: 0,
+      totalCoinsCollected: 0,
+      deaths: 0,
+      completions: 0,
+      customData: {},
+      lastUpdated: new Date().toISOString(),
+    };
+
+    prev.username = cleanUser;
+    prev.cloudSynced = Boolean(cloudSynced) || prev.cloudSynced;
+    if (typeof levelReached === "number" && levelReached >= 1) {
+      prev.currentLevel = levelReached;
+      if (levelReached > prev.highestLevel) prev.highestLevel = levelReached;
+    }
+    if (typeof score === "number" && score > prev.bestScore) {
+      prev.bestScore = score;
+    }
+    if (typeof coinsAdded === "number" && coinsAdded > 0) {
+      prev.totalCoinsCollected += coinsAdded;
+    }
+    if (typeof deathsAdded === "number" && deathsAdded > 0) {
+      prev.deaths += deathsAdded;
+    }
+    if (completedGame) {
+      prev.completions += 1;
+    }
+    if (customData && typeof customData === "object") {
+      prev.customData = { ...prev.customData, ...customData };
+    }
+    prev.lastUpdated = new Date().toISOString();
+    gameMap.set(userKey, prev);
+
+    // Also update the game's leaderboard score if provided
+    if (gameTitle && typeof score === "number") {
+      const gKey = String(gameTitle).trim().toLowerCase();
+      if (!gameLeaderboards.has(gKey)) gameLeaderboards.set(gKey, new Map());
+      const lb = gameLeaderboards.get(gKey);
+      const lbEntry = lb.get(userKey) || {
+        username: cleanUser,
+        seconds: 5,
+        plays: 1,
+        highScore: 0,
+        lastPlayed: new Date().toISOString(),
+      };
+      if (score > lbEntry.highScore) lbEntry.highScore = score;
+      lbEntry.lastPlayed = new Date().toISOString();
+      lb.set(userKey, lbEntry);
+    }
+
+    const players = Array.from(gameMap.values()).sort(
+      (a, b) =>
+        b.highestLevel - a.highestLevel ||
+        b.bestScore - a.bestScore ||
+        b.completions - a.completions
+    );
+
+    res.json({ success: true, myProgress: prev, players: players.slice(0, 100) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // --- Custom User Game Studios API ---
 const customStudios = [];
 
@@ -1208,7 +1332,7 @@ app.post("/api/games/leaderboard", (req, res) => {
 // --- Cookie Coins Shop: One-Time Targeted User Troll API ---
 app.post("/api/shop/troll", async (req, res) => {
   try {
-    const { targetClientId, targetUsername, action, data, sender } = req.body || {};
+    const { trollEventId, targetClientId, targetUsername, action, data, sender } = req.body || {};
     if (!action || (!targetClientId && !targetUsername)) {
       return res.status(400).json({ success: false, error: "Missing target user or troll action" });
     }
@@ -1224,17 +1348,18 @@ app.post("/api/shop/troll", async (req, res) => {
 
     const payload = {
       type: "admin-chaos",
+      trollEventId,
       action,
-      data: { ...(data || {}), fromShopUser: sender || "Someone" },
+      data: { ...(data || {}), trollEventId, fromShopUser: sender || "Someone" },
       timestamp: Date.now(),
     };
 
+    const normTarget = (targetUsername || "").trim().toLowerCase().replace(/[-_]/g, "");
     let delivered = 0;
     for (const [id, client] of liveClients.entries()) {
       const matchId = targetClientId && id === targetClientId;
-      const matchUser =
-        targetUsername &&
-        (client.username || "").toLowerCase() === targetUsername.trim().toLowerCase();
+      const clientNorm = (client.username || "").trim().toLowerCase().replace(/[-_]/g, "");
+      const matchUser = normTarget && clientNorm === normTarget;
       if (matchId || matchUser) {
         try {
           client.res.write(`data: ${JSON.stringify(payload)}\n\n`);

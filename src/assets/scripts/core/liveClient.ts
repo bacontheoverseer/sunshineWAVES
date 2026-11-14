@@ -479,6 +479,8 @@ const PRESET_MAP: Record<string, string> = {
 
 export function normalizeSoundUrl(url: string): string {
   if (!url) return "/assets/sounds/vine-boom.mp3";
+  if (url === "/assets/sounds/fart-reverb.mp3") return "/assets/sounds/reverb-fart.mp3";
+  if (url === "/assets/sounds/goofy-ahh.mp3") return "/assets/sounds/what-da-dog.mp3";
   if (PRESET_MAP[url]) return PRESET_MAP[url];
   if (url.startsWith("/api/live/audio-proxy?url=")) {
     try {
@@ -487,6 +489,19 @@ export function normalizeSoundUrl(url: string): string {
     } catch {}
   }
   return url;
+}
+
+function playFallbackSynthForUrl(url: string): void {
+  const lower = (url || "").toLowerCase();
+  if (lower.includes("pipe")) playMetalPipe();
+  else if (lower.includes("fart")) playFart();
+  else if (lower.includes("discord") || lower.includes("ping")) playDiscordPing();
+  else if (lower.includes("knock") || lower.includes("fbi")) playDoorKnock();
+  else if (lower.includes("bruh") || lower.includes("emotional") || lower.includes("dog")) playBruh();
+  else if (lower.includes("xp") || lower.includes("error") || lower.includes("oof")) playXpError();
+  else if (lower.includes("rick") || lower.includes("violin")) playRickroll();
+  else if (lower.includes("scream") || lower.includes("airhorn") || lower.includes("run")) playScreamer();
+  else playVineBoom();
 }
 
 const blobAudioCache = new Map<string, string>();
@@ -545,15 +560,20 @@ export function playAudioUrl(url: string, volume = 1.0): void {
     .then((playableUrl) => {
       const audio = new Audio(playableUrl);
       audio.volume = Math.max(0, Math.min(1, volume));
+      audio.onerror = () => {
+        playFallbackSynthForUrl(url);
+      };
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
-          console.warn("Audio element play error:", err);
+          console.warn("Audio element play error, falling back to synth:", err);
+          playFallbackSynthForUrl(url);
         });
       }
     })
     .catch((err) => {
-      console.warn("Failed to resolve audio for url:", url, err);
+      console.warn("Failed to resolve audio for url, falling back to synth:", url, err);
+      playFallbackSynthForUrl(url);
     });
 }
 
@@ -632,22 +652,194 @@ let originalTitle: string | null = null;
 let titleFlashTimer: number | null = null;
 let ghostCursorTimer: number | null = null;
 let matrixAnimFrame: number | null = null;
+let dvdAnimFrame: number | null = null;
+
+function ensureChaosStyles(): void {
+  if (typeof document === "undefined") return;
+  if (document.getElementById("cookie-chaos-runtime-styles")) return;
+  const style = document.createElement("style");
+  style.id = "cookie-chaos-runtime-styles";
+  style.textContent = `
+    @keyframes cookieChaosQuake {
+      0%, 100% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(-12px, -8px) rotate(-1.5deg); }
+      30% { transform: translate(12px, 8px) rotate(1.5deg); }
+      45% { transform: translate(-10px, 10px) rotate(-1deg); }
+      60% { transform: translate(10px, -10px) rotate(1deg); }
+      75% { transform: translate(-8px, 6px) rotate(-1.2deg); }
+      90% { transform: translate(8px, -6px) rotate(1.2deg); }
+    }
+    @keyframes cookieChaosBarrelRoll {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    @keyframes cookieChaosDisco {
+      0% { background: rgba(239, 68, 68, 0.32); backdrop-filter: hue-rotate(0deg); }
+      20% { background: rgba(234, 179, 8, 0.32); backdrop-filter: hue-rotate(72deg); }
+      40% { background: rgba(34, 197, 94, 0.32); backdrop-filter: hue-rotate(144deg); }
+      60% { background: rgba(59, 130, 246, 0.32); backdrop-filter: hue-rotate(216deg); }
+      80% { background: rgba(168, 85, 247, 0.32); backdrop-filter: hue-rotate(288deg); }
+      100% { background: rgba(236, 72, 153, 0.32); backdrop-filter: hue-rotate(360deg); }
+    }
+    body.cookie-chaos-earthquake {
+      animation: cookieChaosQuake 0.14s infinite !important;
+    }
+    html.cookie-chaos-barrel-roll {
+      animation: cookieChaosBarrelRoll 1.6s cubic-bezier(0.4, 0, 0.2, 1) 1 !important;
+    }
+    html.cookie-chaos-flipped {
+      transform: rotate(180deg) !important;
+      transition: transform 0.45s ease !important;
+    }
+    html.cookie-chaos-invert {
+      filter: invert(1) hue-rotate(180deg) !important;
+    }
+    html.cookie-chaos-blur {
+      filter: blur(4px) !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 export function applyChaosEffect(effect: string, data?: Record<string, unknown>): void {
+  ensureChaosStyles();
+  const duration = typeof data?.duration === "number" ? data.duration : 0;
+
   switch (effect) {
+    case "barrel-roll": {
+      document.documentElement.classList.remove("cookie-chaos-barrel-roll");
+      void document.documentElement.offsetWidth;
+      document.documentElement.classList.add("cookie-chaos-barrel-roll");
+      window.setTimeout(() => {
+        document.documentElement.classList.remove("cookie-chaos-barrel-roll");
+      }, duration > 0 ? duration : 1700);
+      break;
+    }
+
     case "earthquake": {
       document.body.classList.add("cookie-chaos-earthquake");
-      const duration = (data?.duration as number) || 5000;
+      const dur = duration || 6000;
+      window.setTimeout(() => {
+        document.body.classList.remove("cookie-chaos-earthquake");
+      }, dur);
+      break;
+    }
+
+    case "flip":
+    case "screen-flip": {
       if (duration > 0) {
+        document.documentElement.classList.add("cookie-chaos-flipped");
         window.setTimeout(() => {
-          document.body.classList.remove("cookie-chaos-earthquake");
+          document.documentElement.classList.remove("cookie-chaos-flipped");
         }, duration);
+      } else {
+        document.documentElement.classList.toggle("cookie-chaos-flipped");
       }
       break;
     }
 
-    case "screen-flip": {
-      document.documentElement.classList.toggle("cookie-chaos-flipped");
+    case "disco": {
+      let overlay = document.getElementById("cookie-disco-overlay");
+      if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.id = "cookie-disco-overlay";
+        overlay.style.cssText =
+          "position:fixed;inset:0;z-index:2147483640;pointer-events:none;animation:cookieChaosDisco 0.45s linear infinite;";
+        document.body.appendChild(overlay);
+      }
+      const dur = duration || 7000;
+      window.setTimeout(() => {
+        overlay?.remove();
+      }, dur);
+      break;
+    }
+
+    case "dvd-bounce": {
+      let dvd = document.getElementById("cookie-dvd-bouncer");
+      if (!dvd) {
+        dvd = document.createElement("div");
+        dvd.id = "cookie-dvd-bouncer";
+        dvd.style.cssText =
+          "position:fixed;top:0;left:0;width:150px;height:74px;z-index:2147483641;pointer-events:none;border-radius:16px;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;font-weight:900;font-size:28px;letter-spacing:2px;color:#fff;box-shadow:0 12px 32px rgba(0,0,0,0.55);border:2px solid rgba(255,255,255,0.5);";
+        dvd.textContent = "COOKIE DVD";
+        document.body.appendChild(dvd);
+      }
+      const colors = ["#ef4444", "#eab308", "#22c55e", "#3b82f6", "#a855f7", "#ec4899"];
+      let colorIdx = 0;
+      dvd.style.backgroundColor = colors[colorIdx];
+      let x = Math.random() * Math.max(100, window.innerWidth - 180);
+      let y = Math.random() * Math.max(100, window.innerHeight - 100);
+      let vx = 5.2;
+      let vy = 4.4;
+
+      if (dvdAnimFrame) cancelAnimationFrame(dvdAnimFrame);
+      const stepDvd = () => {
+        const el = document.getElementById("cookie-dvd-bouncer");
+        if (!el) return;
+        x += vx;
+        y += vy;
+        let bounced = false;
+        if (x <= 0 || x + 150 >= window.innerWidth) {
+          vx *= -1;
+          bounced = true;
+        }
+        if (y <= 0 || y + 74 >= window.innerHeight) {
+          vy *= -1;
+          bounced = true;
+        }
+        if (bounced) {
+          colorIdx = (colorIdx + 1) % colors.length;
+          el.style.backgroundColor = colors[colorIdx];
+          document.body.style.transform = `translate(${vx * 1.4}px, ${vy * 1.4}px)`;
+          window.setTimeout(() => {
+            document.body.style.transform = "";
+          }, 90);
+        }
+        el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        dvdAnimFrame = requestAnimationFrame(stepDvd);
+      };
+      dvdAnimFrame = requestAnimationFrame(stepDvd);
+
+      const dur = duration || 10000;
+      window.setTimeout(() => {
+        if (dvdAnimFrame) {
+          cancelAnimationFrame(dvdAnimFrame);
+          dvdAnimFrame = null;
+        }
+        document.body.style.transform = "";
+        document.getElementById("cookie-dvd-bouncer")?.remove();
+      }, dur);
+      break;
+    }
+
+    case "bsod": {
+      let bsod = document.getElementById("cookie-fake-bsod");
+      if (!bsod) {
+        bsod = document.createElement("div");
+        bsod.id = "cookie-fake-bsod";
+        bsod.style.cssText =
+          "position:fixed;inset:0;z-index:2147483646;background:#0078d7;color:#ffffff;font-family:'Segoe UI',system-ui,sans-serif;padding:10vh 12vw;display:flex;flex-direction:column;justify-content:center;cursor:none;user-select:none;";
+        bsod.innerHTML = `
+          <div style="font-size:96px;line-height:1;margin-bottom:24px;">:(</div>
+          <div style="font-size:26px;font-weight:300;max-width:760px;line-height:1.45;margin-bottom:28px;">
+            Your PC ran into a problem and needs to restart. We're just collecting some error info, and then we'll restart for you.
+          </div>
+          <div style="font-size:24px;font-weight:300;margin-bottom:36px;">
+            <span id="cookie-bsod-pct">15</span>% complete
+          </div>
+          <div style="font-size:14px;opacity:0.85;line-height:1.6;">
+            Stop code: COOKIE_TROLL_KERNEL_EXCEPTION<br/>
+            Click anywhere or wait a few seconds to dismiss
+          </div>
+        `;
+        bsod.addEventListener("click", () => bsod?.remove());
+        document.body.appendChild(bsod);
+      }
+      playXpError();
+      const dur = duration || 5000;
+      window.setTimeout(() => {
+        document.getElementById("cookie-fake-bsod")?.remove();
+      }, dur);
       break;
     }
 
@@ -775,6 +967,15 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
           cursor.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
         }
       }, 120);
+      if (duration > 0) {
+        window.setTimeout(() => {
+          if (ghostCursorTimer) {
+            window.clearInterval(ghostCursorTimer);
+            ghostCursorTimer = null;
+          }
+          document.getElementById("cookie-ghost-cursor")?.remove();
+        }, duration);
+      }
       break;
     }
 
@@ -790,12 +991,26 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
     }
 
     case "invert-colors": {
-      document.documentElement.classList.toggle("cookie-chaos-invert");
+      if (duration > 0) {
+        document.documentElement.classList.add("cookie-chaos-invert");
+        window.setTimeout(() => {
+          document.documentElement.classList.remove("cookie-chaos-invert");
+        }, duration);
+      } else {
+        document.documentElement.classList.toggle("cookie-chaos-invert");
+      }
       break;
     }
 
     case "blur": {
-      document.documentElement.classList.toggle("cookie-chaos-blur");
+      if (duration > 0) {
+        document.documentElement.classList.add("cookie-chaos-blur");
+        window.setTimeout(() => {
+          document.documentElement.classList.remove("cookie-chaos-blur");
+        }, duration);
+      } else {
+        document.documentElement.classList.toggle("cookie-chaos-blur");
+      }
       break;
     }
 
@@ -804,6 +1019,7 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       if (!canvas) {
         canvas = document.createElement("canvas");
         canvas.id = "cookie-matrix-canvas";
+        canvas.style.cssText = "position:fixed;inset:0;z-index:2147483639;pointer-events:none;opacity:0.78;";
         document.body.appendChild(canvas);
       }
       const ctx = canvas.getContext("2d");
@@ -838,6 +1054,15 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       };
       if (matrixAnimFrame) cancelAnimationFrame(matrixAnimFrame);
       matrixAnimFrame = requestAnimationFrame(drawMatrix);
+      if (duration > 0) {
+        window.setTimeout(() => {
+          if (matrixAnimFrame) {
+            cancelAnimationFrame(matrixAnimFrame);
+            matrixAnimFrame = null;
+          }
+          document.getElementById("cookie-matrix-canvas")?.remove();
+        }, duration);
+      }
       break;
     }
 
@@ -849,7 +1074,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
 export function clearChaosEffects(): void {
   // Remove CSS classes
   document.body.classList.remove("cookie-chaos-earthquake");
-  document.documentElement.classList.remove("cookie-chaos-flipped", "cookie-chaos-invert", "cookie-chaos-blur");
+  document.body.style.transform = "";
+  document.documentElement.classList.remove(
+    "cookie-chaos-barrel-roll",
+    "cookie-chaos-flipped",
+    "cookie-chaos-invert",
+    "cookie-chaos-blur"
+  );
 
   // Remove DOM elements
   const ids = [
@@ -860,6 +1091,9 @@ export function clearChaosEffects(): void {
     "cookie-panic-doc",
     "cookie-ghost-cursor",
     "cookie-matrix-canvas",
+    "cookie-disco-overlay",
+    "cookie-dvd-bouncer",
+    "cookie-fake-bsod",
   ];
   for (const id of ids) {
     const el = document.getElementById(id);
@@ -883,10 +1117,52 @@ export function clearChaosEffects(): void {
     cancelAnimationFrame(matrixAnimFrame);
     matrixAnimFrame = null;
   }
+  if (dvdAnimFrame) {
+    cancelAnimationFrame(dvdAnimFrame);
+    dvdAnimFrame = null;
+  }
 
   // Cancel any TTS speech
   if (typeof window !== "undefined" && "speechSynthesis" in window) {
     window.speechSynthesis.cancel();
+  }
+}
+
+const executedTrollEventIds = new Set<string>();
+
+export function executeTrollAction(
+  action: string,
+  data?: Record<string, unknown>,
+  trollEventId?: string
+): void {
+  if (trollEventId) {
+    if (executedTrollEventIds.has(trollEventId)) return;
+    executedTrollEventIds.add(trollEventId);
+    if (executedTrollEventIds.size > 200) {
+      const first = executedTrollEventIds.values().next().value;
+      if (first) executedTrollEventIds.delete(first);
+    }
+  }
+
+  if (action === "sfx") {
+    const url = data?.url as string | undefined;
+    const vol = typeof data?.volume === "number" ? data.volume : 1.0;
+    if (url) {
+      playAudioUrl(url, vol);
+    } else {
+      playSfxByName((data?.sound as string) || "vine-boom", vol);
+    }
+  } else if (action === "tts") {
+    speakTts(
+      (data?.text as string) || "Hello from Cookie Shop!",
+      typeof data?.pitch === "number" ? data.pitch : 1.0,
+      typeof data?.rate === "number" ? data.rate : 1.0,
+      typeof data?.volume === "number" ? data.volume : 1.0
+    );
+  } else if (action === "effect") {
+    applyChaosEffect((data?.effect as string) || "earthquake", data);
+  } else if (action === "clear") {
+    clearChaosEffects();
   }
 }
 
@@ -915,10 +1191,16 @@ export function getActiveUsername(): string {
       const parsed = JSON.parse(raw);
       if (parsed?.username) return parsed.username;
     }
+    const g = localStorage.getItem("cookie_guest_name");
+    if (g) return g;
   } catch {
     // fallback
   }
-  return "Guest-" + getClientId().substring(0, 4);
+  const fallback = "guest_" + getClientId().substring(0, 4);
+  try {
+    localStorage.setItem("cookie_guest_name", fallback);
+  } catch {}
+  return fallback;
 }
 
 function sendHeartbeat(page?: string, game?: string): void {
@@ -954,19 +1236,7 @@ export function initLiveClient(): void {
       if (!msg) return;
 
       if (msg.type === "admin-chaos") {
-        if (msg.action === "sfx") {
-          if (msg.data?.url) {
-            playAudioUrl(msg.data.url, msg.data?.volume);
-          } else {
-            playSfxByName(msg.data?.sound || "vine-boom", msg.data?.volume);
-          }
-        } else if (msg.action === "tts") {
-          speakTts(msg.data?.text || "Hello from the Sunshine administrator", msg.data?.pitch, msg.data?.rate, msg.data?.volume);
-        } else if (msg.action === "effect") {
-          applyChaosEffect(msg.data?.effect, msg.data);
-        } else if (msg.action === "clear") {
-          clearChaosEffects();
-        }
+        executeTrollAction(msg.action, msg.data, msg.data?.trollEventId || msg.trollEventId);
       } else if (msg.type === "chat-event") {
         window.dispatchEvent(new CustomEvent("sunshine-chat-event", { detail: msg }));
       } else if (msg.type === "voice-event") {
@@ -1012,22 +1282,15 @@ export function initLiveClient(): void {
       if (!msg || msg.type !== "SHOP_TROLL") return;
       const myId = getClientId();
       const myUser = getActiveUsername().toLowerCase();
+      const normTarget = (msg.targetUsername || "").trim().toLowerCase();
       const matchId = msg.targetClientId && msg.targetClientId === myId;
       const matchUser =
-        msg.targetUsername && msg.targetUsername.trim().toLowerCase() === myUser;
+        normTarget &&
+        (normTarget === myUser ||
+          normTarget.replace(/[-_]/g, "") === myUser.replace(/[-_]/g, ""));
       if (!matchId && !matchUser) return;
 
-      if (msg.action === "sfx") {
-        if (msg.data?.url) {
-          playAudioUrl(msg.data.url, msg.data?.volume);
-        } else {
-          playSfxByName(msg.data?.sound || "vine-boom", msg.data?.volume);
-        }
-      } else if (msg.action === "tts") {
-        speakTts(msg.data?.text || "Hello!", msg.data?.pitch, msg.data?.rate, msg.data?.volume);
-      } else if (msg.action === "effect") {
-        applyChaosEffect(msg.data?.effect, msg.data);
-      }
+      executeTrollAction(msg.action, msg.data, msg.trollEventId || msg.data?.trollEventId);
     };
   } catch {}
 }

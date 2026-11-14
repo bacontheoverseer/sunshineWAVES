@@ -3,10 +3,9 @@ import { showHomeView } from "../state/store.ts";
 import {
   getCookieCoins,
   spendCookieCoins,
-  addCookieCoins,
   getActiveUser,
 } from "../core/cookieCoins.ts";
-import { getClientId } from "../core/liveClient.ts";
+import { getClientId, executeTrollAction } from "../core/liveClient.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
 
 interface ShopTrollItem {
@@ -36,7 +35,7 @@ const SHOP_ITEMS: ShopTrollItem[] = [
     category: "sound",
     icon: "fa-volume-high",
     action: "sfx",
-    data: { url: "/assets/sounds/vine-boom.mp3", volume: 1.0 },
+    data: { url: "/assets/sounds/vine-boom.mp3", sound: "vine-boom", volume: 1.0 },
   },
   {
     id: "metal-pipe",
@@ -46,7 +45,7 @@ const SHOP_ITEMS: ShopTrollItem[] = [
     category: "sound",
     icon: "fa-hammer",
     action: "sfx",
-    data: { url: "/assets/sounds/metal-pipe.mp3", volume: 1.0 },
+    data: { url: "/assets/sounds/metal-pipe.mp3", sound: "metal-pipe", volume: 1.0 },
   },
   {
     id: "fbi-open-up",
@@ -56,7 +55,7 @@ const SHOP_ITEMS: ShopTrollItem[] = [
     category: "sound",
     icon: "fa-shield-halved",
     action: "sfx",
-    data: { url: "/assets/sounds/fbi-open-up.mp3", volume: 1.0 },
+    data: { url: "/assets/sounds/fbi-open-up.mp3", sound: "door-knock", volume: 1.0 },
   },
   {
     id: "airhorn",
@@ -66,17 +65,17 @@ const SHOP_ITEMS: ShopTrollItem[] = [
     category: "sound",
     icon: "fa-bullhorn",
     action: "sfx",
-    data: { url: "/assets/sounds/airhorn.mp3", volume: 1.0 },
+    data: { url: "/assets/sounds/airhorn.mp3", sound: "screamer", volume: 1.0 },
   },
   {
-    id: "goofy-ahh",
-    name: "goofy cartoon sound",
-    desc: "plays goofy cartoon sound effects on the target user (1x)",
+    id: "emotional-damage",
+    name: "emotional damage",
+    desc: "plays the iconic emotional damage meme audio on the target user (1x)",
     cost: 25,
     category: "sound",
     icon: "fa-face-grin-squint-tears",
     action: "sfx",
-    data: { url: "/assets/sounds/goofy-ahh.mp3", volume: 1.0 },
+    data: { url: "/assets/sounds/emotional-damage.mp3", sound: "bruh", volume: 1.0 },
   },
   {
     id: "fart-reverb",
@@ -86,7 +85,7 @@ const SHOP_ITEMS: ShopTrollItem[] = [
     category: "sound",
     icon: "fa-wind",
     action: "sfx",
-    data: { url: "/assets/sounds/fart-reverb.mp3", volume: 1.0 },
+    data: { url: "/assets/sounds/reverb-fart.mp3", sound: "fart", volume: 1.0 },
   },
   {
     id: "barrel-roll",
@@ -96,7 +95,7 @@ const SHOP_ITEMS: ShopTrollItem[] = [
     category: "visual",
     icon: "fa-rotate",
     action: "effect",
-    data: { effect: "barrel-roll" },
+    data: { effect: "barrel-roll", duration: 1800 },
   },
   {
     id: "earthquake",
@@ -131,12 +130,22 @@ const SHOP_ITEMS: ShopTrollItem[] = [
   {
     id: "dvd-bounce",
     name: "dvd screen bounce",
-    desc: "bounces the target user's viewport around like a dvd screensaver for 10s",
+    desc: "bounces a neon dvd bouncer & shakes the target user's screen for 10s",
     cost: 75,
     category: "visual",
     icon: "fa-compact-disc",
     action: "effect",
     data: { effect: "dvd-bounce", duration: 10000 },
+  },
+  {
+    id: "matrix-rain",
+    name: "matrix hacker rain",
+    desc: "floods the target user's screen with green matrix code rain for 8 seconds",
+    cost: 65,
+    category: "visual",
+    icon: "fa-terminal",
+    action: "effect",
+    data: { effect: "matrix-rain", duration: 8000 },
   },
   {
     id: "fake-bsod",
@@ -343,11 +352,25 @@ export default function ShopPage() {
     }
 
     setSendingId(item.id);
+    const trollEventId = `troll_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    actionData = { ...actionData, trollEventId };
+
     try {
+      const meUser = getActiveUser().toLowerCase();
+      const targetLower = targetUser.trim().toLowerCase();
+      const isSelf =
+        targetLower === meUser ||
+        targetLower.replace(/[-_]/g, "") === meUser.replace(/[-_]/g, "");
+
+      if (isSelf) {
+        executeTrollAction(item.action, actionData, trollEventId);
+      }
+
       // Broadcast over local channel for instant multi-tab execution
       try {
         trollBcRef.current?.postMessage({
           type: "SHOP_TROLL",
+          trollEventId,
           targetUsername: targetUser,
           action: item.action,
           data: actionData,
@@ -355,26 +378,12 @@ export default function ShopPage() {
         });
       } catch {}
 
-      // Also trigger on current window if user targeted themselves to test
-      if (targetUser.toLowerCase() === getActiveUser().toLowerCase()) {
-        try {
-          const selfBc = new BroadcastChannel("cookie_live_troll_channel");
-          selfBc.postMessage({
-            type: "SHOP_TROLL",
-            targetClientId: getClientId(),
-            targetUsername: targetUser,
-            action: item.action,
-            data: actionData,
-          });
-          selfBc.close();
-        } catch {}
-      }
-
       // Send over backend SSE to target user
       await fetch("/api/shop/troll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          trollEventId,
           targetUsername: targetUser,
           action: item.action,
           data: actionData,
@@ -386,21 +395,6 @@ export default function ShopPage() {
         `sent 1x "${item.name}" to @${targetUser} (-${item.cost} cookie coins)`,
         "success"
       );
-
-      // Auto-clear temporary visual effects after their duration
-      if (item.action === "effect" && typeof actionData.duration === "number") {
-        setTimeout(() => {
-          fetch("/api/shop/troll", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              targetUsername: targetUser,
-              action: "clear",
-              data: {},
-            }),
-          }).catch(() => {});
-        }, actionData.duration as number);
-      }
     } finally {
       setSendingId(null);
     }
