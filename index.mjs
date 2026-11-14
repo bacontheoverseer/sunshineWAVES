@@ -442,7 +442,10 @@ async function handleMochiFallback(req, res) {
       return res.status(502).json({ error: "too many redirects" });
     }
 
-    const contentType = upstreamRes.headers.get("content-type") || "application/octet-stream";
+    let contentType = upstreamRes.headers.get("content-type") || "application/octet-stream";
+    if (!isCover && /^text\/plain\b/i.test(contentType) && /\.html?$/i.test(currentUrl.pathname)) {
+      contentType = "text/html; charset=utf-8";
+    }
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", contentType);
     res.setHeader(

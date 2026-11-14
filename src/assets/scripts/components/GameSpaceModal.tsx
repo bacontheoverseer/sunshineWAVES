@@ -367,6 +367,8 @@ export default function GameSpaceModal() {
   const [hostHeldKeys, setHostHeldKeys] = useState<string[]>([]);
   const [guestHeldKeys, setGuestHeldKeys] = useState<string[]>([]);
   const [p2pConnected, setP2pConnected] = useState(false);
+  const [streamSource, setStreamSource] = useState<"none" | "canvas" | "screen">("none");
+  const [guestAudioMuted, setGuestAudioMuted] = useState(true);
 
   const cloudPartyRef = useRef<CloudPlayParty | null>(null);
   cloudPartyRef.current = cloudParty;
@@ -375,6 +377,13 @@ export default function GameSpaceModal() {
   const cloudBcRef = useRef<BroadcastChannel | null>(null);
   const guestVideoRef = useRef<HTMLVideoElement | null>(null);
   const guestRemoteStreamRef = useRef<MediaStream | null>(null);
+  const hostStreamRef = useRef<MediaStream | null>(null);
+  const hostScreenStreamRef = useRef<MediaStream | null>(null);
+  const hostCaptureVideoRef = useRef<HTMLVideoElement | null>(null);
+  const hostPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const guestAudioMutedRef = useRef(true);
+  guestAudioMutedRef.current = guestAudioMuted;
+  const frameSendBusyRef = useRef(false);
   const remoteHeldSetRef = useRef<Map<string, RemoteKeyPayload>>(new Map());
   const localHeldSetRef = useRef<Set<string>>(new Set());
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -946,31 +955,84 @@ export default function GameSpaceModal() {
   };
 
   // --- CloudPlay Signaling, WebRTC Stream, & Remote Keybind Injection ---
-  const cleanupCloudRtc = useCallback(() => {
-    for (const keyPayload of remoteHeldSetRef.current.values()) {
-      injectRemoteKeyIntoHostGame("keyup", keyPayload);
+  const stopHostScreenShare = useCallback((renegotiate = false) => {
+    if (hostScreenStreamRef.current) {
+      for (const track of hostScreenStreamRef.current.getTracks()) {
+        try {
+          track.stop();
+        } catch {}
+      }
+      hostScreenStreamRef.current = null;
     }
-    remoteHeldSetRef.current.clear();
-    localHeldSetRef.current.clear();
-    setHostHeldKeys([]);
-    setGuestHeldKeys([]);
-    setP2pConnected(false);
-    setRemoteVideoActive(false);
-
-    if (cloudDcRef.current) {
-      try {
-        cloudDcRef.current.close();
-      } catch {}
-      cloudDcRef.current = null;
+    if (hostStreamRef.current) {
+      hostStreamRef.current = null;
     }
-    if (cloudPcRef.current) {
-      try {
-        cloudPcRef.current.close();
-      } catch {}
-      cloudPcRef.current = null;
+    if (hostCaptureVideoRef.current) {
+      hostCaptureVideoRef.current.srcObject = null;
     }
-    guestRemoteStreamRef.current = null;
+    if (hostPreviewVideoRef.current) {
+      hostPreviewVideoRef.current.srcObject = null;
+    }
+    setStreamSource("none");
+    if (renegotiate && cloudPcRef.current) {
+      for (const sender of cloudPcRef.current.getSenders()) {
+        if (sender.track) {
+          try {
+            sender.replaceTrack(null).catch(() => {});
+          } catch {}
+        }
+      }
+    }
   }, []);
+
+  const bindHostStreamElements = useCallback(
+    (stream: MediaStream | null, source: "none" | "canvas" | "screen") => {
+      hostStreamRef.current = stream;
+      setStreamSource(stream ? source : "none");
+      if (hostCaptureVideoRef.current) {
+        hostCaptureVideoRef.current.srcObject = stream;
+        if (stream) hostCaptureVideoRef.current.play().catch(() => {});
+      }
+      if (hostPreviewVideoRef.current) {
+        hostPreviewVideoRef.current.srcObject = stream;
+        if (stream) hostPreviewVideoRef.current.play().catch(() => {});
+      }
+    },
+    []
+  );
+
+  const cleanupCloudRtc = useCallback(
+    (keepScreenShare = false) => {
+      for (const keyPayload of remoteHeldSetRef.current.values()) {
+        injectRemoteKeyIntoHostGame("keyup", keyPayload);
+      }
+      remoteHeldSetRef.current.clear();
+      localHeldSetRef.current.clear();
+      setHostHeldKeys([]);
+      setGuestHeldKeys([]);
+      setP2pConnected(false);
+      setRemoteVideoActive(false);
+
+      if (!keepScreenShare) {
+        stopHostScreenShare(false);
+      }
+
+      if (cloudDcRef.current) {
+        try {
+          cloudDcRef.current.close();
+        } catch {}
+        cloudDcRef.current = null;
+      }
+      if (cloudPcRef.current) {
+        try {
+          cloudPcRef.current.close();
+        } catch {}
+        cloudPcRef.current = null;
+      }
+      guestRemoteStreamRef.current = null;
+    },
+    [stopHostScreenShare]
+  );
 
   const sendCloudSignal = useCallback(
     (signalType: string, data: Record<string, unknown>, codeOverride?: string) => {
@@ -1004,6 +1066,22 @@ export default function GameSpaceModal() {
         });
       } catch {}
 
+      // Skip queueing duplicate HTTP frame uploads if previous frame request is still in flight
+      if (signalType === "FRAME") {
+        if (frameSendBusyRef.current) return;
+        frameSendBusyRef.current = true;
+        fetch("/api/cloudplay/signal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, fromClientId, signalType, data }),
+        })
+          .catch(() => {})
+          .finally(() => {
+            frameSendBusyRef.current = false;
+          });
+        return;
+      }
+
       // Relay over server SSE to the remote computer
       fetch("/api/cloudplay/signal", {
         method: "POST",
@@ -1025,9 +1103,35 @@ export default function GameSpaceModal() {
     injectRemoteKeyIntoHostGame(payload.action, payload);
   }, []);
 
+  const syncStreamToHostPeer = useCallback(
+    async (pc: RTCPeerConnection, stream: MediaStream, code: string, sendOffer: boolean) => {
+      let addedNewTrack = false;
+      const senders = pc.getSenders();
+      for (const track of stream.getTracks()) {
+        const existingSender = senders.find((s) => s.track && s.track.kind === track.kind);
+        if (existingSender) {
+          await existingSender.replaceTrack(track).catch(() => {});
+        } else {
+          pc.addTrack(track, stream);
+          addedNewTrack = true;
+        }
+      }
+      if (sendOffer && addedNewTrack) {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          if (pc.localDescription) {
+            sendCloudSignal("OFFER", { sdp: pc.localDescription.toJSON() }, code);
+          }
+        } catch {}
+      }
+    },
+    [sendCloudSignal]
+  );
+
   const setupCloudWebRtc = useCallback(
     async (asHost: boolean, code: string) => {
-      cleanupCloudRtc();
+      cleanupCloudRtc(true);
       const pc = new RTCPeerConnection({
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
@@ -1067,19 +1171,28 @@ export default function GameSpaceModal() {
         const dc = pc.createDataChannel("cloudplay_io", { ordered: false, maxRetransmits: 0 });
         bindDataChannel(dc);
 
-        // Attach live canvas video stream from the Host's single game instance if available
-        try {
-          const { canvases } = getHostGameContexts();
-          const primaryCanvas = canvases[0] as
-            | (HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream })
-            | undefined;
-          if (primaryCanvas && typeof primaryCanvas.captureStream === "function") {
-            const stream = primaryCanvas.captureStream(30);
-            for (const track of stream.getTracks()) {
-              pc.addTrack(track, stream);
+        // Prefer active tab/screen share if Host enabled it, otherwise attach game <canvas> stream
+        let activeStream: MediaStream | null = hostScreenStreamRef.current;
+        let nextSource: "none" | "canvas" | "screen" = activeStream ? "screen" : "none";
+        if (!activeStream) {
+          try {
+            const { canvases } = getHostGameContexts();
+            const primaryCanvas = canvases[0] as
+              | (HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream })
+              | undefined;
+            if (primaryCanvas && typeof primaryCanvas.captureStream === "function") {
+              activeStream = primaryCanvas.captureStream(30);
+              nextSource = "canvas";
             }
+          } catch {}
+        }
+
+        if (activeStream) {
+          bindHostStreamElements(activeStream, nextSource);
+          for (const track of activeStream.getTracks()) {
+            pc.addTrack(track, activeStream);
           }
-        } catch {}
+        }
 
         try {
           const offer = await pc.createOffer();
@@ -1091,22 +1204,65 @@ export default function GameSpaceModal() {
       } else {
         pc.ondatachannel = (ev) => bindDataChannel(ev.channel);
         pc.ontrack = (ev) => {
-          const stream = ev.streams[0];
-          if (stream) {
-            guestRemoteStreamRef.current = stream;
-            setRemoteVideoActive(true);
-            if (guestVideoRef.current) {
-              guestVideoRef.current.srcObject = stream;
-              guestVideoRef.current.play().catch(() => {});
-            }
+          const incomingStream =
+            (ev.streams && ev.streams[0]) ||
+            guestRemoteStreamRef.current ||
+            new MediaStream();
+          if (ev.track && !incomingStream.getTracks().some((t) => t.id === ev.track.id)) {
+            incomingStream.addTrack(ev.track);
+          }
+          guestRemoteStreamRef.current = incomingStream;
+          setRemoteVideoActive(true);
+          if (guestVideoRef.current) {
+            guestVideoRef.current.srcObject = incomingStream;
+            guestVideoRef.current.muted = guestAudioMutedRef.current;
+            guestVideoRef.current.play().catch(() => {});
           }
         };
       }
 
       return pc;
     },
-    [cleanupCloudRtc, handleIncomingKeyFromGuest, sendCloudSignal]
+    [bindHostStreamElements, cleanupCloudRtc, handleIncomingKeyFromGuest, sendCloudSignal]
   );
+
+  const startHostScreenShare = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        notifyToast("screen sharing is not supported in this browser", "error");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: true,
+        preferCurrentTab: true,
+      } as DisplayMediaStreamOptions);
+      if (!stream) return;
+
+      if (hostScreenStreamRef.current) {
+        for (const t of hostScreenStreamRef.current.getTracks()) {
+          try { t.stop(); } catch {}
+        }
+      }
+      hostScreenStreamRef.current = stream;
+      bindHostStreamElements(stream, "screen");
+
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.onended = () => {
+          stopHostScreenShare(true);
+        };
+      }
+
+      const currentParty = cloudPartyRef.current;
+      if (cloudPcRef.current && currentParty) {
+        await syncStreamToHostPeer(cloudPcRef.current, stream, currentParty.code, true);
+      }
+      notifyToast("live game screen shared with player 2!", "success");
+    } catch {
+      notifyToast("screen share cancelled", "info");
+    }
+  }, [bindHostStreamElements, stopHostScreenShare, syncStreamToHostPeer]);
 
   // Listen for CloudPlay SSE & BroadcastChannel events
   useEffect(() => {
@@ -1155,7 +1311,10 @@ export default function GameSpaceModal() {
           void setupCloudWebRtc(true, current.code);
         } else if (sigType === "OFFER" && !amHost && sigData.sdp) {
           try {
-            const pc = await setupCloudWebRtc(false, current.code);
+            const pc =
+              cloudPcRef.current && cloudPcRef.current.signalingState !== "closed"
+                ? cloudPcRef.current
+                : await setupCloudWebRtc(false, current.code);
             await pc.setRemoteDescription(
               new RTCSessionDescription(sigData.sdp as RTCSessionDescriptionInit)
             );
@@ -1204,42 +1363,90 @@ export default function GameSpaceModal() {
     };
   }, [cleanupCloudRtc, handleIncomingKeyFromGuest, sendCloudSignal, setupCloudWebRtc]);
 
-  // Attach MediaStream to guest <video> whenever it mounts
+  // Attach MediaStream to guest & host <video> whenever elements mount
   useEffect(() => {
     if (guestVideoRef.current && guestRemoteStreamRef.current) {
       guestVideoRef.current.srcObject = guestRemoteStreamRef.current;
+      guestVideoRef.current.muted = guestAudioMuted;
       guestVideoRef.current.play().catch(() => {});
     }
-  }, [remoteVideoActive, guestStageFull, isOpen, activeTabMode]);
+  }, [remoteVideoActive, guestStageFull, isOpen, activeTabMode, guestAudioMuted]);
 
-  // Host: Capture & stream frames from the single game instance to Guest + track Host keys
+  useEffect(() => {
+    if (hostCaptureVideoRef.current && hostStreamRef.current) {
+      hostCaptureVideoRef.current.srcObject = hostStreamRef.current;
+      hostCaptureVideoRef.current.play().catch(() => {});
+    }
+    if (hostPreviewVideoRef.current && hostStreamRef.current) {
+      hostPreviewVideoRef.current.srcObject = hostStreamRef.current;
+      hostPreviewVideoRef.current.play().catch(() => {});
+    }
+  }, [streamSource, isOpen, activeTabMode, cloudParty]);
+
+  // Host: Capture & stream live frames + canvas/tab video to Guest + track Host keys
   useEffect(() => {
     if (!cloudParty || !isCloudHost || !cloudParty.guest) return;
 
-    const frameInterval = window.setInterval(() => {
+    const tryAttachGameCanvasStream = () => {
+      if (hostScreenStreamRef.current) return;
+      const existingTrack = hostStreamRef.current?.getVideoTracks()[0];
+      if (existingTrack && existingTrack.readyState === "live") return;
       try {
         const { canvases } = getHostGameContexts();
-        const srcCanvas = canvases[0];
-        if (!srcCanvas) return;
+        const primaryCanvas = canvases[0] as
+          | (HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream })
+          | undefined;
+        if (primaryCanvas && typeof primaryCanvas.captureStream === "function") {
+          const stream = primaryCanvas.captureStream(30);
+          bindHostStreamElements(stream, "canvas");
+          if (cloudPcRef.current) {
+            void syncStreamToHostPeer(cloudPcRef.current, stream, cloudParty.code, true);
+          }
+        }
+      } catch {}
+    };
+
+    tryAttachGameCanvasStream();
+    const canvasWatchInterval = window.setInterval(tryAttachGameCanvasStream, 1000);
+
+    const frameInterval = window.setInterval(() => {
+      try {
+        const pc = cloudPcRef.current;
+        const hasLiveP2pVideo = Boolean(
+          pc &&
+            pc.connectionState === "connected" &&
+            pc.getSenders().some((s) => s.track?.kind === "video" && s.track.readyState === "live")
+        );
+        if (hasLiveP2pVideo) return;
+
+        const capVid = hostCaptureVideoRef.current;
+        let sourceEl: HTMLVideoElement | HTMLCanvasElement | null = null;
+        if (capVid && capVid.readyState >= 2 && capVid.videoWidth > 0 && capVid.videoHeight > 0) {
+          sourceEl = capVid;
+        } else {
+          const { canvases } = getHostGameContexts();
+          if (canvases[0]) sourceEl = canvases[0];
+        }
+        if (!sourceEl) return;
 
         if (!offscreenCanvasRef.current) {
           const oc = document.createElement("canvas");
-          oc.width = 480;
-          oc.height = 270;
+          oc.width = 640;
+          oc.height = 360;
           offscreenCanvasRef.current = oc;
         }
         const oc = offscreenCanvasRef.current;
         const ctx = oc.getContext("2d");
         if (!ctx) return;
-        ctx.drawImage(srcCanvas, 0, 0, oc.width, oc.height);
-        const frameDataUrl = oc.toDataURL("image/jpeg", 0.5);
+        ctx.drawImage(sourceEl, 0, 0, oc.width, oc.height);
+        const frameDataUrl = oc.toDataURL("image/jpeg", 0.55);
         if (frameDataUrl && frameDataUrl.length > 100) {
           sendCloudSignal("FRAME", { frame: frameDataUrl });
         }
       } catch {
-        // Canvas may be tainted if non-same-origin
+        // Canvas may be tainted if non-same-origin; user can click Share Game Screen
       }
-    }, 160);
+    }, 130);
 
     const onHostKeyDown = (e: KeyboardEvent) => {
       const mapped = KEY_CODE_TABLE[e.code];
@@ -1264,11 +1471,12 @@ export default function GameSpaceModal() {
     window.addEventListener("keyup", onHostKeyUp, true);
 
     return () => {
+      window.clearInterval(canvasWatchInterval);
       window.clearInterval(frameInterval);
       window.removeEventListener("keydown", onHostKeyDown, true);
       window.removeEventListener("keyup", onHostKeyUp, true);
     };
-  }, [cloudParty, isCloudHost, sendCloudSignal]);
+  }, [cloudParty, isCloudHost, bindHostStreamElements, sendCloudSignal, syncStreamToHostPeer]);
 
   // Guest: Capture keybinds on Guest's computer and send them to Host's single game instance!
   useEffect(() => {
@@ -1520,6 +1728,13 @@ export default function GameSpaceModal() {
 
   return (
     <>
+      <video
+        ref={hostCaptureVideoRef}
+        muted
+        autoplay
+        playsInline
+        style={{ display: "none" }}
+      />
       {/* Floating CloudPlay Host Pill when playing full-screen with Modal closed */}
       {cloudParty && !isOpen && !guestStageFull && (
         <div
@@ -1568,6 +1783,19 @@ export default function GameSpaceModal() {
             >
               p2 keys: {guestHeldKeys.join(" ")}
             </span>
+          )}
+          {isCloudHost && (
+            <button
+              type="button"
+              class={`chat-header-btn ${streamSource === "screen" ? "voice-active" : ""}`}
+              style={{ padding: "4px 9px", fontSize: "11px" }}
+              onClick={() =>
+                streamSource === "screen" ? stopHostScreenShare(true) : void startHostScreenShare()
+              }
+            >
+              <i class="fa-solid fa-display" />{" "}
+              {streamSource === "screen" ? "stop share" : "share screen"}
+            </button>
           )}
           <button
             type="button"
@@ -1671,6 +1899,15 @@ export default function GameSpaceModal() {
               </button>
               <button
                 type="button"
+                class={`chat-header-btn ${!guestAudioMuted ? "voice-active" : ""}`}
+                onClick={() => setGuestAudioMuted((m) => !m)}
+                title="Toggle game audio"
+              >
+                <i class={`fa-solid ${guestAudioMuted ? "fa-volume-xmark" : "fa-volume-high"}`} />
+                <span>{guestAudioMuted ? "unmute" : "sound on"}</span>
+              </button>
+              <button
+                type="button"
                 class="chat-header-btn"
                 onClick={() => {
                   setGuestStageFull(false);
@@ -1709,6 +1946,7 @@ export default function GameSpaceModal() {
               ref={guestVideoRef}
               autoplay
               playsInline
+              muted={guestAudioMuted}
               style={{
                 width: "100%",
                 height: "100%",
@@ -2068,7 +2306,7 @@ export default function GameSpaceModal() {
                       </div>
                     </div>
 
-                    <div style={{ display: "flex", gap: "8px" }}>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                       <button
                         type="button"
                         class="chat-header-btn"
@@ -2080,6 +2318,34 @@ export default function GameSpaceModal() {
                         <i class="fa-solid fa-copy" />
                         <span>copy code</span>
                       </button>
+                      {isCloudHost && (
+                        <button
+                          type="button"
+                          class={`chat-header-btn ${streamSource === "screen" ? "voice-active" : ""}`}
+                          onClick={() =>
+                            streamSource === "screen"
+                              ? stopHostScreenShare(true)
+                              : void startHostScreenShare()
+                          }
+                        >
+                          <i class="fa-solid fa-display" />
+                          <span>
+                            {streamSource === "screen" ? "stop sharing screen" : "share game screen"}
+                          </span>
+                        </button>
+                      )}
+                      {isCloudGuest && (
+                        <button
+                          type="button"
+                          class={`chat-header-btn ${!guestAudioMuted ? "voice-active" : ""}`}
+                          onClick={() => setGuestAudioMuted((m) => !m)}
+                        >
+                          <i
+                            class={`fa-solid ${guestAudioMuted ? "fa-volume-xmark" : "fa-volume-high"}`}
+                          />
+                          <span>{guestAudioMuted ? "unmute" : "sound on"}</span>
+                        </button>
+                      )}
                       {isCloudGuest && (
                         <button
                           type="button"
@@ -2270,6 +2536,71 @@ export default function GameSpaceModal() {
                     </label>
                   </div>
 
+                  {/* Host Live Screen Share Preview (mirrors what Player 2 sees) */}
+                  {isCloudHost && (
+                    <div
+                      style={{
+                        borderRadius: "14px",
+                        overflow: "hidden",
+                        border: "1px solid var(--bg-surface-10)",
+                        backgroundColor: "#000",
+                        height: "240px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        position: "relative",
+                      }}
+                    >
+                      <video
+                        ref={hostPreviewVideoRef}
+                        muted
+                        autoplay
+                        playsInline
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          objectFit: "contain",
+                          display: streamSource !== "none" ? "block" : "none",
+                        }}
+                      />
+                      {streamSource === "none" && (
+                        <div style={{ textAlign: "center", color: "var(--color-sublabel)", padding: "18px" }}>
+                          <div style={{ fontSize: "13px", color: "var(--text-primary)", marginBottom: "6px" }}>
+                            no live screen stream attached yet
+                          </div>
+                          <div style={{ fontSize: "11.5px", marginBottom: "10px" }}>
+                            open a game tab for auto canvas capture, or click below to share your tab/screen with player 2!
+                          </div>
+                          <button
+                            type="button"
+                            class="chat-header-btn voice-active"
+                            onClick={() => void startHostScreenShare()}
+                          >
+                            <i class="fa-solid fa-display" />
+                            <span>share game screen</span>
+                          </button>
+                        </div>
+                      )}
+                      {streamSource !== "none" && (
+                        <span
+                          style={{
+                            position: "absolute",
+                            top: "10px",
+                            left: "10px",
+                            padding: "3px 9px",
+                            borderRadius: "8px",
+                            backgroundColor: "rgba(0,0,0,0.7)",
+                            color: "#4ade80",
+                            fontSize: "11px",
+                            fontWeight: 600,
+                          }}
+                        >
+                          live ({streamSource === "screen" ? "shared screen" : "game canvas"})
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {/* Guest Docked Live Stream Preview */}
                   {isCloudGuest && (
                     <div
@@ -2291,6 +2622,7 @@ export default function GameSpaceModal() {
                           ref={guestVideoRef}
                           autoplay
                           playsInline
+                          muted={guestAudioMuted}
                           style={{
                             width: "100%",
                             height: "100%",

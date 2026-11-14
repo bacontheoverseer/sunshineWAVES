@@ -143,8 +143,14 @@ function loadNewTabGameData(allGames: unknown[]) {
       .then((data: any[]) =>
         data
           .map((zone) => {
-            const isExternal = zone.url ? /^https?:\/\//.test(zone.url) && !zone.url.includes("{HTML_URL}") : false;
-            const finalUrl = isExternal ? zone.url : `https://gn-math.dev/?id=${zone.id}`;
+            const rawUrl = String(zone.url || "").trim();
+            const isHtmlZone = rawUrl.includes("{HTML_URL}");
+            const isExternal = rawUrl ? /^https?:\/\//.test(rawUrl) && !isHtmlZone : false;
+            const finalUrl = isHtmlZone
+              ? rawUrl.replace("{HTML_URL}", SOURCE_CONFIG.gnMath.html)
+              : isExternal
+                ? rawUrl
+                : `https://gn-math.dev/?id=${zone.id}`;
             return {
               id: zone.id,
               name: zone.name,
