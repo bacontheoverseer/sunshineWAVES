@@ -16,8 +16,23 @@ let raf: number | null = null;
 let lastTime = 0;
 let resizeRaf: number | null = null;
 
+function isLowPowerDevice(): boolean {
+  return document.documentElement.classList.contains("low-power-device");
+}
+
+function prefersReducedMotion(): boolean {
+  try {
+    return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+  } catch {
+    return false;
+  }
+}
+
 function ensureCanvas(): void {
-  if (canvas) return;
+  if (canvas) {
+    if (canvas.style.display === "none") canvas.style.display = "block";
+    return;
+  }
   canvas = document.createElement("canvas");
   canvas.id = "particles-canva";
   Object.assign(canvas.style, {
@@ -27,6 +42,7 @@ function ensureCanvas(): void {
     height: "100%",
     pointerEvents: "none",
     zIndex: "2147483647",
+    display: "block",
   });
   document.body.appendChild(canvas);
   ctx = canvas.getContext("2d")!;
@@ -51,11 +67,14 @@ function syncSize(): void {
 }
 
 function spawnBurst(x: number, y: number): void {
-  const count = 12 + Math.floor(Math.random() * 6);
+  const lowPower = isLowPowerDevice();
+  const count = lowPower
+    ? 6 + Math.floor(Math.random() * 3)
+    : 12 + Math.floor(Math.random() * 6);
   for (let i = 0; i < count; i++) {
     const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.4;
     const speed = 100 + Math.random() * 160;
-    const life = 0.35 + Math.random() * 0.3;
+    const life = (lowPower ? 0.28 : 0.35) + Math.random() * 0.25;
     particles.push({
       x,
       y,
@@ -107,10 +126,12 @@ function tick(time: number): void {
     raf = requestAnimationFrame(tick);
   } else {
     raf = null;
+    canvas.style.display = "none";
   }
 }
 
 function onClick(e: MouseEvent): void {
+  if (prefersReducedMotion()) return;
   ensureCanvas();
   spawnBurst(e.clientX, e.clientY);
   if (raf === null) {

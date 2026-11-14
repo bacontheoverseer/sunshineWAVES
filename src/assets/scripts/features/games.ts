@@ -95,8 +95,53 @@ function getSourceKey(): SourceKey {
   return source as SourceKey;
 }
 
+const GAMES_DISK_CACHE = "sunshine-games-v1";
+const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
+
 function getCacheKey(sourceKey: SourceKey = getSourceKey()): string {
   return `sunshine-game-cache${sourceKey}`;
+}
+
+function getPersistentCacheRequestUrl(source: SourceKey): string {
+  return `/__cache/games/${source}.json`;
+}
+
+async function readPersistentGamesCache(
+  source: SourceKey,
+): Promise<{ games: GameEntry[]; fresh: boolean } | null> {
+  if (typeof caches === "undefined") return null;
+  try {
+    const cache = await caches.open(GAMES_DISK_CACHE);
+    const match = await cache.match(getPersistentCacheRequestUrl(source));
+    if (!match) return null;
+    const savedAt = Number(match.headers.get("X-Cached-At") || "0");
+    const games = (await match.json()) as GameEntry[];
+    if (!Array.isArray(games) || games.length === 0) return null;
+    return {
+      games: applySearchCacheFields(games),
+      fresh: Date.now() - savedAt < GAMES_CACHE_TTL_MS,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writePersistentGamesCache(source: SourceKey, games: GameEntry[]): void {
+  if (typeof caches === "undefined") return;
+  void caches
+    .open(GAMES_DISK_CACHE)
+    .then((cache) =>
+      cache.put(
+        getPersistentCacheRequestUrl(source),
+        new Response(JSON.stringify(games), {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Cached-At": String(Date.now()),
+          },
+        }),
+      ),
+    )
+    .catch(() => {});
 }
 
 function applySearchCacheFields(games: GameEntry[]): GameEntry[] {
@@ -113,6 +158,7 @@ function saveToCache(source: SourceKey, games: GameEntry[]): GameEntry[] {
   } catch (e) {
     console.warn("unable to cache games", e);
   }
+  writePersistentGamesCache(source, games);
   return games;
 }
 
@@ -295,10 +341,24 @@ export function fetchGameData(): Promise<GameEntry[]> {
         .then((d) => saveToCache(source, applySearchCacheFields(mapTruffledGames(d)))),
   };
 
-  gameDataPromise = (mappers[source] ?? mappers.selenite)().then((games) => {
-    allGames = games;
-    return games;
-  });
+  const fetchFresh = () =>
+    (mappers[source] ?? mappers.selenite)().then((games) => {
+      allGames = games;
+      return games;
+    });
+
+  gameDataPromise = readPersistentGamesCache(source)
+    .then((diskHit) => {
+      if (diskHit) {
+        allGames = diskHit.games;
+        if (!diskHit.fresh) {
+          void fetchFresh().catch(() => {});
+        }
+        return diskHit.games;
+      }
+      return fetchFresh();
+    })
+    .catch(() => fetchFresh());
 
   gameDataPromise.catch((err) => {
     console.error("game fetch failed:", err);
@@ -309,11 +369,18 @@ export function fetchGameData(): Promise<GameEntry[]> {
 }
 
 export function resetGameCache(): void {
+  const source = getSourceKey();
   allGames = [];
   gameDataPromise = null;
   try {
-    sessionStorage.removeItem(getCacheKey());
+    sessionStorage.removeItem(getCacheKey(source));
   } catch {}
+  if (typeof caches !== "undefined") {
+    void caches
+      .open(GAMES_DISK_CACHE)
+      .then((cache) => cache.delete(getPersistentCacheRequestUrl(source)))
+      .catch(() => {});
+  }
 }
 
 export function getGameDisplayLabel(realUrl: string): string | null {

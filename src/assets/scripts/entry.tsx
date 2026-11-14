@@ -57,6 +57,19 @@ function scheduleIdleLoad(callback: () => void) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  try {
+    const nav = navigator as Navigator & { deviceMemory?: number };
+    const isReducedMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
+    const isLowPower =
+      isReducedMotion ||
+      (navigator.hardwareConcurrency || 8) <= 4 ||
+      (nav.deviceMemory || 8) <= 4;
+    if (isLowPower) {
+      document.documentElement.classList.add("low-power-device");
+    }
+  } catch {}
+
   initUiSignals();
   initClickParticles();
   store.setupWindowsunshineApp();

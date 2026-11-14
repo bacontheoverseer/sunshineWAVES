@@ -1161,7 +1161,7 @@ export default function ChatModal() {
     fetchChatAndPresenceState();
     const pollInterval = window.setInterval(
       fetchChatAndPresenceState,
-      isOpen ? 8000 : 20000
+      isOpen ? 8000 : 45000
     );
     return () => window.clearInterval(pollInterval);
   }, [cloudUser, isOpen, ingestIncomingMessage]);

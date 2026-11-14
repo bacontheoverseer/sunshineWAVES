@@ -136,6 +136,9 @@ body.shop-view #arrow-pointer {
   transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
   position: relative;
   overflow: hidden;
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: 175px 140px;
 }
 
 .app-card:hover {

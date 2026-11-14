@@ -206,8 +206,8 @@ const MOCHI_FALLBACK_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const mochiCoverCache = CACHING_ENABLED
   ? new LRUCache({
-      maxSize: Math.min(4, Math.max(1, parseInt(process.env.FILE_CACHE_MAX_MB || "8", 10))) * 1024 * 1024,
-      ttl: 1000 * 60 * 30,
+      maxSize: Math.min(8, Math.max(2, parseInt(process.env.FILE_CACHE_MAX_MB || "8", 10))) * 1024 * 1024,
+      ttl: 1000 * 60 * 60,
       ttlAutopurge: true,
       sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
     })
@@ -395,7 +395,7 @@ async function handleMochiFallback(req, res) {
     const cached = mochiCoverCache.get(targetStr);
     if (cached) {
       res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
       res.setHeader("Content-Type", cached.contentType || "application/octet-stream");
       res.setHeader("X-Cache", "HIT");
       return res.status(cached.status).send(cached.body);
@@ -450,7 +450,9 @@ async function handleMochiFallback(req, res) {
     res.setHeader("Content-Type", contentType);
     res.setHeader(
       "Cache-Control",
-      isCover ? "public, max-age=86400" : "public, max-age=300",
+      isCover
+        ? "public, max-age=86400, stale-while-revalidate=604800"
+        : "public, max-age=600, stale-while-revalidate=86400",
     );
 
     if (req.method === "HEAD") {
