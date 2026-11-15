@@ -704,6 +704,23 @@ body.browser-view .main-nav {
     transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
 }
 
+.main-container.has-profile-theme {
+    margin-top: 11.5vh;
+    padding: 44px 40px 40px;
+}
+
+.main-container.has-profile-theme + #bookmarks-container {
+    margin-top: 22px;
+}
+
+.main-container.has-profile-theme + #bookmarks-container #bookmarks-title {
+    color: rgba(255, 255, 255, 0.88);
+    background: rgba(15, 18, 28, 0.72);
+    padding: 4px 11px;
+    border-radius: 999px;
+    font-size: 12px;
+}
+
 .main-container.has-profile-theme.theme-midnight-glass {
     background: linear-gradient(180deg, rgba(39, 46, 108, 0.78) 0%, rgba(11, 16, 38, 0.88) 45%, rgba(9, 13, 31, 0.9) 100%);
     border-color: rgba(99, 102, 241, 0.45);
@@ -735,42 +752,49 @@ body.browser-view .main-nav {
 }
 
 .main-container.has-profile-theme .chat-profile-frame-layer {
-    z-index: 9;
+    z-index: 3;
     border-radius: 26px;
 }
 
 .main-container.has-profile-theme .chat-profile-frame-img.frame-slot-f {
-    top: -4%;
-    left: -2%;
-    width: 104%;
-    height: 108%;
+    top: -3%;
+    left: -1.5%;
+    width: 103%;
+    height: 106%;
     object-fit: fill;
+    opacity: 0.9;
 }
 
 .main-container.has-profile-theme .chat-profile-frame-img.frame-slot-t {
-    top: -42px;
-    left: -24px;
+    top: -28px;
+    left: -12px;
     width: auto;
-    height: min(230px, 56%);
-    max-width: 65%;
+    height: 110px;
+    max-width: 60%;
     object-fit: contain;
     object-position: left top;
 }
 
 .main-container.has-profile-theme .chat-profile-frame-img.frame-slot-b {
-    bottom: -30px;
-    right: -22px;
-    left: auto;
-    width: auto;
-    height: min(185px, 46%);
-    max-width: 65%;
-    object-fit: contain;
-    object-position: right bottom;
+    display: none;
+}
+
+.main-container.has-profile-theme .search-bar {
+    margin: 24px auto 4px;
+}
+
+.main-container.has-profile-theme .search-bar input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    background-color: rgba(6, 9, 18, 0.58);
+    border-color: rgba(255, 255, 255, 0.14);
 }
 
 .title {
     display: inline-block;
     margin-bottom: 5px;
+    position: relative;
+    z-index: 6;
 }
 
 .title img {
@@ -1503,7 +1527,6 @@ body:has(#auth-gate-backdrop) .sunshine-ad-node {
     height: 100%;
     object-fit: contain;
     pointer-events: none;
-    filter: drop-shadow(0 6px 20px rgba(0, 0, 0, 0.35));
 }
 
 .home-decor-dock {
