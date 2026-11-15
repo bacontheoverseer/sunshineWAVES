@@ -188,7 +188,8 @@ export default function CollectiblePickerPanel({
         </div>
       ) : (
         <div class={`chat-collectible-grid is-${kind}s`}>
-          {shown.map((item) => {
+          {shown.map((item, idx) => {
+            const imgLoading = idx < 9 ? "eager" : "lazy";
             if (kind === "decoration") {
               const d = item as ReturnType<typeof getCatalogDecorations>[number];
               const fullUrl = expandCollectibleUrl(d.u);
@@ -209,7 +210,7 @@ export default function CollectiblePickerPanel({
                       src={getSafeMediaProxySrc(fullUrl)}
                       alt={d.n}
                       class="chat-collectible-thumb-img"
-                      loading="lazy"
+                      loading={imgLoading}
                       decoding="async"
                     />
                   </div>
@@ -239,7 +240,7 @@ export default function CollectiblePickerPanel({
                       src={getSafeMediaProxySrc(active ? primaryUrl : thumbUrl)}
                       alt={ef.n}
                       class="chat-collectible-thumb-img"
-                      loading="lazy"
+                      loading={imgLoading}
                       decoding="async"
                     />
                   </div>
@@ -268,7 +269,7 @@ export default function CollectiblePickerPanel({
                       src={getSafeMediaProxySrc(fullUrl)}
                       alt={np.n}
                       class="chat-collectible-thumb-img"
-                      loading="lazy"
+                      loading={imgLoading}
                       decoding="async"
                     />
                   </div>
@@ -297,7 +298,7 @@ export default function CollectiblePickerPanel({
                         src={getSafeMediaProxySrc(expanded)}
                         alt=""
                         class="chat-collectible-frame-thumb-layer"
-                        loading="lazy"
+                        loading={imgLoading}
                         decoding="async"
                       />
                     );
@@ -345,7 +346,7 @@ export default function CollectiblePickerPanel({
           <button
             type="button"
             class="chat-gif-more-btn"
-            style={{ width: "100%", justifyContent: "space-between" }}
+            style={{ width: "100%", justifyContent: "space-between", gap: "6px" }}
             onClick={() => setShowClassic((s) => !s)}
           >
             <span>built-in css presets</span>
