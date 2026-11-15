@@ -1003,7 +1003,7 @@ export class CloudSync {
     }
 
     const statusEl = document.querySelector<HTMLElement>("#auth-status");
-    if (statusEl)
+    if (statusEl && !statusEl.closest("#auth-container.is-profile-pill"))
       statusEl.textContent = this.isAuthenticated
         ? (this.user.username ?? "")
         : "cloud sync";

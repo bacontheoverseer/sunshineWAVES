@@ -1863,7 +1863,8 @@
 .chat-entry-avatar,
 .chat-user-avatar,
 .chat-voice-card-avatar,
-.chat-profile-avatar-lg {
+.chat-profile-avatar-lg,
+.top-auth-avatar {
   position: relative;
   overflow: visible !important;
 }
@@ -2032,7 +2033,9 @@
 .chat-entry-avatar .avatar-dec-ring.dec-kitty-neon::before,
 .chat-entry-avatar .avatar-dec-ring.dec-kitty-neon::after,
 .chat-user-avatar .avatar-dec-ring.dec-kitty-neon::before,
-.chat-user-avatar .avatar-dec-ring.dec-kitty-neon::after {
+.chat-user-avatar .avatar-dec-ring.dec-kitty-neon::after,
+.top-auth-avatar .avatar-dec-ring.dec-kitty-neon::before,
+.top-auth-avatar .avatar-dec-ring.dec-kitty-neon::after {
   width: 6px;
   height: 6px;
   top: -3px;
@@ -2247,43 +2250,50 @@
   border-radius: 9px;
 }
 
-.chat-user-item.nameplate-aurora-mist {
+.chat-user-item.nameplate-aurora-mist,
+.top-auth-pill-bg.nameplate-aurora-mist {
   background: linear-gradient(90deg, rgba(6, 182, 212, 0.18), rgba(168, 85, 247, 0.16), rgba(16, 185, 129, 0.16));
   background-size: 220% 100%;
   animation: bannerFlow 6s ease infinite;
 }
 
-.chat-user-item.nameplate-ember-sparks {
+.chat-user-item.nameplate-ember-sparks,
+.top-auth-pill-bg.nameplate-ember-sparks {
   background: linear-gradient(90deg, rgba(234, 88, 12, 0.2), rgba(220, 38, 38, 0.16), rgba(250, 204, 21, 0.15));
   background-size: 220% 100%;
   animation: bannerFlow 4.5s ease infinite;
 }
 
-.chat-user-item.nameplate-cyber-scan {
+.chat-user-item.nameplate-cyber-scan,
+.top-auth-pill-bg.nameplate-cyber-scan {
   background: linear-gradient(90deg, rgba(15, 23, 42, 0.65), rgba(34, 211, 238, 0.24), rgba(168, 85, 247, 0.2), rgba(15, 23, 42, 0.65));
   background-size: 250% 100%;
   animation: bannerFlow 3.6s linear infinite;
 }
 
-.chat-user-item.nameplate-sakura-breeze {
+.chat-user-item.nameplate-sakura-breeze,
+.top-auth-pill-bg.nameplate-sakura-breeze {
   background: linear-gradient(90deg, rgba(244, 114, 182, 0.18), rgba(251, 207, 232, 0.14), rgba(190, 24, 93, 0.18));
   background-size: 220% 100%;
   animation: bannerFlow 6.5s ease infinite;
 }
 
-.chat-user-item.nameplate-starlight-shimmer {
+.chat-user-item.nameplate-starlight-shimmer,
+.top-auth-pill-bg.nameplate-starlight-shimmer {
   background: linear-gradient(90deg, rgba(99, 102, 241, 0.2), rgba(255, 255, 255, 0.14), rgba(56, 189, 248, 0.2));
   background-size: 240% 100%;
   animation: bannerFlow 5s ease infinite;
 }
 
-.chat-user-item.nameplate-nebula-flow {
+.chat-user-item.nameplate-nebula-flow,
+.top-auth-pill-bg.nameplate-nebula-flow {
   background: linear-gradient(90deg, rgba(126, 34, 206, 0.22), rgba(59, 130, 246, 0.16), rgba(236, 72, 153, 0.18));
   background-size: 220% 100%;
   animation: bannerFlow 5.8s ease infinite;
 }
 
-.chat-user-item.nameplate-crimson-velvet {
+.chat-user-item.nameplate-crimson-velvet,
+.top-auth-pill-bg.nameplate-crimson-velvet {
   background: linear-gradient(90deg, rgba(127, 29, 29, 0.35), rgba(225, 29, 72, 0.2), rgba(88, 28, 135, 0.2));
   background-size: 220% 100%;
   animation: bannerFlow 5.2s ease infinite;
