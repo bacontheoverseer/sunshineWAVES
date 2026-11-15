@@ -20,11 +20,13 @@ export function StaffManagerContent({
 }: StaffManagerContentProps) {
   const [owners, setOwners] = useState<string[]>([]);
   const [staffMods, setStaffMods] = useState<string[]>([]);
+  const [goatUsers, setGoatUsers] = useState<string[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<string[]>([]);
   const [timeouts, setTimeouts] = useState<TimeoutRecord[]>([]);
   const [actorRole, setActorRole] = useState<string>("member");
   const [search, setSearch] = useState("");
   const [manualUser, setManualUser] = useState("");
+  const [manualGoatUser, setManualGoatUser] = useState("");
   const [busyUser, setBusyUser] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -48,6 +50,7 @@ export function StaffManagerContent({
       if (data.success) {
         setOwners(Array.isArray(data.owners) ? data.owners : []);
         setStaffMods(Array.isArray(data.staffMods) ? data.staffMods : []);
+        setGoatUsers(Array.isArray(data.goatUsers) ? data.goatUsers : []);
         setRegisteredUsers(
           Array.isArray(data.registeredUsers) ? data.registeredUsers : []
         );
@@ -64,6 +67,7 @@ export function StaffManagerContent({
   }, [loadStaff]);
 
   const isOwner = actorRole === "owner";
+  const isMod = isOwner || actorRole === "mod";
 
   const handleStaffAction = async (username: string, action: "add" | "remove") => {
     const clean = username.trim().replace(/^@/, "");
@@ -132,17 +136,51 @@ export function StaffManagerContent({
     }
   };
 
+  const handleGoatAction = async (username: string, granted: boolean) => {
+    const clean = username.trim().replace(/^@/, "");
+    if (!clean || busyUser) return;
+    setBusyUser(clean.toLowerCase());
+    try {
+      const res = await fetch("/api/chat/mod/goat", {
+        method: "POST",
+        headers: buildHeaders(),
+        body: JSON.stringify({ username: clean, granted }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notify?.("error", data?.error || "could not update GOAT title");
+        return;
+      }
+      setGoatUsers(Array.isArray(data.goatUsers) ? data.goatUsers : []);
+      setManualGoatUser("");
+      notify?.(
+        "success",
+        granted
+          ? `awarded golden GOAT title to @${data.targetUsername || clean}`
+          : `removed GOAT title from @${data.targetUsername || clean}`
+      );
+      onChanged?.();
+    } catch {
+      notify?.("error", "request failed");
+    } finally {
+      setBusyUser(null);
+    }
+  };
+
   const modSet = new Set(staffMods.map((m) => m.toLowerCase()));
   const ownerSet = new Set(owners.map((o) => o.toLowerCase()));
+  const goatSet = new Set(goatUsers.map((g) => g.toLowerCase()));
   const q = search.trim().toLowerCase();
 
   const candidateUsers = registeredUsers
-    .filter((u) => !ownerSet.has(u.toLowerCase()))
+    .filter((u) => isMod || !ownerSet.has(u.toLowerCase()))
     .filter((u) => !q || u.toLowerCase().includes(q))
     .sort((a, b) => {
+      const ag = goatSet.has(a.toLowerCase()) ? 0 : 1;
+      const bg = goatSet.has(b.toLowerCase()) ? 0 : 1;
       const am = modSet.has(a.toLowerCase()) ? 0 : 1;
       const bm = modSet.has(b.toLowerCase()) ? 0 : 1;
-      return am - bm || a.localeCompare(b);
+      return ag - bg || am - bm || a.localeCompare(b);
     });
 
   if (loading) {
@@ -200,35 +238,107 @@ export function StaffManagerContent({
         </div>
       </div>
 
-      {/* Promote / Choose Staff Mod */}
-      {isOwner && (
+      {/* Golden GOAT Honorees */}
+      <div>
+        <div class="chat-profile-section-title" style={{ marginBottom: "5px", color: "#fde047" }}>
+          golden GOAT titles ({goatUsers.length}) · great idea contributors
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+          {goatUsers.map((g) => (
+            <span
+              key={g}
+              class="chat-role-badge goat"
+              style={{ padding: "4px 9px", fontSize: "11px", gap: "6px" }}
+            >
+              <i class="fa-solid fa-trophy" /> @{g}
+              {isMod && (
+                <button
+                  type="button"
+                  title={`Remove GOAT title from @${g}`}
+                  onClick={() => void handleGoatAction(g, false)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "#fef08a",
+                    cursor: "pointer",
+                    padding: 0,
+                    fontSize: "11px",
+                  }}
+                >
+                  ×
+                </button>
+              )}
+            </span>
+          ))}
+          {goatUsers.length === 0 && (
+            <span style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+              no GOAT titles awarded yet — reward someone with a great idea!
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Award GOAT / Promote Staff Mod */}
+      {isMod && (
         <div>
           <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
-            choose staff moderators
+            {isOwner ? "award GOAT title & choose staff moderators" : "award golden GOAT title"}
           </div>
           <form
             style={{ display: "flex", gap: "6px", marginBottom: "8px" }}
             onSubmit={(e) => {
               e.preventDefault();
-              void handleStaffAction(manualUser, "add");
+              void handleGoatAction(manualGoatUser, true);
             }}
           >
             <input
               type="text"
               class="chat-mod-input"
-              placeholder="type cloudsync username to promote..."
-              value={manualUser}
-              onInput={(e) => setManualUser((e.target as HTMLInputElement).value)}
+              placeholder="type username to award GOAT title..."
+              value={manualGoatUser}
+              onInput={(e) => setManualGoatUser((e.target as HTMLInputElement).value)}
             />
             <button
               type="submit"
               class="chat-auth-login-btn"
-              disabled={!manualUser.trim() || Boolean(busyUser)}
-              style={{ padding: "6px 12px", flexShrink: 0 }}
+              disabled={!manualGoatUser.trim() || Boolean(busyUser)}
+              style={{
+                padding: "6px 12px",
+                flexShrink: 0,
+                background: "linear-gradient(115deg, rgba(202, 138, 4, 0.85), rgba(234, 179, 8, 0.9))",
+                color: "#18181b",
+                fontWeight: 700,
+              }}
             >
-              promote mod
+              award GOAT
             </button>
           </form>
+
+          {isOwner && (
+            <form
+              style={{ display: "flex", gap: "6px", marginBottom: "8px" }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleStaffAction(manualUser, "add");
+              }}
+            >
+              <input
+                type="text"
+                class="chat-mod-input"
+                placeholder="type cloudsync username to promote..."
+                value={manualUser}
+                onInput={(e) => setManualUser((e.target as HTMLInputElement).value)}
+              />
+              <button
+                type="submit"
+                class="chat-auth-login-btn"
+                disabled={!manualUser.trim() || Boolean(busyUser)}
+                style={{ padding: "6px 12px", flexShrink: 0 }}
+              >
+                promote mod
+              </button>
+            </form>
+          )}
 
           {registeredUsers.length > 0 && (
             <>
@@ -242,30 +352,60 @@ export function StaffManagerContent({
               />
               <div class="chat-staff-modal-list">
                 {candidateUsers.slice(0, 40).map((u) => {
-                  const isMod = modSet.has(u.toLowerCase());
+                  const lower = u.toLowerCase();
+                  const isRowOwner = ownerSet.has(lower);
+                  const isModUser = modSet.has(lower);
+                  const isGoatUser = goatSet.has(lower);
                   return (
                     <div key={u} class="chat-staff-row">
-                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
                         <span>@{u}</span>
-                        {isMod && (
+                        {isRowOwner && (
+                          <span class="chat-role-badge owner">
+                            <i class="fa-solid fa-crown" /> owner
+                          </span>
+                        )}
+                        {isModUser && (
                           <span class="chat-role-badge mod">
                             <i class="fa-solid fa-shield-halved" /> mod
                           </span>
                         )}
+                        {isGoatUser && (
+                          <span class="chat-role-badge goat">
+                            <i class="fa-solid fa-trophy" /> GOAT
+                          </span>
+                        )}
                       </div>
-                      <button
-                        type="button"
-                        class="chat-gif-more-btn"
-                        disabled={busyUser === u.toLowerCase()}
-                        style={
-                          isMod
-                            ? { color: "#fca5a5", borderColor: "rgba(239, 68, 68, 0.35)" }
-                            : undefined
-                        }
-                        onClick={() => void handleStaffAction(u, isMod ? "remove" : "add")}
-                      >
-                        {isMod ? "remove mod" : "make mod"}
-                      </button>
+                      <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                        <button
+                          type="button"
+                          class="chat-gif-more-btn"
+                          disabled={busyUser === lower}
+                          style={
+                            isGoatUser
+                              ? { color: "#fca5a5", borderColor: "rgba(239, 68, 68, 0.35)" }
+                              : { color: "#fde047", borderColor: "rgba(250, 204, 21, 0.45)" }
+                          }
+                          onClick={() => void handleGoatAction(u, !isGoatUser)}
+                        >
+                          {isGoatUser ? "remove GOAT" : "award GOAT"}
+                        </button>
+                        {isOwner && !isRowOwner && (
+                          <button
+                            type="button"
+                            class="chat-gif-more-btn"
+                            disabled={busyUser === lower}
+                            style={
+                              isModUser
+                                ? { color: "#fca5a5", borderColor: "rgba(239, 68, 68, 0.35)" }
+                                : undefined
+                            }
+                            onClick={() => void handleStaffAction(u, isModUser ? "remove" : "add")}
+                          >
+                            {isModUser ? "remove mod" : "make mod"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}

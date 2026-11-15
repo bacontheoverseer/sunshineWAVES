@@ -19,15 +19,18 @@ import {
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
 import {
+  GoatBadge,
   ProfileEffectLayer,
   RoleBadge,
   UserAvatar,
   getNameClasses,
 } from "./ProfileVisuals.tsx";
+import ImageCropModal from "./ImageCropModal.tsx";
 
 interface ProfileCustomizerModalProps {
   username: string;
   role: ChatRole;
+  isGoat?: boolean | undefined;
   createdAt?: string | null | undefined;
   initialCustom: ProfileCustomization;
   initialBio: string;
@@ -97,6 +100,7 @@ async function readImageFileAsDataUrl(
 export default function ProfileCustomizerModal({
   username,
   role,
+  isGoat,
   createdAt,
   initialCustom,
   initialBio,
@@ -114,6 +118,9 @@ export default function ProfileCustomizerModal({
   const [gifQuery, setGifQuery] = useState("");
   const [gifHits, setGifHits] = useState<KlipySearchHit[]>([]);
   const [gifLoading, setGifLoading] = useState(false);
+  const [cropDraft, setCropDraft] = useState<{ kind: "avatar" | "banner"; src: string } | null>(
+    null
+  );
 
   const avatarFileRef = useRef<HTMLInputElement>(null);
   const bannerFileRef = useRef<HTMLInputElement>(null);
@@ -154,19 +161,31 @@ export default function ProfileCustomizerModal({
     setCustom((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleFileUpload = async (kind: "avatar" | "banner", file?: File | null) => {
+  const handleFileUpload = async (
+    kind: "avatar" | "banner",
+    file?: File | null,
+    inputEl?: HTMLInputElement | null
+  ) => {
+    if (inputEl) inputEl.value = "";
     if (!file) return;
     setUploadError("");
     try {
-      const dataUrl =
-        kind === "avatar"
-          ? await readImageFileAsDataUrl(file, 256, 256, 320 * 1024)
-          : await readImageFileAsDataUrl(file, 720, 240, 320 * 1024);
-      if (kind === "avatar") {
-        updateField("avatarUrl", dataUrl);
-      } else {
-        updateField("bannerUrl", dataUrl);
+      const isGif = file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif");
+      if (isGif) {
+        const dataUrl = await readImageFileAsDataUrl(file, 256, 256, 320 * 1024);
+        updateField(kind === "avatar" ? "avatarUrl" : "bannerUrl", dataUrl);
+        return;
       }
+      if (!file.type.startsWith("image/")) {
+        throw new Error("Please select an image file");
+      }
+      const rawDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Could not read image file"));
+        reader.readAsDataURL(file);
+      });
+      setCropDraft({ kind, src: rawDataUrl });
     } catch (err) {
       setUploadError((err as Error).message || "Could not process image");
     }
@@ -381,8 +400,8 @@ export default function ProfileCustomizerModal({
                       accept="image/*"
                       style={{ display: "none" }}
                       onChange={(e) => {
-                        const file = (e.target as HTMLInputElement).files?.[0];
-                        void handleFileUpload("avatar", file);
+                        const inputEl = e.target as HTMLInputElement;
+                        void handleFileUpload("avatar", inputEl.files?.[0], inputEl);
                       }}
                     />
                     <button
@@ -401,6 +420,18 @@ export default function ProfileCustomizerModal({
                     >
                       <i class="fa-solid fa-film" /> pick klipy gif
                     </button>
+                    {custom.avatarUrl.startsWith("data:image/") &&
+                      !custom.avatarUrl.startsWith("data:image/gif") && (
+                        <button
+                          type="button"
+                          class="chat-gif-more-btn"
+                          onClick={() =>
+                            setCropDraft({ kind: "avatar", src: custom.avatarUrl })
+                          }
+                        >
+                          <i class="fa-solid fa-crop-simple" /> adjust placement
+                        </button>
+                      )}
                     {custom.avatarUrl && (
                       <button
                         type="button"
@@ -554,8 +585,8 @@ export default function ProfileCustomizerModal({
                       accept="image/*"
                       style={{ display: "none" }}
                       onChange={(e) => {
-                        const file = (e.target as HTMLInputElement).files?.[0];
-                        void handleFileUpload("banner", file);
+                        const inputEl = e.target as HTMLInputElement;
+                        void handleFileUpload("banner", inputEl.files?.[0], inputEl);
                       }}
                     />
                     <button
@@ -574,6 +605,18 @@ export default function ProfileCustomizerModal({
                     >
                       <i class="fa-solid fa-film" /> pick klipy banner gif
                     </button>
+                    {custom.bannerUrl.startsWith("data:image/") &&
+                      !custom.bannerUrl.startsWith("data:image/gif") && (
+                        <button
+                          type="button"
+                          class="chat-gif-more-btn"
+                          onClick={() =>
+                            setCropDraft({ kind: "banner", src: custom.bannerUrl })
+                          }
+                        >
+                          <i class="fa-solid fa-crop-simple" /> adjust placement
+                        </button>
+                      )}
                     {custom.bannerUrl && (
                       <button
                         type="button"
@@ -847,6 +890,7 @@ export default function ProfileCustomizerModal({
                         {displayLabel}
                       </h3>
                       <RoleBadge role={role} />
+                      <GoatBadge isGoat={isGoat} />
                     </div>
                     <div class="chat-profile-handle-row">
                       <span>@{username}</span>
@@ -897,6 +941,7 @@ export default function ProfileCustomizerModal({
                       {displayLabel}
                     </span>
                     <RoleBadge role={role} />
+                    <GoatBadge isGoat={isGoat} />
                   </div>
                   <div class="chat-user-status-sub">
                     {statusText || "member nameplate preview"}
@@ -916,6 +961,7 @@ export default function ProfileCustomizerModal({
                       {displayLabel}
                     </span>
                     <RoleBadge role={role} />
+                    <GoatBadge isGoat={isGoat} />
                     <span class="chat-entry-time">just now</span>
                   </div>
                   <div class="chat-entry-text">new animated profile look in #general ✨</div>
@@ -925,6 +971,20 @@ export default function ProfileCustomizerModal({
           </div>
         </div>
       </div>
+      {cropDraft && (
+        <ImageCropModal
+          kind={cropDraft.kind}
+          imageSrc={cropDraft.src}
+          onApply={(croppedUrl) => {
+            updateField(
+              cropDraft.kind === "avatar" ? "avatarUrl" : "bannerUrl",
+              croppedUrl
+            );
+            setCropDraft(null);
+          }}
+          onCancel={() => setCropDraft(null)}
+        />
+      )}
     </div>
   );
 }

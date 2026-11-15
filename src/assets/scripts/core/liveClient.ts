@@ -1266,6 +1266,34 @@ export function detectCurrentGameSession(): {
   };
 }
 
+const AUTO_IDLE_MS = 3 * 60 * 1000;
+const HIDDEN_IDLE_MS = 60 * 1000;
+let lastActivityAtMs = Date.now();
+let hiddenSinceMs = typeof document !== "undefined" && document.hidden ? Date.now() : 0;
+let currentAutoIdle = false;
+let idleListenersBound = false;
+
+export function isClientAutoIdle(): boolean {
+  const now = Date.now();
+  if (hiddenSinceMs > 0 && now - hiddenSinceMs >= HIDDEN_IDLE_MS) {
+    return true;
+  }
+  return now - lastActivityAtMs >= AUTO_IDLE_MS;
+}
+
+function updateAutoIdleState(triggerHeartbeatOnChange = true): void {
+  const next = isClientAutoIdle();
+  if (next !== currentAutoIdle) {
+    currentAutoIdle = next;
+    try {
+      window.dispatchEvent(new CustomEvent("sunshine-idle-change", { detail: { idle: next } }));
+    } catch {}
+    if (triggerHeartbeatOnChange) {
+      sendHeartbeat();
+    }
+  }
+}
+
 function sendHeartbeat(page?: string, overrideGame?: string): void {
   const clientId = getClientId();
   const username = getActiveUsername();
@@ -1273,6 +1301,7 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
   const session = detectCurrentGameSession();
   const activeGame = overrideGame || session.game || "browsing";
   const gameStartedAt = session.isPlayingGame ? session.gameStartedAt : 0;
+  currentAutoIdle = isClientAutoIdle();
 
   void fetch("/api/live/heartbeat", {
     method: "POST",
@@ -1284,6 +1313,7 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
       game: activeGame,
       isPlayingGame: session.isPlayingGame,
       gameStartedAt,
+      idle: currentAutoIdle,
     }),
   }).catch(() => {
     // ignore failed heartbeats
@@ -1294,12 +1324,37 @@ export function initLiveClient(): void {
   if (typeof window === "undefined") return;
   if (eventSource) return;
 
+  if (!idleListenersBound) {
+    idleListenersBound = true;
+    const markActive = () => {
+      const now = Date.now();
+      if (now - lastActivityAtMs < 500 && !currentAutoIdle) return;
+      lastActivityAtMs = now;
+      hiddenSinceMs = document.hidden ? hiddenSinceMs || now : 0;
+      updateAutoIdleState(true);
+    };
+    for (const evt of ["mousemove", "mousedown", "keydown", "touchstart", "scroll", "focus"] as const) {
+      window.addEventListener(evt, markActive, { passive: true });
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        hiddenSinceMs = Date.now();
+      } else {
+        hiddenSinceMs = 0;
+        lastActivityAtMs = Date.now();
+      }
+      updateAutoIdleState(true);
+    });
+    window.setInterval(() => updateAutoIdleState(true), 15000);
+  }
+
   const clientId = getClientId();
   currentUsername = getActiveUsername();
   const page = encodeURIComponent(window.location.pathname);
   const user = encodeURIComponent(currentUsername);
+  const idleFlag = isClientAutoIdle() ? "1" : "0";
 
-  const streamUrl = `/api/live/stream?id=${clientId}&user=${user}&page=${page}`;
+  const streamUrl = `/api/live/stream?id=${clientId}&user=${user}&page=${page}&idle=${idleFlag}`;
   eventSource = new EventSource(streamUrl);
 
   eventSource.onmessage = (event) => {

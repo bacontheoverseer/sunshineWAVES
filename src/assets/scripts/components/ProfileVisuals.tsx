@@ -76,6 +76,19 @@ export function RoleBadge({ role }: { role?: ChatRole | undefined }) {
   return null;
 }
 
+/** Golden title badge awarded by mods/owners to helpful idea contributors. */
+export function GoatBadge({ isGoat }: { isGoat?: boolean | undefined }) {
+  if (!isGoat) return null;
+  return (
+    <span
+      class="chat-role-badge goat"
+      title="GOAT — Awarded by staff for suggesting a great feature or idea"
+    >
+      <i class="fa-solid fa-trophy" /> GOAT
+    </span>
+  );
+}
+
 export function getNameClasses(custom?: ProfileCustomization | null): string {
   const parts: string[] = [];
   if (custom?.nameStyle && custom.nameStyle !== "default") {

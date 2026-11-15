@@ -837,7 +837,9 @@ const liveClients = new Map();
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
 const userProfiles = new Map(); // usernameLower -> { bio, statusText, customization, updatedAt }
 const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
+const goatUsers = new Set(); // Set<usernameLower> - golden GOAT title honorees
 const chatTimeouts = new Map(); // usernameLower -> { until, reason, by, updatedAt }
+const chatGroups = new Map(); // groupId -> { id, name, creator, members, createdAt }
 let chatMetaLoadedFromDb = false;
 
 const CLOUDSYNC_JWT_SECRET =
@@ -1036,6 +1038,13 @@ function ensureChatMetaLoaded() {
       if (clean && !OWNER_USERNAMES.has(clean)) staffModerators.add(clean);
     }
   }
+  const savedGoats = kvGetJson("goat_users_v1", []);
+  if (Array.isArray(savedGoats)) {
+    for (const u of savedGoats) {
+      const clean = String(u || "").trim().toLowerCase();
+      if (clean) goatUsers.add(clean);
+    }
+  }
   const savedProfiles = kvGetJson("user_profiles_v2", {});
   if (savedProfiles && typeof savedProfiles === "object") {
     for (const [k, v] of Object.entries(savedProfiles)) {
@@ -1063,10 +1072,70 @@ function ensureChatMetaLoaded() {
       }
     }
   }
+  const savedGroups = kvGetJson("chat_groups_v1", {});
+  if (savedGroups && typeof savedGroups === "object") {
+    for (const [gid, grp] of Object.entries(savedGroups)) {
+      if (gid && grp && typeof grp === "object" && Array.isArray(grp.members)) {
+        const members = Array.from(
+          new Set(
+            grp.members
+              .map((m) => String(m || "").trim().toLowerCase())
+              .filter(Boolean)
+          )
+        );
+        if (members.length > 0) {
+          chatGroups.set(String(gid), {
+            id: String(gid),
+            name: String(grp.name || "group chat").trim().slice(0, 32) || "group chat",
+            creator: String(grp.creator || members[0]).trim(),
+            members,
+            createdAt: Number(grp.createdAt) || Date.now(),
+          });
+        }
+      }
+    }
+  }
+}
+
+function persistChatGroups() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of chatGroups.entries()) {
+    out[k] = v;
+    if (++count >= 300) break;
+  }
+  kvSetJson("chat_groups_v1", out);
+}
+
+function canAccessChatChannel(channel, usernameLower) {
+  const ch = String(channel || "");
+  if (ch.startsWith("dm:")) {
+    if (!usernameLower) return false;
+    const parts = ch
+      .slice(3)
+      .split(":")
+      .map((p) => (p || "").trim().toLowerCase())
+      .filter(Boolean);
+    return parts.includes(usernameLower);
+  }
+  if (ch.startsWith("group:")) {
+    if (!usernameLower) return false;
+    const grp = chatGroups.get(ch);
+    return Boolean(grp && Array.isArray(grp.members) && grp.members.includes(usernameLower));
+  }
+  return true;
 }
 
 function persistStaffMods() {
   kvSetJson("staff_moderators_v1", Array.from(staffModerators));
+}
+
+function persistGoatUsers() {
+  kvSetJson("goat_users_v1", Array.from(goatUsers));
+}
+
+function getCanonicalGoatUsers(csMap = getCloudSyncUsersMap()) {
+  return Array.from(goatUsers).map((u) => csMap.get(u)?.username || u);
 }
 
 function persistUserProfiles() {
@@ -1863,12 +1932,18 @@ function getPresenceSnapshot() {
     const timeoutEntry = getActiveTimeout(key);
     const role = getUserChatRole(canonicalName);
     const existing = onlineByUsername.get(key);
-    // Prefer the session that is actively playing a game or most recently seen
-    if (!existing || (c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen) {
+    const cIdle = Boolean(c.isIdle);
+    // Prefer an active (non-idle) session, or playing a game, or most recently seen
+    const preferIncoming =
+      !existing ||
+      (Boolean(existing.isIdle) && !cIdle) ||
+      (existing.isIdle === cIdle && ((c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen));
+    if (preferIncoming) {
       onlineByUsername.set(key, {
         id: c.id,
         username: canonicalName,
         online: true,
+        isIdle: cIdle,
         page: c.page || "/",
         game: c.game || "browsing",
         isPlayingGame: Boolean(c.isPlayingGame),
@@ -1878,6 +1953,7 @@ function getPresenceSnapshot() {
         statusText: prof.statusText || "",
         customization: prof.customization || null,
         role,
+        isGoat: goatUsers.has(key),
         isTimedOut: Boolean(timeoutEntry),
         timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
         createdAt: csRecord?.createdAt || null,
@@ -1904,6 +1980,7 @@ function getPresenceSnapshot() {
         statusText: prof.statusText || "",
         customization: prof.customization || null,
         role: getUserChatRole(canonicalName),
+        isGoat: goatUsers.has(key),
         isTimedOut: Boolean(timeoutEntry),
         timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
         createdAt: csRecord?.createdAt || null,
@@ -1912,7 +1989,7 @@ function getPresenceSnapshot() {
   }
 
   const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
-  return { onlineUsers, offlineUsers, registeredUsers };
+  return { onlineUsers, offlineUsers, registeredUsers, goatUsers: getCanonicalGoatUsers(csMap) };
 }
 
 function verifyAdmin(req, res, next) {
@@ -2029,6 +2106,7 @@ app.get("/api/live/stream", async (req, res) => {
     page,
     game,
     isPlayingGame: false,
+    isIdle: req.query.idle === "1" || req.query.idle === "true",
     gameStartedAt: 0,
     connectedAt: Date.now(),
     lastSeen: Date.now(),
@@ -2052,7 +2130,7 @@ app.get("/api/live/stream", async (req, res) => {
 });
 
 app.post("/api/live/heartbeat", (req, res) => {
-  const { clientId, username, page, game, isPlayingGame, gameStartedAt } = req.body || {};
+  const { clientId, username, page, game, isPlayingGame, gameStartedAt, idle } = req.body || {};
   let changed = false;
   if (clientId && liveClients.has(clientId)) {
     const client = liveClients.get(clientId);
@@ -2070,6 +2148,10 @@ app.post("/api/live/heartbeat", (req, res) => {
     }
     if (typeof gameStartedAt === "number") {
       client.gameStartedAt = gameStartedAt;
+    }
+    if (typeof idle === "boolean" && client.isIdle !== idle) {
+      client.isIdle = idle;
+      changed = true;
     }
     client.lastSeen = Date.now();
     touchKnownUser(client.username, {
@@ -3154,13 +3236,19 @@ app.get("/api/chat/state", async (req, res) => {
   const verifiedUserKey = authUser ? authUser.username.toLowerCase() : "";
   if (authUser) touchKnownUser(authUser.username);
 
-  const visibleMessages = chatHistory.filter((m) => {
-    if (!m.channel.startsWith("dm:")) return true;
-    // Only return private DMs to the cryptographically authenticated participant
-    if (!verifiedUserKey) return false;
-    const parts = m.channel.split(":");
-    return parts.includes(verifiedUserKey);
-  });
+  const visibleMessages = chatHistory.filter((m) =>
+    canAccessChatChannel(m.channel, verifiedUserKey)
+  );
+
+  const userGroups = [];
+  if (verifiedUserKey) {
+    for (const grp of chatGroups.values()) {
+      if (grp && Array.isArray(grp.members) && grp.members.includes(verifiedUserKey)) {
+        userGroups.push(grp);
+      }
+    }
+    userGroups.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
 
   const activeVoice = {};
   for (const [roomId, peers] of voiceRooms.entries()) {
@@ -3174,12 +3262,14 @@ app.get("/api/chat/state", async (req, res) => {
   res.json({
     success: true,
     messages: visibleMessages.slice(-200),
+    groups: userGroups,
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
     offlineUsers: presence.offlineUsers,
     registeredUsers: presence.registeredUsers,
     staffMods: Array.from(staffModerators),
     ownerUsers: Array.from(OWNER_USERNAMES),
+    goatUsers: presence.goatUsers,
     selfRole,
     selfTimeout,
   });
@@ -3260,6 +3350,7 @@ app.get("/api/chat/user-profile", async (req, res) => {
       statusText: prof.statusText || "",
       customization: prof.customization || null,
       role: getUserChatRole(canonicalName),
+      isGoat: goatUsers.has(key),
       isTimedOut: Boolean(timeoutEntry),
       timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
       timeoutReason: timeoutEntry ? timeoutEntry.reason || "" : "",
@@ -3369,17 +3460,33 @@ app.post("/api/chat/user-profile", async (req, res) => {
   }
 });
 
-function broadcastChatPayload(channel, eventPayload) {
+function broadcastChatPayload(channel, eventPayload, extraUsernames = []) {
   const ch = String(channel || "");
-  if (ch.startsWith("dm:")) {
-    const parts = ch
-      .slice(3)
-      .split(":")
-      .map((p) => (p || "").trim().toLowerCase())
-      .filter(Boolean);
+  if (ch.startsWith("dm:") || ch.startsWith("group:")) {
+    let targetSet;
+    if (ch.startsWith("dm:")) {
+      targetSet = new Set(
+        ch
+          .slice(3)
+          .split(":")
+          .map((p) => (p || "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+    } else {
+      const grp = chatGroups.get(ch);
+      targetSet = new Set(
+        Array.isArray(grp?.members)
+          ? grp.members.map((m) => String(m || "").trim().toLowerCase()).filter(Boolean)
+          : []
+      );
+    }
+    for (const u of extraUsernames) {
+      const clean = String(u || "").trim().toLowerCase();
+      if (clean) targetSet.add(clean);
+    }
     for (const [, client] of liveClients.entries()) {
       const verifiedU = client.verifiedUsername;
-      if (verifiedU && parts.includes(verifiedU)) {
+      if (verifiedU && targetSet.has(verifiedU)) {
         try {
           client.res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
         } catch {}
@@ -3485,6 +3592,17 @@ app.post("/api/chat/send", async (req, res) => {
             }
           }
         }
+      }
+    } else if (sanitizedMsg.channel.startsWith("group:")) {
+      if (!authUser) {
+        return res.status(401).json({ success: false, error: "Sign in to CloudSync to send group chat messages" });
+      }
+      const grp = chatGroups.get(sanitizedMsg.channel);
+      if (!grp) {
+        return res.status(404).json({ success: false, error: "Group chat not found" });
+      }
+      if (!grp.members.includes(authUser.username.toLowerCase())) {
+        return res.status(403).json({ success: false, error: "You are not a member of this group chat" });
       }
     }
 
@@ -3603,6 +3721,7 @@ app.post("/api/chat/delete-chat", async (req, res) => {
       return res.status(400).json({ success: false, error: "channel required" });
     }
 
+    let extraBroadcastMembers = [];
     if (channel.startsWith("dm:")) {
       if (!actor.usernameLower) {
         return res.status(401).json({ success: false, error: "Sign in to CloudSync to delete a DM chat" });
@@ -3615,6 +3734,24 @@ app.post("/api/chat/delete-chat", async (req, res) => {
       if (!parts.includes(actor.usernameLower)) {
         return res.status(403).json({ success: false, error: "You can only delete your own DM chats" });
       }
+    } else if (channel.startsWith("group:")) {
+      if (!actor.usernameLower) {
+        return res.status(401).json({ success: false, error: "Sign in to CloudSync to delete a group chat" });
+      }
+      const grp = chatGroups.get(channel);
+      if (!grp) {
+        return res.status(404).json({ success: false, error: "Group chat not found" });
+      }
+      const isCreator = grp.creator.toLowerCase() === actor.usernameLower;
+      if (!isCreator && !actor.isOwner) {
+        return res.status(403).json({
+          success: false,
+          error: "Only the group creator or site owner can delete this group chat",
+        });
+      }
+      extraBroadcastMembers = Array.isArray(grp.members) ? [...grp.members] : [];
+      chatGroups.delete(channel);
+      persistChatGroups();
     } else if (!actor.isMod) {
       return res.status(403).json({
         success: false,
@@ -3631,15 +3768,254 @@ app.post("/api/chat/delete-chat", async (req, res) => {
     }
     if (removed > 0) persistChatHistory();
 
-    broadcastChatPayload(channel, {
-      type: "chat-event",
-      event: "CHANNEL_CLEARED",
+    broadcastChatPayload(
       channel,
-      deletedChat: true,
-      by: actor.username || "staff",
-    });
+      {
+        type: "chat-event",
+        event: "CHANNEL_CLEARED",
+        channel,
+        deletedChat: true,
+        by: actor.username || "staff",
+      },
+      extraBroadcastMembers
+    );
+    if (channel.startsWith("group:")) {
+      broadcastChatPayload(
+        channel,
+        {
+          type: "chat-event",
+          event: "GROUP_DELETED",
+          groupId: channel,
+          by: actor.username || "staff",
+        },
+        extraBroadcastMembers
+      );
+    }
 
     res.json({ success: true, channel, removed });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Group Chat Management & Emoji Reactions ---
+app.post("/api/chat/groups/create", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to create a group chat" });
+    }
+    const creatorLower = authUser.username.toLowerCase();
+    const cleanName = String(req.body?.name || "").trim().slice(0, 32);
+    if (!cleanName) {
+      return res.status(400).json({ success: false, error: "Group name is required" });
+    }
+    const rawMembers = Array.isArray(req.body?.members) ? req.body.members : [];
+    const memberSet = new Set([creatorLower]);
+    for (const m of rawMembers) {
+      const cleanM = String(m || "").trim().replace(/^@/, "").toLowerCase();
+      if (cleanM) memberSet.add(cleanM);
+      if (memberSet.size >= 20) break;
+    }
+    if (memberSet.size < 2) {
+      return res.status(400).json({ success: false, error: "Add at least 1 other user to start a group chat" });
+    }
+
+    let csMap = await getCloudSyncUsersMapAsync();
+    if (csMap.size > 0) {
+      for (const m of memberSet) {
+        if (!csMap.has(m)) {
+          csMap = await getCloudSyncUsersMapAsync(true);
+          if (!csMap.has(m)) {
+            return res.status(404).json({
+              success: false,
+              error: `user "@${m}" does not exist in cloudsync`,
+            });
+          }
+        }
+      }
+    }
+
+    const groupId = `group:gc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const groupObj = {
+      id: groupId,
+      name: cleanName,
+      creator: authUser.username,
+      members: Array.from(memberSet),
+      createdAt: Date.now(),
+    };
+    chatGroups.set(groupId, groupObj);
+    persistChatGroups();
+
+    broadcastChatPayload(groupId, {
+      type: "chat-event",
+      event: "GROUP_UPDATED",
+      group: groupObj,
+    });
+
+    res.json({ success: true, group: groupObj });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/groups/members", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync first" });
+    }
+    const actorLower = authUser.username.toLowerCase();
+    const isOwner = OWNER_USERNAMES.has(actorLower);
+    const groupId = String(req.body?.groupId || "").trim();
+    const action = String(req.body?.action || "").trim().toLowerCase();
+    const targetUsername = String(req.body?.username || "").trim().replace(/^@/, "").toLowerCase();
+    const nextName = String(req.body?.name || "").trim().slice(0, 32);
+
+    const grp = chatGroups.get(groupId);
+    if (!grp) {
+      return res.status(404).json({ success: false, error: "Group chat not found" });
+    }
+    if (!grp.members.includes(actorLower) && !isOwner) {
+      return res.status(403).json({ success: false, error: "You are not a member of this group chat" });
+    }
+
+    const previousMembers = [...grp.members];
+    const isCreator = grp.creator.toLowerCase() === actorLower;
+
+    if (action === "leave") {
+      grp.members = grp.members.filter((m) => m !== actorLower);
+      if (grp.members.length === 0) {
+        chatGroups.delete(groupId);
+        for (let i = chatHistory.length - 1; i >= 0; i--) {
+          if (chatHistory[i]?.channel === groupId) chatHistory.splice(i, 1);
+        }
+        persistChatHistory();
+        persistChatGroups();
+        broadcastChatPayload(
+          groupId,
+          { type: "chat-event", event: "GROUP_DELETED", groupId, by: authUser.username },
+          previousMembers
+        );
+        return res.json({ success: true, deleted: true, groupId });
+      }
+      if (grp.creator.toLowerCase() === actorLower && grp.members[0]) {
+        grp.creator = grp.members[0];
+      }
+    } else if (action === "rename") {
+      if (!nextName) return res.status(400).json({ success: false, error: "Group name required" });
+      grp.name = nextName;
+    } else if (action === "add") {
+      if (!targetUsername) return res.status(400).json({ success: false, error: "username required" });
+      if (grp.members.length >= 20) return res.status(400).json({ success: false, error: "Group limit is 20 members" });
+      let csMap = await getCloudSyncUsersMapAsync();
+      if (csMap.size > 0 && !csMap.has(targetUsername)) {
+        csMap = await getCloudSyncUsersMapAsync(true);
+        if (!csMap.has(targetUsername)) {
+          return res.status(404).json({ success: false, error: `user "@${targetUsername}" does not exist in cloudsync` });
+        }
+      }
+      if (!grp.members.includes(targetUsername)) {
+        grp.members = [...grp.members, targetUsername];
+      }
+    } else if (action === "remove") {
+      if (!targetUsername) return res.status(400).json({ success: false, error: "username required" });
+      if (!isCreator && !isOwner) {
+        return res.status(403).json({ success: false, error: "Only the group creator can remove members" });
+      }
+      if (targetUsername === grp.creator.toLowerCase()) {
+        return res.status(400).json({ success: false, error: "Cannot remove group creator" });
+      }
+      grp.members = grp.members.filter((m) => m !== targetUsername);
+    } else {
+      return res.status(400).json({ success: false, error: "Unsupported group action" });
+    }
+
+    chatGroups.set(groupId, grp);
+    persistChatGroups();
+
+    broadcastChatPayload(
+      groupId,
+      { type: "chat-event", event: "GROUP_UPDATED", group: grp },
+      previousMembers
+    );
+    res.json({ success: true, group: grp });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/react", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to react to messages" });
+    }
+    const actorLower = authUser.username.toLowerCase();
+    const activeTimeout = getActiveTimeout(actorLower);
+    if (activeTimeout) {
+      return res.status(403).json({
+        success: false,
+        timedOut: true,
+        until: activeTimeout.until,
+        error: "You cannot react to messages while timed out",
+      });
+    }
+
+    const messageId = String(req.body?.messageId || "").trim();
+    const emoji = String(req.body?.emoji || "").trim().slice(0, 16);
+    if (!messageId || !emoji) {
+      return res.status(400).json({ success: false, error: "messageId and emoji are required" });
+    }
+
+    const idx = chatHistory.findIndex((m) => m.id === messageId);
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Message not found" });
+    }
+    const targetMsg = chatHistory[idx];
+    if (!canAccessChatChannel(targetMsg.channel, actorLower)) {
+      return res.status(403).json({ success: false, error: "You do not have access to react to this message" });
+    }
+
+    const nextReactions =
+      targetMsg.reactions && typeof targetMsg.reactions === "object"
+        ? { ...targetMsg.reactions }
+        : {};
+    const existingUsers = Array.isArray(nextReactions[emoji]) ? [...nextReactions[emoji]] : [];
+    const userIdx = existingUsers.indexOf(actorLower);
+    if (userIdx >= 0) {
+      existingUsers.splice(userIdx, 1);
+      if (existingUsers.length === 0) {
+        delete nextReactions[emoji];
+      } else {
+        nextReactions[emoji] = existingUsers;
+      }
+    } else {
+      if (Object.keys(nextReactions).length >= 24) {
+        return res.status(400).json({ success: false, error: "Reaction limit reached on this message" });
+      }
+      existingUsers.push(actorLower);
+      nextReactions[emoji] = existingUsers;
+    }
+
+    chatHistory[idx] = {
+      ...targetMsg,
+      reactions: nextReactions,
+    };
+    persistChatHistory();
+
+    broadcastChatPayload(targetMsg.channel, {
+      type: "chat-event",
+      event: "MESSAGE_REACTED",
+      messageId,
+      channel: targetMsg.channel,
+      reactions: nextReactions,
+    });
+
+    res.json({ success: true, messageId, reactions: nextReactions });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -3670,6 +4046,7 @@ app.get("/api/chat/staff", async (req, res) => {
     success: true,
     owners: Array.from(OWNER_USERNAMES),
     staffMods: Array.from(staffModerators).map((m) => csMap.get(m)?.username || m),
+    goatUsers: getCanonicalGoatUsers(csMap),
     registeredUsers,
     timeouts: timeoutsList,
     actorRole: actor.role,
@@ -3747,6 +4124,78 @@ app.post("/api/chat/staff", async (req, res) => {
   }
 });
 
+// Moderators & owners can grant or revoke the golden GOAT title for good feature/idea suggestions
+app.post("/api/chat/mod/goat", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({
+        success: false,
+        error: "Only staff moderators or site owners can award or remove the GOAT title",
+      });
+    }
+
+    const rawUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    if (!rawUsername || rawUsername.length > 40) {
+      return res.status(400).json({ success: false, error: "Valid username required" });
+    }
+
+    const key = rawUsername.toLowerCase();
+    let csMap = await getCloudSyncUsersMapAsync();
+    if (csMap.size > 0 && !csMap.has(key)) {
+      csMap = await getCloudSyncUsersMapAsync(true);
+    }
+    if (csMap.size > 0 && !csMap.has(key) && !knownUsers.has(key)) {
+      return res.status(404).json({
+        success: false,
+        error: `User "@${rawUsername}" not found in CloudSync`,
+      });
+    }
+
+    const shouldGrant =
+      typeof req.body?.granted === "boolean"
+        ? req.body.granted
+        : req.body?.action === "remove"
+        ? false
+        : req.body?.action === "add"
+        ? true
+        : !goatUsers.has(key);
+
+    if (shouldGrant) {
+      goatUsers.add(key);
+    } else {
+      goatUsers.delete(key);
+    }
+
+    persistGoatUsers();
+
+    const canonicalTarget = csMap.get(key)?.username || rawUsername;
+    const canonicalGoats = getCanonicalGoatUsers(csMap);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    broadcastToClients(
+      {
+        type: "chat-event",
+        event: "GOAT_UPDATED",
+        goatUsers: canonicalGoats,
+        targetUsername: canonicalTarget,
+        granted: shouldGrant,
+        by: actor.username,
+      },
+      "all"
+    );
+
+    res.json({
+      success: true,
+      goatUsers: canonicalGoats,
+      targetUsername: canonicalTarget,
+      granted: shouldGrant,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post("/api/chat/mod/delete-message", async (req, res) => {
   ensureChatMetaLoaded();
   try {
@@ -3767,8 +4216,8 @@ app.post("/api/chat/mod/delete-message", async (req, res) => {
         error: "Only staff moderators or the message author can delete this message",
       });
     }
-    if (targetMsg && targetMsg.channel?.startsWith("dm:") && !isAuthor) {
-      return res.status(403).json({ success: false, error: "Cannot delete private DMs" });
+    if (targetMsg && (targetMsg.channel?.startsWith("dm:") || targetMsg.channel?.startsWith("group:")) && !isAuthor) {
+      return res.status(403).json({ success: false, error: "Cannot delete private DM or group messages" });
     }
 
     if (idx >= 0) {
@@ -3803,14 +4252,14 @@ app.post("/api/chat/mod/clear-channel", async (req, res) => {
     if (!channel && !targetLower) {
       return res.status(400).json({ success: false, error: "channel or targetUsername required" });
     }
-    if (channel.startsWith("dm:")) {
-      return res.status(403).json({ success: false, error: "Cannot purge DM channels" });
+    if (channel.startsWith("dm:") || channel.startsWith("group:")) {
+      return res.status(403).json({ success: false, error: "Cannot purge DM or group channels" });
     }
 
     let removed = 0;
     for (let i = chatHistory.length - 1; i >= 0; i--) {
       const m = chatHistory[i];
-      if (!m || String(m.channel || "").startsWith("dm:")) continue;
+      if (!m || String(m.channel || "").startsWith("dm:") || String(m.channel || "").startsWith("group:")) continue;
       const matchesChan = !channel || m.channel === channel;
       const matchesUser = !targetLower || String(m.author || "").toLowerCase() === targetLower;
       if (matchesChan && matchesUser) {

@@ -359,6 +359,7 @@ interface EmojiPickerProps {
   pickerRef: { current: HTMLDivElement | null };
   onSelect: (emoji: string) => void;
   onClose: () => void;
+  containerClass?: string | undefined;
 }
 
 /** Discord-style searchable & categorized emoji picker popover. */
@@ -366,6 +367,7 @@ export default function EmojiPicker({
   pickerRef,
   onSelect,
   onClose,
+  containerClass = "",
 }: EmojiPickerProps) {
   const [search, setSearch] = useState("");
   const [activeCat, setActiveCat] = useState("recent");
@@ -414,7 +416,10 @@ export default function EmojiPicker({
     categories.find((c) => c.id === activeCat) || categories[0]!;
 
   return (
-    <div class="chat-emoji-picker" ref={pickerRef}>
+    <div
+      class={`chat-emoji-picker${containerClass ? ` ${containerClass}` : ""}`}
+      ref={pickerRef}
+    >
       <div class="chat-gif-picker-header">
         <input
           type="text"

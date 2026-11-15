@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "preact/hooks";
 import { moderateChatMessage } from "../core/contentFilter.ts";
-import { getClientId, detectCurrentGameSession } from "../core/liveClient.ts";
+import {
+  getClientId,
+  detectCurrentGameSession,
+  isClientAutoIdle,
+} from "../core/liveClient.ts";
 import { formatPlayTime } from "../core/cookieCoins.ts";
 import {
   ChatRole,
   ProfileCustomization,
+  fallbackAvatarColor,
   getBannerInlineStyle,
   getDefaultCustomization,
   loadLocalProfileCustomization,
@@ -14,7 +19,9 @@ import {
 import ProfileCustomizerModal from "./ProfileCustomizerModal.tsx";
 import StaffManagerModal from "./StaffManagerModal.tsx";
 import EmojiPicker, { getJumboEmojiCount } from "./EmojiPicker.tsx";
+import GroupChatModal, { ChatGroupDef } from "./GroupChatModal.tsx";
 import {
+  GoatBadge,
   ProfileEffectLayer,
   RoleBadge,
   UserAvatar,
@@ -41,6 +48,7 @@ interface ChatMessage {
   channel: string;
   recipient?: string | null;
   replyTo?: ChatReplyRef | null;
+  reactions?: Record<string, string[]> | undefined;
   edited?: boolean;
   editedAt?: number;
 }
@@ -75,6 +83,7 @@ interface OnlineUser {
   username: string;
   color: string;
   status?: "online" | "offline";
+  isIdle?: boolean | undefined;
   isSelf?: boolean;
   game?: string;
   isPlayingGame?: boolean;
@@ -84,6 +93,7 @@ interface OnlineUser {
   statusText?: string;
   customization?: ProfileCustomization | null;
   role?: ChatRole;
+  isGoat?: boolean | undefined;
   isTimedOut?: boolean;
   timeoutUntil?: number;
   createdAt?: string | null;
@@ -98,6 +108,7 @@ interface UserProfileDetails {
   statusText: string;
   customization?: ProfileCustomization | null;
   role?: ChatRole;
+  isGoat?: boolean | undefined;
   isTimedOut?: boolean;
   timeoutUntil?: number;
   timeoutReason?: string;
@@ -197,12 +208,37 @@ const PALETTE = [
 ];
 
 function stringToColor(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const index = Math.abs(hash) % PALETTE.length;
-  return PALETTE[index];
+  const clean = (str || "guest").trim().toLowerCase();
+  return fallbackAvatarColor(clean || "guest");
+}
+
+function getEffectivePresenceDot(
+  chosenStatus: string | undefined,
+  isIdle: boolean | undefined
+): "online" | "idle" | "dnd" {
+  if (chosenStatus === "dnd") return "dnd";
+  if (chosenStatus === "idle" || isIdle) return "idle";
+  return "online";
+}
+
+function isStaleUninitializedCustom(c: ProfileCustomization | null | undefined): boolean {
+  if (!c) return false;
+  return (
+    !c.displayName &&
+    !c.pronouns &&
+    !c.customTag &&
+    !c.avatarUrl &&
+    !c.bannerUrl &&
+    !c.cardBgColor &&
+    !c.avatarEmoji &&
+    c.avatarColor?.toLowerCase() === "#6366f1" &&
+    (!c.avatarDecoration || c.avatarDecoration === "none") &&
+    (!c.bannerStyle || c.bannerStyle === "solid") &&
+    (!c.nameStyle || c.nameStyle === "default") &&
+    (!c.nameFont || c.nameFont === "default") &&
+    (!c.nameplate || c.nameplate === "none") &&
+    (!c.profileEffect || c.profileEffect === "none")
+  );
 }
 
 function formatClockTime(date: Date): string {
@@ -395,17 +431,34 @@ export default function ChatModal() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [editingBio, setEditingBio] = useState("");
   const [editingStatusText, setEditingStatusText] = useState("");
-  const [editingCustom, setEditingCustom] = useState<ProfileCustomization>(() =>
-    getDefaultCustomization()
-  );
+  const [editingCustom, setEditingCustom] = useState<ProfileCustomization>(() => {
+    try {
+      const raw = localStorage.getItem("auth_user");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.username) {
+          const uname = String(parsed.username).trim();
+          return loadLocalProfileCustomization(uname) || getDefaultCustomization(uname);
+        }
+      }
+    } catch {}
+    return getDefaultCustomization("");
+  });
   const [showCustomizer, setShowCustomizer] = useState(false);
   const [showStaffModal, setShowStaffModal] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [staffMods, setStaffMods] = useState<string[]>([]);
   const [ownerUsers, setOwnerUsers] = useState<string[]>([]);
+  const [goatUsers, setGoatUsers] = useState<string[]>([]);
   const [selfRole, setSelfRole] = useState<ChatRole>("member");
   const [selfTimeout, setSelfTimeout] = useState<{ until: number; reason?: string } | null>(null);
+  const [selfIdle, setSelfIdle] = useState<boolean>(() => isClientAutoIdle());
   const hydratedLocalCustomForRef = useRef<string | null>(null);
+  const [chatGroups, setChatGroups] = useState<ChatGroupDef[]>([]);
+  const [groupModalMode, setGroupModalMode] = useState<"create" | "members" | null>(null);
+  const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
+  const [reactPickerMessageId, setReactPickerMessageId] = useState<string | null>(null);
+  const reactPickerRef = useRef<HTMLDivElement>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState("");
@@ -1311,6 +1364,29 @@ export default function ChatModal() {
     };
   }, []);
 
+  // Track automatic user activity idle/online state from liveClient
+  useEffect(() => {
+    setSelfIdle(isClientAutoIdle());
+    const onIdleChange = (e: Event) => {
+      const idleVal = Boolean((e as CustomEvent)?.detail?.idle);
+      setSelfIdle(idleVal);
+    };
+    window.addEventListener("sunshine-idle-change", onIdleChange);
+    return () => window.removeEventListener("sunshine-idle-change", onIdleChange);
+  }, []);
+
+  // Ensure editingCustom default matches active username before any customization is saved
+  useEffect(() => {
+    if (!cloudUser) {
+      hydratedLocalCustomForRef.current = null;
+      setEditingCustom(getDefaultCustomization(""));
+      setChatGroups([]);
+      return;
+    }
+    const localSaved = loadLocalProfileCustomization(cloudUser);
+    setEditingCustom(localSaved || getDefaultCustomization(cloudUser));
+  }, [cloudUser]);
+
   // 1-second ticker only while Chat modal is open so active playtime updates without background re-renders
   useEffect(() => {
     if (!isOpen) return;
@@ -1340,6 +1416,9 @@ export default function ChatModal() {
               ingestIncomingMessage(m, { silent: isInitial });
             }
           }
+          if (Array.isArray(data.groups)) {
+            setChatGroups(data.groups);
+          }
           if (data.voiceRooms && typeof data.voiceRooms === "object") {
             setVoiceRooms((prev) => ({ ...prev, ...data.voiceRooms }));
           }
@@ -1354,6 +1433,9 @@ export default function ChatModal() {
           }
           if (Array.isArray(data.ownerUsers)) {
             setOwnerUsers(data.ownerUsers);
+          }
+          if (Array.isArray(data.goatUsers)) {
+            setGoatUsers(data.goatUsers);
           }
           if (typeof data.selfRole === "string") {
             setSelfRole(data.selfRole as ChatRole);
@@ -1392,6 +1474,8 @@ export default function ChatModal() {
                   }),
                 }).catch(() => {});
               }
+            } else {
+              setEditingCustom(getDefaultCustomization(cloudUser));
             }
             if (typeof myRecord?.bio === "string") setEditingBio(myRecord.bio);
             if (typeof myRecord?.statusText === "string") {
@@ -1435,6 +1519,8 @@ export default function ChatModal() {
     setReplyingTo(null);
     setEditingMessageId(null);
     setConfirmDeleteChat(null);
+    setReactingMessageId(null);
+    setReactPickerMessageId(null);
   }, [activeChannel]);
 
   const filterMessagesLocally = useCallback(
@@ -1490,6 +1576,26 @@ export default function ChatModal() {
           edited: true,
           ...(detail.editedAt ? { editedAt: Number(detail.editedAt) } : {}),
         }));
+      } else if (evtKind === "MESSAGE_REACTED" && detail.messageId) {
+        updateMessageLocally(String(detail.messageId), (m) => ({
+          ...m,
+          reactions: detail.reactions && typeof detail.reactions === "object" ? detail.reactions : {},
+        }));
+      } else if (evtKind === "GROUP_UPDATED" && detail.group?.id) {
+        const g = detail.group as ChatGroupDef;
+        const myL = (cloudUser || "").toLowerCase();
+        setChatGroups((prev) => {
+          const isStillMember = Array.isArray(g.members) && g.members.includes(myL);
+          const filtered = prev.filter((x) => x.id !== g.id);
+          return isStillMember ? [g, ...filtered] : filtered;
+        });
+        if (!Array.isArray(g.members) || !g.members.includes(myL)) {
+          setActiveChannel((ch) => (ch === g.id ? "general" : ch));
+        }
+      } else if (evtKind === "GROUP_DELETED" && detail.groupId) {
+        const gid = String(detail.groupId);
+        setChatGroups((prev) => prev.filter((x) => x.id !== gid));
+        setActiveChannel((ch) => (ch === gid ? "general" : ch));
       } else if (evtKind === "CHANNEL_CLEARED" && detail.channel) {
         const ch = String(detail.channel);
         const target = detail.targetUsername ? String(detail.targetUsername).toLowerCase() : "";
@@ -1513,6 +1619,8 @@ export default function ChatModal() {
             setSelfRole("member");
           }
         }
+      } else if (evtKind === "GOAT_UPDATED") {
+        if (Array.isArray(detail.goatUsers)) setGoatUsers(detail.goatUsers);
       } else if (evtKind === "MOD_UPDATE" && detail.targetUsername) {
         const targetLower = String(detail.targetUsername).toLowerCase();
         if (cloudUser && targetLower === cloudUser.toLowerCase()) {
@@ -1545,6 +1653,9 @@ export default function ChatModal() {
       if (Array.isArray(detail.offlineUsers)) {
         setServerOfflineUsers(detail.offlineUsers);
       }
+      if (Array.isArray(detail.goatUsers)) {
+        setGoatUsers(detail.goatUsers);
+      }
       if (Array.isArray(detail.registeredUsers)) {
         setRegisteredCloudSyncUsers(detail.registeredUsers);
       }
@@ -1561,6 +1672,12 @@ export default function ChatModal() {
       if (e.key === "Escape" && isOpen) {
         if (editingMessageId) {
           setEditingMessageId(null);
+        } else if (reactPickerMessageId) {
+          setReactPickerMessageId(null);
+        } else if (reactingMessageId) {
+          setReactingMessageId(null);
+        } else if (groupModalMode) {
+          setGroupModalMode(null);
         } else if (confirmDeleteChat) {
           setConfirmDeleteChat(null);
         } else if (showStaffModal) {
@@ -1618,6 +1735,9 @@ export default function ChatModal() {
   }, [
     isOpen,
     editingMessageId,
+    reactPickerMessageId,
+    reactingMessageId,
+    groupModalMode,
     confirmDeleteChat,
     replyingTo,
     showStaffModal,
@@ -1695,9 +1815,9 @@ export default function ChatModal() {
     return () => window.clearTimeout(timer);
   }, [isOpen, showGifPicker, gifSearch, fetchKlipyGifs]);
 
-  // Close GIF or Emoji picker when clicking outside
+  // Close GIF, Emoji, or Reaction picker when clicking outside
   useEffect(() => {
-    if (!showGifPicker && !showEmojiPicker) return;
+    if (!showGifPicker && !showEmojiPicker && !reactingMessageId && !reactPickerMessageId) return;
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (!target) return;
@@ -1715,10 +1835,24 @@ export default function ChatModal() {
       ) {
         setShowEmojiPicker(false);
       }
+      if (
+        reactingMessageId &&
+        !target.closest(".chat-quick-react-bar") &&
+        !target.closest(".chat-react-toggle-btn")
+      ) {
+        setReactingMessageId(null);
+      }
+      if (
+        reactPickerMessageId &&
+        !reactPickerRef.current?.contains(target) &&
+        !target.closest(".chat-quick-react-more")
+      ) {
+        setReactPickerMessageId(null);
+      }
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [showGifPicker, showEmojiPicker]);
+  }, [showGifPicker, showEmojiPicker, reactingMessageId, reactPickerMessageId]);
 
   const handleInsertEmoji = useCallback((emoji: string) => {
     const input = chatInputRef.current;
@@ -2014,6 +2148,18 @@ export default function ChatModal() {
             setActiveChannel("general");
           }
           notifyToast("direct message chat deleted", "success");
+        } else if (channelId.startsWith("group:")) {
+          setChatGroups((prev) => prev.filter((g) => g.id !== channelId));
+          setUnreadCounts((prev) => {
+            if (!prev[channelId]) return prev;
+            const copy = { ...prev };
+            delete copy[channelId];
+            return copy;
+          });
+          if (activeChannel === channelId) {
+            setActiveChannel("general");
+          }
+          notifyToast("group chat deleted", "success");
         } else {
           notifyToast(`cleared #${channelId} chat history`, "success");
         }
@@ -2023,6 +2169,56 @@ export default function ChatModal() {
       }
     },
     [cloudUser, activeChannel, filterMessagesLocally]
+  );
+
+  const handleToggleReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      if (!cloudUser) {
+        notifyToast("sign in to cloudsync to react to messages", "error");
+        return;
+      }
+      const userLower = cloudUser.toLowerCase();
+      setReactingMessageId(null);
+      setReactPickerMessageId(null);
+
+      // Optimistic toggle
+      updateMessageLocally(messageId, (m) => {
+        const nextR: Record<string, string[]> = { ...(m.reactions || {}) };
+        const arr = Array.isArray(nextR[emoji]) ? [...nextR[emoji]] : [];
+        const i = arr.indexOf(userLower);
+        if (i >= 0) {
+          arr.splice(i, 1);
+          if (arr.length === 0) delete nextR[emoji];
+          else nextR[emoji] = arr;
+        } else {
+          arr.push(userLower);
+          nextR[emoji] = arr;
+        }
+        return { ...m, reactions: nextR };
+      });
+
+      let token = "";
+      try { token = localStorage.getItem("auth_token") || ""; } catch {}
+      try {
+        const res = await fetch("/api/chat/react", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ messageId, emoji }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not update reaction", "error");
+          return;
+        }
+        if (data.reactions) {
+          updateMessageLocally(messageId, (m) => ({ ...m, reactions: data.reactions }));
+        }
+      } catch {}
+    },
+    [cloudUser, updateMessageLocally]
   );
 
   const scrollToMessage = useCallback((msgId: string) => {
@@ -2120,6 +2316,57 @@ export default function ChatModal() {
     [cloudUser, activeChannel, filterMessagesLocally]
   );
 
+  const goatSet = useMemo(
+    () => new Set(goatUsers.map((g) => g.toLowerCase())),
+    [goatUsers]
+  );
+  const isUserGoat = useCallback(
+    (username?: string | null) => Boolean(username && goatSet.has(username.toLowerCase())),
+    [goatSet]
+  );
+
+  const handleToggleGoatUser = useCallback(
+    async (targetUsername: string, granted: boolean) => {
+      if (!cloudUser || !targetUsername) return;
+      let token = "";
+      try { token = localStorage.getItem("auth_token") || ""; } catch {}
+      if (!token) return;
+      try {
+        const res = await fetch("/api/chat/mod/goat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            username: targetUsername,
+            granted,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not update GOAT title", "error");
+          return;
+        }
+        if (Array.isArray(data.goatUsers)) {
+          setGoatUsers(data.goatUsers);
+        }
+        if (profileData && profileData.username.toLowerCase() === targetUsername.toLowerCase()) {
+          setProfileData((prev) => (prev ? { ...prev, isGoat: Boolean(data.granted) } : prev));
+        }
+        notifyToast(
+          data.granted
+            ? `awarded golden GOAT title to @${data.targetUsername || targetUsername}`
+            : `removed GOAT title from @${data.targetUsername || targetUsername}`,
+          "success"
+        );
+      } catch {
+        notifyToast("GOAT update request failed", "error");
+      }
+    },
+    [cloudUser, profileData]
+  );
+
   const handleSendMessage = async (e?: Event) => {
     if (e) e.preventDefault();
     await sendChatMessage(inputText);
@@ -2163,6 +2410,7 @@ export default function ChatModal() {
         username: cloudUser,
         color: stringToColor(cloudUser),
         status: "online",
+        isIdle: Boolean(selfIdle),
         isSelf: true,
         game: myGameSession.game,
         isPlayingGame: myGameSession.isPlayingGame,
@@ -2187,6 +2435,7 @@ export default function ChatModal() {
           username: su.username,
           color: su.color || stringToColor(su.username),
           status: "online",
+          isIdle: Boolean(su.isIdle),
           game: su.game || "browsing",
           isPlayingGame: Boolean(su.isPlayingGame),
           gameStartedAt: Number(su.gameStartedAt) || 0,
@@ -2210,6 +2459,7 @@ export default function ChatModal() {
     editingCustom,
     selfRole,
     selfTimeout,
+    selfIdle,
   ]);
 
   // Offline users: registered CloudSync users who are not currently online
@@ -2273,6 +2523,21 @@ export default function ChatModal() {
 
   // Active channel metadata
   const activeChannelDef = useMemo(() => {
+    if (activeChannel.startsWith("group:")) {
+      const grp = chatGroups.find((g) => g.id === activeChannel) || null;
+      return {
+        id: activeChannel,
+        name: grp?.name || "group chat",
+        icon: "fa-user-group",
+        isDm: false,
+        isGroup: true,
+        isVoice: false,
+        groupDef: grp,
+        desc: grp
+          ? `${grp.members.length} members · group chat`
+          : "private group chat",
+      };
+    }
     if (activeChannel.startsWith("dm:")) {
       const partner = getDmPartnerName(activeChannel, cloudUser);
       const partnerOnline = onlineUsers.find(
@@ -2280,13 +2545,19 @@ export default function ChatModal() {
       );
       let dmDesc = `direct message with @${partner} · offline`;
       if (partnerOnline) {
+        const effStatus = getEffectivePresenceDot(
+          partnerOnline.customization?.presenceStatus,
+          partnerOnline.isIdle
+        );
+        const labelStatus =
+          effStatus === "dnd" ? "do not disturb" : effStatus === "idle" ? "idle" : "online";
         if (partnerOnline.isPlayingGame && partnerOnline.game) {
-          dmDesc = `@${partner} is online · playing ${partnerOnline.game} (${formatElapsedDuration(
+          dmDesc = `@${partner} is ${labelStatus} · playing ${partnerOnline.game} (${formatElapsedDuration(
             partnerOnline.gameStartedAt,
             nowMs
           )})`;
         } else {
-          dmDesc = `@${partner} is online · browsing`;
+          dmDesc = `@${partner} is ${labelStatus} · browsing`;
         }
       }
       return {
@@ -2294,7 +2565,9 @@ export default function ChatModal() {
         name: partner,
         icon: "fa-at",
         isDm: true,
+        isGroup: false,
         isVoice: false,
+        groupDef: null as ChatGroupDef | null,
         desc: dmDesc,
       };
     }
@@ -2303,7 +2576,9 @@ export default function ChatModal() {
       return {
         ...voiceFound,
         isDm: false,
+        isGroup: false,
         isVoice: true,
+        groupDef: null as ChatGroupDef | null,
         desc: `voice & text lounge · ${voiceFound.name}`,
       };
     }
@@ -2313,7 +2588,9 @@ export default function ChatModal() {
         return {
           ...found,
           isDm: false,
+          isGroup: false,
           isVoice: false,
+          groupDef: null as ChatGroupDef | null,
           desc: `welcome to the #${found.name} channel`,
         };
       }
@@ -2323,10 +2600,12 @@ export default function ChatModal() {
       name: activeChannel,
       icon: "fa-hashtag",
       isDm: false,
+      isGroup: false,
       isVoice: false,
+      groupDef: null as ChatGroupDef | null,
       desc: `welcome to #${activeChannel}`,
     };
-  }, [activeChannel, cloudUser, onlineUsers, nowMs]);
+  }, [activeChannel, cloudUser, onlineUsers, chatGroups, nowMs]);
 
   const currentDmPartner = activeChannelDef.isDm ? activeChannelDef.name : null;
   const isCurrentDmBlocked = currentDmPartner ? isUserBlocked(currentDmPartner) : false;
@@ -2497,6 +2776,70 @@ export default function ChatModal() {
                   );
                 })}
             </div>
+
+            {/* Group Chats Category */}
+            {cloudUser && (
+              <div class="chat-category">
+                <div class="chat-category-title">
+                  <div
+                    class="chat-category-title-left"
+                    onClick={() => toggleCategory("groups")}
+                  >
+                    <span
+                      class="chat-category-chevron"
+                      style={{
+                        transform: collapsedCategories["groups"]
+                          ? "rotate(-90deg)"
+                          : "rotate(0deg)",
+                      }}
+                    >
+                      ▼
+                    </span>
+                    <span>group chats</span>
+                  </div>
+                  <i
+                    class="fa-solid fa-plus"
+                    title="Create group chat"
+                    onClick={() => setGroupModalMode("create")}
+                  ></i>
+                </div>
+
+                {!collapsedCategories["groups"] &&
+                  (chatGroups.length === 0 ? (
+                    <div
+                      style={{
+                        padding: "4px 10px",
+                        fontSize: "11px",
+                        color: "var(--color-sublabel)",
+                      }}
+                    >
+                      click + to start a group
+                    </div>
+                  ) : (
+                    chatGroups.map((grp) => {
+                      const unread = unreadCounts[grp.id] || 0;
+                      return (
+                        <button
+                          key={grp.id}
+                          type="button"
+                          class={`chat-channel-item ${activeChannel === grp.id ? "active" : ""}`}
+                          onClick={() => setActiveChannel(grp.id)}
+                        >
+                          <div class="chat-channel-item-left">
+                            <i class="fa-solid fa-user-group chat-channel-prefix"></i>
+                            <span>{grp.name}</span>
+                          </div>
+                          {unread > 0 ? (
+                            <span class="chat-unread-badge">{unread}</span>
+                          ) : (
+                            <span class="chat-group-count">{grp.members.length}</span>
+                          )}
+                        </button>
+                      );
+                    })
+                  ))}
+              </div>
+            )}
 
             {/* Direct Messages Category */}
             <div class="chat-category">
@@ -2675,7 +3018,10 @@ export default function ChatModal() {
                     fallbackColor={stringToColor(cloudUser)}
                     className="chat-user-avatar"
                   />
-                  <div class={`chat-user-dot ${editingCustom.presenceStatus || "online"}`}></div>
+                  {(() => {
+                    const effDot = getEffectivePresenceDot(editingCustom.presenceStatus, selfIdle);
+                    return <div class={`chat-user-dot ${effDot}`}></div>;
+                  })()}
                 </div>
                 <div class="chat-sidebar-user-info">
                   <div style={{ display: "flex", alignItems: "center", gap: "4px", minWidth: 0 }}>
@@ -2683,12 +3029,24 @@ export default function ChatModal() {
                       {editingCustom.displayName || cloudUser}
                     </span>
                     <RoleBadge role={selfRole} />
+                    <GoatBadge isGoat={isUserGoat(cloudUser)} />
                   </div>
-                  <span class="chat-sidebar-status">
+                  <span
+                    class="chat-sidebar-status"
+                    style={
+                      getEffectivePresenceDot(editingCustom.presenceStatus, selfIdle) === "idle"
+                        ? { color: "#facc15" }
+                        : getEffectivePresenceDot(editingCustom.presenceStatus, selfIdle) === "dnd"
+                        ? { color: "#f87171" }
+                        : undefined
+                    }
+                  >
                     <span style={{ fontSize: "8px" }}>●</span>{" "}
                     {editingStatusText ||
                       (editingCustom.presenceStatus === "dnd"
                         ? "do not disturb"
+                        : selfIdle
+                        ? "idle (auto)"
                         : editingCustom.presenceStatus || "online")}
                   </span>
                   {myGameSession.isPlayingGame && myGameSession.game && (
@@ -2703,7 +3061,7 @@ export default function ChatModal() {
                 </div>
                 <button
                   type="button"
-                  class="chat-user-mini-btn"
+                  class="chat-user-mini-btn is-round"
                   title="Customize profile & animations"
                   style={{ opacity: 0.9 }}
                   onClick={(e) => {
@@ -2818,8 +3176,36 @@ export default function ChatModal() {
                 </>
               )}
 
+              {/* Group Chat Header Actions */}
+              {activeChannelDef.isGroup && activeChannelDef.groupDef && cloudUser && (
+                <>
+                  <button
+                    type="button"
+                    class="chat-header-btn"
+                    title="View or manage group members"
+                    onClick={() => setGroupModalMode("members")}
+                  >
+                    <i class="fa-solid fa-users"></i>
+                    <span>members ({activeChannelDef.groupDef.members.length})</span>
+                  </button>
+                  {(activeChannelDef.groupDef.creator.toLowerCase() === cloudUser.toLowerCase() ||
+                    selfRole === "owner") && (
+                    <button
+                      type="button"
+                      class="chat-header-btn danger"
+                      title={`Delete group "${activeChannelDef.name}"`}
+                      onClick={() => setConfirmDeleteChat(activeChannel)}
+                    >
+                      <i class="fa-solid fa-trash-can"></i>
+                      <span>delete group</span>
+                    </button>
+                  )}
+                </>
+              )}
+
               {/* Public Channel Clear Chat Action for Owner/Mod */}
               {!activeChannelDef.isDm &&
+                !activeChannelDef.isGroup &&
                 !activeChannelDef.isVoice &&
                 cloudUser &&
                 (selfRole === "owner" || selfRole === "mod") && (
@@ -2879,7 +3265,7 @@ export default function ChatModal() {
               {cloudUser && (
                 <button
                   type="button"
-                  class="chat-header-btn"
+                  class="chat-header-btn is-round-pill"
                   title="Customize profile, banner, avatar frame & card effects"
                   onClick={() => void handleOpenCustomizer()}
                 >
@@ -2996,6 +3382,7 @@ export default function ChatModal() {
                             {vMeta?.customization?.displayName || p.username}
                           </span>
                           <RoleBadge role={vMeta?.role} />
+                          <GoatBadge isGoat={isUserGoat(p.username)} />
                           {isMe && <span class="chat-you-pill">you</span>}
                         </div>
                         <div class="chat-voice-card-badges">
@@ -3050,6 +3437,8 @@ export default function ChatModal() {
                 <i class="fa-solid fa-triangle-exclamation" style={{ marginRight: "6px" }}></i>
                 {activeChannelDef.isDm
                   ? `delete this direct message chat with @${currentDmPartner}?`
+                  : activeChannelDef.isGroup
+                  ? `delete group "${activeChannelDef.name}" and all its messages?`
                   : `delete all messages in #${activeChannelDef.name}?`}
               </span>
               <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
@@ -3079,6 +3468,8 @@ export default function ChatModal() {
                 <p>
                   {activeChannelDef.isDm
                     ? `start a direct conversation with @${activeChannelDef.name}`
+                    : activeChannelDef.isGroup
+                    ? `start chatting in ${activeChannelDef.name}`
                     : `welcome to #${activeChannelDef.name}`}
                 </p>
                 <span style={{ fontSize: "11px" }}>
@@ -3091,12 +3482,22 @@ export default function ChatModal() {
                 const isSelf =
                   cloudUser && msg.author.toLowerCase() === cloudUser.toLowerCase();
                 const authorMeta = userMetaMap.get(msg.author.toLowerCase());
-                const msgCustom = authorMeta?.customization || msg.customization || null;
+                const rawFallbackCustom = isStaleUninitializedCustom(msg.customization)
+                  ? null
+                  : msg.customization || null;
+                const msgCustom = authorMeta?.customization || rawFallbackCustom;
+                const safeFallbackColor =
+                  msg.avatarColor &&
+                  (!isStaleUninitializedCustom(msg.customization) ||
+                    msg.avatarColor.toLowerCase() !== "#6366f1")
+                    ? msg.avatarColor
+                    : stringToColor(msg.author);
                 const authorRole = authorMeta?.role || msg.role || "member";
                 const canDeleteMsg = Boolean(
                   cloudUser &&
                     (isSelf ||
                       (!activeChannel.startsWith("dm:") &&
+                        !activeChannel.startsWith("group:") &&
                         (selfRole === "owner" || selfRole === "mod")))
                 );
                 const displayName = msgCustom?.displayName?.trim() || msg.author;
@@ -3150,7 +3551,7 @@ export default function ChatModal() {
                         <UserAvatar
                           username={msg.author}
                           custom={msgCustom}
-                          fallbackColor={msg.avatarColor || stringToColor(msg.author)}
+                          fallbackColor={safeFallbackColor}
                           className="chat-entry-avatar"
                           title={`View @${msg.author}'s profile`}
                           onClick={() => openUserProfile(msg.author)}
@@ -3169,6 +3570,7 @@ export default function ChatModal() {
                               {displayName}
                             </span>
                             <RoleBadge role={authorRole} />
+                            <GoatBadge isGoat={isUserGoat(msg.author)} />
                             {msgCustom?.customTag && (
                               <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
                             )}
@@ -3244,11 +3646,46 @@ export default function ChatModal() {
                             />
                           </div>
                         )}
+                        {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                          <div class="chat-reaction-bar">
+                            {Object.entries(msg.reactions).map(([emoji, users]) => {
+                              if (!Array.isArray(users) || users.length === 0) return null;
+                              const meReacted = Boolean(
+                                cloudUser && users.includes(cloudUser.toLowerCase())
+                              );
+                              return (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  class={`chat-reaction-pill${meReacted ? " is-reacted" : ""}`}
+                                  title={`${users.map((u) => `@${u}`).join(", ")}`}
+                                  onClick={() => void handleToggleReaction(msg.id, emoji)}
+                                >
+                                  <span class="chat-reaction-emoji">{emoji}</span>
+                                  <span class="chat-reaction-count">{users.length}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     </div>
 
                     {/* Hover actions on each message */}
                     <div class="chat-entry-actions">
+                      {cloudUser && (
+                        <button
+                          type="button"
+                          class="chat-entry-action-btn chat-react-toggle-btn"
+                          title="Add reaction"
+                          onClick={() => {
+                            setReactPickerMessageId(null);
+                            setReactingMessageId((cur) => (cur === msg.id ? null : msg.id));
+                          }}
+                        >
+                          <i class="fa-regular fa-face-smile"></i>
+                        </button>
+                      )}
                       <button
                         type="button"
                         class="chat-entry-action-btn"
@@ -3311,6 +3748,42 @@ export default function ChatModal() {
                         </button>
                       )}
                     </div>
+
+                    {reactingMessageId === msg.id && (
+                      <div class="chat-quick-react-bar">
+                        {["😂", "❤️", "😭", "🔥", "👍", "💀", "🎉", "👀"].map((em) => (
+                          <button
+                            key={em}
+                            type="button"
+                            class="chat-quick-react-btn"
+                            title={`React with ${em}`}
+                            onClick={() => void handleToggleReaction(msg.id, em)}
+                          >
+                            {em}
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          class="chat-quick-react-btn chat-quick-react-more"
+                          title="More emojis"
+                          onClick={() => {
+                            setReactingMessageId(null);
+                            setReactPickerMessageId(msg.id);
+                          }}
+                        >
+                          <i class="fa-solid fa-plus"></i>
+                        </button>
+                      </div>
+                    )}
+
+                    {reactPickerMessageId === msg.id && (
+                      <EmojiPicker
+                        pickerRef={reactPickerRef}
+                        containerClass="is-reaction-picker"
+                        onSelect={(emoji) => void handleToggleReaction(msg.id, emoji)}
+                        onClose={() => setReactPickerMessageId(null)}
+                      />
+                    )}
                   </div>
                 );
               })
@@ -3558,7 +4031,7 @@ export default function ChatModal() {
                   uCustom?.nameplate && uCustom.nameplate !== "none"
                     ? `has-nameplate nameplate-${uCustom.nameplate}`
                     : "";
-                const dotStatus = uCustom?.presenceStatus || "online";
+                const dotStatus = getEffectivePresenceDot(uCustom?.presenceStatus, u.isIdle);
                 const displayName = uCustom?.displayName?.trim() || u.username;
                 return (
                   <div key={`online_${u.username}`} class={`chat-user-item ${npClass}`}>
@@ -3593,6 +4066,7 @@ export default function ChatModal() {
                           {displayName}
                         </span>
                         <RoleBadge role={u.role} />
+                        <GoatBadge isGoat={isUserGoat(u.username)} />
                         {u.isTimedOut && (
                           <span class="chat-role-badge muted-pill">muted</span>
                         )}
@@ -3607,7 +4081,13 @@ export default function ChatModal() {
                         </div>
                       ) : (
                         <div class="chat-user-status-sub">
-                          {u.statusText ? u.statusText : "online"}
+                          {u.statusText
+                            ? u.statusText
+                            : dotStatus === "dnd"
+                            ? "do not disturb"
+                            : dotStatus === "idle"
+                            ? "idle"
+                            : "online"}
                         </div>
                       )}
                     </div>
@@ -3704,6 +4184,7 @@ export default function ChatModal() {
                             {displayName}
                           </span>
                           <RoleBadge role={u.role} />
+                          <GoatBadge isGoat={isUserGoat(u.username)} />
                         </div>
                         <div class="chat-user-status-sub offline">
                           {u.statusText ? u.statusText : "offline"}
@@ -3847,6 +4328,12 @@ export default function ChatModal() {
                   targetRole !== "owner" &&
                   (selfRole === "owner" || targetRole !== "mod")
               );
+              const targetIsGoat = Boolean(
+                isUserGoat(targetName) || profileData?.isGoat
+              );
+              const canGrantGoat = Boolean(
+                cloudUser && (selfRole === "owner" || selfRole === "mod")
+              );
 
               return (
                 <div
@@ -3932,6 +4419,7 @@ export default function ChatModal() {
                             {displayLabel}
                           </h3>
                           <RoleBadge role={targetRole} />
+                          <GoatBadge isGoat={targetIsGoat} />
                         </div>
                         <div class="chat-profile-handle-row">
                           <span>@{targetName}</span>
@@ -4129,12 +4617,51 @@ export default function ChatModal() {
                             <i class="fa-solid fa-phone-volume"></i> voice call @{targetName}
                           </button>
 
-                          {canModTarget && (
-                            <div class="chat-profile-section" style={{ borderColor: "rgba(45, 212, 191, 0.28)" }}>
-                              <div class="chat-profile-section-title" style={{ color: "#5eead4" }}>
-                                <i class="fa-solid fa-shield-halved"></i> staff moderation
-                              </div>
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                        </>
+                      )}
+
+                      {(canModTarget || canGrantGoat) && (
+                        <div
+                          class="chat-profile-section"
+                          style={{
+                            borderColor: canModTarget
+                              ? "rgba(45, 212, 191, 0.28)"
+                              : "rgba(250, 204, 21, 0.35)",
+                          }}
+                        >
+                          <div
+                            class="chat-profile-section-title"
+                            style={{ color: canModTarget ? "#5eead4" : "#fde047" }}
+                          >
+                            <i class="fa-solid fa-shield-halved"></i> staff moderation
+                          </div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                            {canGrantGoat && (
+                              <button
+                                type="button"
+                                class="chat-profile-pill-btn"
+                                style={
+                                  targetIsGoat
+                                    ? {
+                                        color: "#fca5a5",
+                                        borderColor: "rgba(239, 68, 68, 0.42)",
+                                      }
+                                    : {
+                                        color: "#fef08a",
+                                        borderColor: "rgba(250, 204, 21, 0.58)",
+                                        background: "rgba(234, 179, 8, 0.22)",
+                                      }
+                                }
+                                onClick={() =>
+                                  void handleToggleGoatUser(targetName, !targetIsGoat)
+                                }
+                              >
+                                <i class="fa-solid fa-trophy"></i>{" "}
+                                {targetIsGoat ? "remove GOAT" : "award GOAT"}
+                              </button>
+                            )}
+                            {canModTarget && (
+                              <>
                                 {targetTimedOut ? (
                                   <button
                                     type="button"
@@ -4174,10 +4701,10 @@ export default function ChatModal() {
                                     purge #{activeChannel}
                                   </button>
                                 )}
-                              </div>
-                            </div>
-                          )}
-                        </>
+                              </>
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -4192,6 +4719,7 @@ export default function ChatModal() {
           <ProfileCustomizerModal
             username={cloudUser}
             role={selfRole}
+            isGoat={isUserGoat(cloudUser)}
             createdAt={profileData?.createdAt || userMetaMap.get(cloudUser.toLowerCase())?.createdAt}
             initialCustom={editingCustom}
             initialBio={editingBio}
@@ -4210,6 +4738,35 @@ export default function ChatModal() {
           <StaffManagerModal
             onClose={() => setShowStaffModal(false)}
             notify={(type, msg) => notifyToast(msg, type === "error" ? "error" : "success")}
+          />
+        )}
+
+        {/* ── GROUP CHAT CREATE / MEMBERS MODAL ── */}
+        {groupModalMode && cloudUser && (
+          <GroupChatModal
+            mode={groupModalMode}
+            currentUser={cloudUser}
+            knownUsernames={
+              registeredCloudSyncUsers.length > 0
+                ? registeredCloudSyncUsers
+                : Array.from(userMetaMap.values()).map((u) => u.username)
+            }
+            existingGroup={
+              groupModalMode === "members" ? activeChannelDef.groupDef : null
+            }
+            isSiteOwner={selfRole === "owner"}
+            onGroupSaved={(grp) => {
+              setChatGroups((prev) => [grp, ...prev.filter((x) => x.id !== grp.id)]);
+              setActiveChannel(grp.id);
+              setGroupModalMode(null);
+            }}
+            onGroupRemoved={(gid) => {
+              setChatGroups((prev) => prev.filter((x) => x.id !== gid));
+              setActiveChannel((ch) => (ch === gid ? "general" : ch));
+              setGroupModalMode(null);
+            }}
+            onClose={() => setGroupModalMode(null)}
+            notify={(msg, type) => notifyToast(msg, type)}
           />
         )}
       </div>
