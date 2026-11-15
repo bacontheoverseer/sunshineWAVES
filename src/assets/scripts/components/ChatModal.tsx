@@ -20,6 +20,13 @@ import {
   getNameClasses,
 } from "./ProfileVisuals.tsx";
 
+interface ChatReplyRef {
+  id: string;
+  author: string;
+  text?: string;
+  hasGif?: boolean;
+}
+
 interface ChatMessage {
   id: string;
   author: string;
@@ -32,6 +39,9 @@ interface ChatMessage {
   timestamp: string;
   channel: string;
   recipient?: string | null;
+  replyTo?: ChatReplyRef | null;
+  edited?: boolean;
+  editedAt?: number;
 }
 
 interface KlipyGifItem {
@@ -258,6 +268,7 @@ function extractMsgEpochMs(msg: ChatMessage): number | null {
 
 function shouldGroupMessages(prev: ChatMessage | undefined, curr: ChatMessage): boolean {
   if (!prev) return false;
+  if (curr.replyTo) return false;
   if (prev.author.toLowerCase() !== curr.author.toLowerCase()) return false;
   const prevMs = extractMsgEpochMs(prev);
   const currMs = extractMsgEpochMs(curr);
@@ -392,6 +403,13 @@ export default function ChatModal() {
   const [selfRole, setSelfRole] = useState<ChatRole>("member");
   const [selfTimeout, setSelfTimeout] = useState<{ until: number; reason?: string } | null>(null);
   const hydratedLocalCustomForRef = useRef<string | null>(null);
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingMessageText, setEditingMessageText] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+  const [confirmDeleteChat, setConfirmDeleteChat] = useState<string | null>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
 
   // Voice Chat state
   const [activeVoiceRoom, setActiveVoiceRoom] = useState<string | null>(null);
@@ -728,7 +746,28 @@ export default function ChatModal() {
       seenMessageIdsRef.current.add(incoming.id);
 
       setMessages((prev) => {
-        if (prev.some((m) => m.id === incoming.id)) return prev;
+        const existingIdx = prev.findIndex((m) => m.id === incoming.id);
+        if (existingIdx >= 0) {
+          const existing = prev[existingIdx];
+          if (
+            existing &&
+            incoming.edited &&
+            (existing.text !== incoming.text || !existing.edited || existing.editedAt !== incoming.editedAt)
+          ) {
+            const next = prev.slice();
+            next[existingIdx] = {
+              ...existing,
+              text: incoming.text,
+              edited: true,
+              ...(incoming.editedAt ? { editedAt: incoming.editedAt } : {}),
+            };
+            try {
+              localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+            } catch {}
+            return next;
+          }
+          return prev;
+        }
         const updated = [...prev, incoming].slice(-250);
         try {
           localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(updated));
@@ -1389,11 +1428,33 @@ export default function ChatModal() {
     return () => window.clearInterval(pollInterval);
   }, [cloudUser, isOpen, ingestIncomingMessage]);
 
+  useEffect(() => {
+    setReplyingTo(null);
+    setEditingMessageId(null);
+    setConfirmDeleteChat(null);
+  }, [activeChannel]);
+
   const filterMessagesLocally = useCallback(
     (predicate: (m: ChatMessage) => boolean) => {
       setMessages((prev) => {
         const next = prev.filter(predicate);
         if (next.length === prev.length) return prev;
+        try {
+          localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    },
+    []
+  );
+
+  const updateMessageLocally = useCallback(
+    (messageId: string, updater: (m: ChatMessage) => ChatMessage) => {
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === messageId);
+        if (idx < 0 || !prev[idx]) return prev;
+        const next = prev.slice();
+        next[idx] = updater(prev[idx]);
         try {
           localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
         } catch {}
@@ -1416,9 +1477,17 @@ export default function ChatModal() {
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
       if (detail.message) ingestIncomingMessage(detail.message);
-      if (detail.type === "MESSAGE_DELETED" && detail.messageId) {
+      const evtKind = detail.event || detail.type;
+      if (evtKind === "MESSAGE_DELETED" && detail.messageId) {
         filterMessagesLocally((m) => m.id !== detail.messageId);
-      } else if (detail.type === "CHANNEL_CLEARED" && detail.channel) {
+      } else if (evtKind === "MESSAGE_EDITED" && detail.messageId) {
+        updateMessageLocally(detail.messageId, (m) => ({
+          ...m,
+          text: typeof detail.text === "string" ? detail.text : m.text,
+          edited: true,
+          ...(detail.editedAt ? { editedAt: Number(detail.editedAt) } : {}),
+        }));
+      } else if (evtKind === "CHANNEL_CLEARED" && detail.channel) {
         const ch = String(detail.channel);
         const target = detail.targetUsername ? String(detail.targetUsername).toLowerCase() : "";
         filterMessagesLocally((m) => {
@@ -1426,7 +1495,7 @@ export default function ChatModal() {
           if (target && m.author.toLowerCase() !== target) return true;
           return false;
         });
-      } else if (detail.type === "STAFF_UPDATED") {
+      } else if (evtKind === "STAFF_UPDATED") {
         if (Array.isArray(detail.staffMods)) setStaffMods(detail.staffMods);
         if (Array.isArray(detail.ownerUsers)) setOwnerUsers(detail.ownerUsers);
         if (cloudUser) {
@@ -1441,7 +1510,7 @@ export default function ChatModal() {
             setSelfRole("member");
           }
         }
-      } else if (detail.type === "MOD_UPDATE" && detail.targetUsername) {
+      } else if (evtKind === "MOD_UPDATE" && detail.targetUsername) {
         const targetLower = String(detail.targetUsername).toLowerCase();
         if (cloudUser && targetLower === cloudUser.toLowerCase()) {
           setSelfTimeout(detail.timeout || null);
@@ -1487,12 +1556,18 @@ export default function ChatModal() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isOpen) {
-        if (showStaffModal) {
+        if (editingMessageId) {
+          setEditingMessageId(null);
+        } else if (confirmDeleteChat) {
+          setConfirmDeleteChat(null);
+        } else if (showStaffModal) {
           setShowStaffModal(false);
         } else if (showCustomizer) {
           setShowCustomizer(false);
         } else if (showGifPicker) {
           setShowGifPicker(false);
+        } else if (replyingTo) {
+          setReplyingTo(null);
         } else if (viewingProfileUsername) {
           setViewingProfileUsername(null);
         } else {
@@ -1507,6 +1582,17 @@ export default function ChatModal() {
       bc.onmessage = (event) => {
         if (event.data?.type === "NEW_MESSAGE" && event.data.message) {
           ingestIncomingMessage(event.data.message);
+        } else if (event.data?.type === "MESSAGE_DELETED" && event.data.messageId) {
+          filterMessagesLocally((m) => m.id !== event.data.messageId);
+        } else if (event.data?.type === "MESSAGE_EDITED" && event.data.messageId) {
+          updateMessageLocally(event.data.messageId, (m) => ({
+            ...m,
+            text: typeof event.data.text === "string" ? event.data.text : m.text,
+            edited: true,
+            ...(event.data.editedAt ? { editedAt: Number(event.data.editedAt) } : {}),
+          }));
+        } else if (event.data?.type === "CHANNEL_CLEARED" && event.data.channel) {
+          filterMessagesLocally((m) => m.channel !== event.data.channel);
         } else if (event.data?.type === "VOICE_EVENT" && event.data.payload) {
           handleVoiceEvent(event.data.payload);
         }
@@ -1526,6 +1612,9 @@ export default function ChatModal() {
     };
   }, [
     isOpen,
+    editingMessageId,
+    confirmDeleteChat,
+    replyingTo,
     showStaffModal,
     showCustomizer,
     showGifPicker,
@@ -1533,6 +1622,7 @@ export default function ChatModal() {
     cloudUser,
     ingestIncomingMessage,
     filterMessagesLocally,
+    updateMessageLocally,
     handleVoiceEvent,
     handleOpenCustomizer,
   ]);
@@ -1666,6 +1756,7 @@ export default function ChatModal() {
         ? getDmPartnerName(activeChannel, cloudUser)
         : null;
 
+      const activeReply = replyingTo;
       const newMsg: ChatMessage = {
         id: "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7),
         author: cloudUser,
@@ -1676,6 +1767,16 @@ export default function ChatModal() {
         ...(validGif
           ? { gifUrl: validGif.url, gifTitle: validGif.title || "GIF" }
           : {}),
+        ...(activeReply
+          ? {
+              replyTo: {
+                id: activeReply.id,
+                author: activeReply.author,
+                text: (activeReply.text || "").slice(0, 200),
+                hasGif: Boolean(activeReply.gifUrl),
+              },
+            }
+          : {}),
         timestamp: formatClockTime(new Date()),
         channel: activeChannel,
         recipient,
@@ -1683,6 +1784,7 @@ export default function ChatModal() {
 
       ingestIncomingMessage(newMsg);
       if (text) setInputText("");
+      if (activeReply) setReplyingTo(null);
       if (validGif) setShowGifPicker(false);
 
       try {
@@ -1744,13 +1846,156 @@ export default function ChatModal() {
           return;
         }
         filterMessagesLocally((m) => m.id !== msg.id);
+        if (replyingTo?.id === msg.id) setReplyingTo(null);
+        if (editingMessageId === msg.id) setEditingMessageId(null);
+        try {
+          broadcastRef.current?.postMessage({ type: "MESSAGE_DELETED", messageId: msg.id });
+        } catch {}
         notifyToast("message deleted", "success");
       } catch {
         notifyToast("failed to delete message", "error");
       }
     },
-    [cloudUser, filterMessagesLocally]
+    [cloudUser, filterMessagesLocally, replyingTo, editingMessageId]
   );
+
+  const handleStartEditMessage = useCallback((msg: ChatMessage) => {
+    setEditingMessageId(msg.id);
+    setEditingMessageText(msg.text || "");
+  }, []);
+
+  const handleSaveEditMessage = useCallback(
+    async (msg: ChatMessage) => {
+      if (!cloudUser || savingEdit) return;
+      const cleanText = editingMessageText.trim();
+      if (!cleanText && !msg.gifUrl) {
+        notifyToast("message cannot be empty (use delete instead)", "error");
+        return;
+      }
+      if (cleanText === (msg.text || "").trim()) {
+        setEditingMessageId(null);
+        return;
+      }
+      setSavingEdit(true);
+      try {
+        if (cleanText) {
+          const modResult = await moderateChatMessage(cleanText);
+          if (modResult.blocked) {
+            notifyToast(modResult.reason || "edited message blocked by moderation", "error");
+            return;
+          }
+        }
+        let token = "";
+        try { token = localStorage.getItem("auth_token") || ""; } catch {}
+        if (!token) {
+          notifyToast("sign in to edit messages", "error");
+          return;
+        }
+        const res = await fetch("/api/chat/edit", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ messageId: msg.id, text: cleanText }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not edit message", "error");
+          return;
+        }
+        const editedAt = Number(data.message?.editedAt) || Date.now();
+        updateMessageLocally(msg.id, (m) => ({
+          ...m,
+          text: cleanText,
+          edited: true,
+          editedAt,
+        }));
+        try {
+          broadcastRef.current?.postMessage({
+            type: "MESSAGE_EDITED",
+            messageId: msg.id,
+            text: cleanText,
+            editedAt,
+          });
+        } catch {}
+        setEditingMessageId(null);
+        notifyToast("message updated", "success");
+      } catch {
+        notifyToast("failed to edit message", "error");
+      } finally {
+        setSavingEdit(false);
+      }
+    },
+    [cloudUser, savingEdit, editingMessageText, updateMessageLocally]
+  );
+
+  const handleDeleteChat = useCallback(
+    async (channelId: string) => {
+      if (!cloudUser || !channelId) return;
+      let token = "";
+      try { token = localStorage.getItem("auth_token") || ""; } catch {}
+      if (!token) return;
+      try {
+        const res = await fetch("/api/chat/delete-chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ channel: channelId }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not delete chat", "error");
+          return;
+        }
+        filterMessagesLocally((m) => m.channel !== channelId);
+        try {
+          broadcastRef.current?.postMessage({ type: "CHANNEL_CLEARED", channel: channelId });
+        } catch {}
+        if (channelId.startsWith("dm:")) {
+          const partnerLower = getDmPartnerName(channelId, cloudUser).toLowerCase();
+          setDmPeers((prev) => {
+            const next = prev.filter((p) => p.toLowerCase() !== partnerLower);
+            try {
+              localStorage.setItem("cookie_chat_dm_peers_v1", JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+          setUnreadCounts((prev) => {
+            if (!prev[channelId]) return prev;
+            const copy = { ...prev };
+            delete copy[channelId];
+            return copy;
+          });
+          if (activeChannel === channelId) {
+            setActiveChannel("general");
+          }
+          notifyToast("direct message chat deleted", "success");
+        } else {
+          notifyToast(`cleared #${channelId} chat history`, "success");
+        }
+        setConfirmDeleteChat(null);
+      } catch {
+        notifyToast("failed to delete chat", "error");
+      }
+    },
+    [cloudUser, activeChannel, filterMessagesLocally]
+  );
+
+  const scrollToMessage = useCallback((msgId: string) => {
+    const el = document.getElementById(`chat-msg-${msgId}`);
+    if (!el) {
+      notifyToast("original message is no longer in chat history", "info");
+      return;
+    }
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedMsgId(msgId);
+    window.setTimeout(() => {
+      setHighlightedMsgId((cur) => (cur === msgId ? null : cur));
+    }, 1600);
+  }, []);
 
   const handleTimeoutUser = useCallback(
     async (targetUsername: string, durationMinutes: number) => {
@@ -2278,28 +2523,43 @@ export default function ChatModal() {
                     const unread = unreadCounts[dmId] || 0;
                     const blocked = isUserBlocked(peer);
                     return (
-                      <button
-                        key={dmId}
-                        type="button"
-                        class={`chat-channel-item ${activeChannel === dmId ? "active" : ""}`}
-                        onClick={() => setActiveChannel(dmId)}
-                      >
-                        <div class="chat-channel-item-left">
-                          <i class="fa-solid fa-at chat-channel-prefix"></i>
-                          <span
-                            style={
-                              blocked
-                                ? { textDecoration: "line-through", opacity: 0.6 }
-                                : undefined
-                            }
+                      <div key={dmId} class="chat-dm-row-wrap">
+                        <button
+                          type="button"
+                          class={`chat-channel-item ${activeChannel === dmId ? "active" : ""}`}
+                          onClick={() => setActiveChannel(dmId)}
+                        >
+                          <div class="chat-channel-item-left">
+                            <i class="fa-solid fa-at chat-channel-prefix"></i>
+                            <span
+                              style={
+                                blocked
+                                  ? { textDecoration: "line-through", opacity: 0.6 }
+                                  : undefined
+                              }
+                            >
+                              {peer}
+                            </span>
+                          </div>
+                          {unread > 0 && !blocked && (
+                            <span class="chat-unread-badge">{unread}</span>
+                          )}
+                        </button>
+                        {cloudUser && (
+                          <button
+                            type="button"
+                            class="chat-dm-delete-btn"
+                            title={`Delete chat with @${peer}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveChannel(dmId);
+                              setConfirmDeleteChat(dmId);
+                            }}
                           >
-                            {peer}
-                          </span>
-                        </div>
-                        {unread > 0 && !blocked && (
-                          <span class="chat-unread-badge">{unread}</span>
+                            <i class="fa-solid fa-xmark"></i>
+                          </button>
                         )}
-                      </button>
+                      </div>
                     );
                   })
                 ))}
@@ -2505,8 +2765,33 @@ export default function ChatModal() {
                     <i class="fa-solid fa-ban"></i>
                     <span>{isCurrentDmBlocked ? "unblock" : "block"}</span>
                   </button>
+                  <button
+                    type="button"
+                    class="chat-header-btn danger"
+                    title={`Delete chat with @${currentDmPartner}`}
+                    onClick={() => setConfirmDeleteChat(activeChannel)}
+                  >
+                    <i class="fa-solid fa-trash-can"></i>
+                    <span>delete chat</span>
+                  </button>
                 </>
               )}
+
+              {/* Public Channel Clear Chat Action for Owner/Mod */}
+              {!activeChannelDef.isDm &&
+                !activeChannelDef.isVoice &&
+                cloudUser &&
+                (selfRole === "owner" || selfRole === "mod") && (
+                  <button
+                    type="button"
+                    class="chat-header-btn danger"
+                    title={`Clear all messages in #${activeChannelDef.name}`}
+                    onClick={() => setConfirmDeleteChat(activeChannel)}
+                  >
+                    <i class="fa-solid fa-broom"></i>
+                    <span>clear chat</span>
+                  </button>
+                )}
 
               {/* Voice Channel Header Action */}
               {activeChannelDef.isVoice && (
@@ -2717,6 +3002,34 @@ export default function ChatModal() {
             </div>
           )}
 
+          {/* Confirm Delete / Clear Chat Banner */}
+          {confirmDeleteChat === activeChannel && (
+            <div class="chat-confirm-banner">
+              <span>
+                <i class="fa-solid fa-triangle-exclamation" style={{ marginRight: "6px" }}></i>
+                {activeChannelDef.isDm
+                  ? `delete this direct message chat with @${currentDmPartner}?`
+                  : `delete all messages in #${activeChannelDef.name}?`}
+              </span>
+              <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+                <button
+                  type="button"
+                  class="chat-header-btn danger"
+                  onClick={() => void handleDeleteChat(activeChannel)}
+                >
+                  confirm delete
+                </button>
+                <button
+                  type="button"
+                  class="chat-header-btn"
+                  onClick={() => setConfirmDeleteChat(null)}
+                >
+                  cancel
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Messages feed */}
           <div class="chat-feed">
             {channelMessages.length === 0 ? (
@@ -2746,55 +3059,141 @@ export default function ChatModal() {
                         (selfRole === "owner" || selfRole === "mod")))
                 );
                 const displayName = msgCustom?.displayName?.trim() || msg.author;
+                const replyRef = msg.replyTo || null;
+                const replyMeta = replyRef
+                  ? userMetaMap.get(replyRef.author.toLowerCase())
+                  : undefined;
+                const replyAuthorLabel =
+                  replyMeta?.customization?.displayName?.trim() || replyRef?.author || "";
+                const replyMiniCustom = replyMeta?.customization
+                  ? { ...replyMeta.customization, avatarDecoration: "none" as const }
+                  : null;
+                const isEditingThis = editingMessageId === msg.id;
+
                 return (
-                  <div key={msg.id} class={`chat-entry ${isGrouped ? "is-grouped" : ""}`}>
-                    {isGrouped ? (
-                      <div class="chat-entry-gutter" aria-hidden="true">
-                        <span class="chat-entry-hover-time">{msg.timestamp}</span>
+                  <div
+                    key={msg.id}
+                    id={`chat-msg-${msg.id}`}
+                    class={`chat-entry ${isGrouped ? "is-grouped" : ""} ${
+                      replyRef ? "has-reply" : ""
+                    } ${highlightedMsgId === msg.id ? "is-highlighted" : ""}`}
+                  >
+                    {replyRef && (
+                      <div
+                        class="chat-reply-context"
+                        title="Jump to original message"
+                        onClick={() => scrollToMessage(replyRef.id)}
+                      >
+                        <span class="chat-reply-spine" aria-hidden="true" />
+                        <UserAvatar
+                          username={replyRef.author}
+                          custom={replyMiniCustom}
+                          fallbackColor={stringToColor(replyRef.author)}
+                          className="chat-reply-mini-avatar"
+                        />
+                        <span class={`chat-reply-author ${getNameClasses(replyMeta?.customization)}`}>
+                          @{replyAuthorLabel}
+                        </span>
+                        <span class="chat-reply-snippet">
+                          {replyRef.text ? replyRef.text : replyRef.hasGif ? "clicked to see GIF" : "message"}
+                        </span>
                       </div>
-                    ) : (
-                      <UserAvatar
-                        username={msg.author}
-                        custom={msgCustom}
-                        fallbackColor={msg.avatarColor || stringToColor(msg.author)}
-                        className="chat-entry-avatar"
-                        title={`View @${msg.author}'s profile`}
-                        onClick={() => openUserProfile(msg.author)}
-                      />
                     )}
-                    <div class="chat-entry-content">
-                      {!isGrouped && (
-                        <div class="chat-entry-header">
-                          <span
-                            class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
-                              msgCustom
-                            )}`}
-                            title={`View @${msg.author}'s profile`}
-                            onClick={() => openUserProfile(msg.author)}
+
+                    <div class="chat-entry-main">
+                      {isGrouped ? (
+                        <div class="chat-entry-gutter" aria-hidden="true">
+                          <span class="chat-entry-hover-time">{msg.timestamp}</span>
+                        </div>
+                      ) : (
+                        <UserAvatar
+                          username={msg.author}
+                          custom={msgCustom}
+                          fallbackColor={msg.avatarColor || stringToColor(msg.author)}
+                          className="chat-entry-avatar"
+                          title={`View @${msg.author}'s profile`}
+                          onClick={() => openUserProfile(msg.author)}
+                        />
+                      )}
+                      <div class="chat-entry-content">
+                        {!isGrouped && (
+                          <div class="chat-entry-header">
+                            <span
+                              class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
+                                msgCustom
+                              )}`}
+                              title={`View @${msg.author}'s profile`}
+                              onClick={() => openUserProfile(msg.author)}
+                            >
+                              {displayName}
+                            </span>
+                            <RoleBadge role={authorRole} />
+                            {msgCustom?.customTag && (
+                              <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
+                            )}
+                            <span class="chat-entry-time">{msg.timestamp}</span>
+                          </div>
+                        )}
+                        {isEditingThis ? (
+                          <form
+                            class="chat-edit-form"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              void handleSaveEditMessage(msg);
+                            }}
                           >
-                            {displayName}
-                          </span>
-                          <RoleBadge role={authorRole} />
-                          {msgCustom?.customTag && (
-                            <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
-                          )}
-                          <span class="chat-entry-time">{msg.timestamp}</span>
-                        </div>
-                      )}
-                      {msg.text && (
-                        <div class="chat-entry-text">{renderFormattedText(msg.text)}</div>
-                      )}
-                      {isAllowedKlipyUrl(msg.gifUrl) && (
-                        <div class="chat-entry-gif-wrap">
-                          <img
-                            class="chat-entry-gif"
-                            src={getKlipyProxySrc(msg.gifUrl)}
-                            alt={msg.gifTitle || "GIF"}
-                            loading="lazy"
-                            decoding="async"
-                          />
-                        </div>
-                      )}
+                            <input
+                              type="text"
+                              class="chat-edit-input"
+                              maxLength={500}
+                              autoFocus
+                              disabled={savingEdit}
+                              value={editingMessageText}
+                              onInput={(e) =>
+                                setEditingMessageText((e.target as HTMLInputElement).value)
+                              }
+                            />
+                            <div class="chat-edit-meta-row">
+                              <span>escape to cancel · enter to save</span>
+                              <div style={{ display: "flex", gap: "6px" }}>
+                                <button
+                                  type="button"
+                                  class="chat-gif-more-btn"
+                                  onClick={() => setEditingMessageId(null)}
+                                >
+                                  cancel
+                                </button>
+                                <button
+                                  type="submit"
+                                  class="chat-gif-more-btn"
+                                  disabled={savingEdit}
+                                  style={{ backgroundColor: "var(--btn-primary-bg)", color: "var(--btn-primary-text)" }}
+                                >
+                                  {savingEdit ? "saving..." : "save"}
+                                </button>
+                              </div>
+                            </div>
+                          </form>
+                        ) : (
+                          msg.text && (
+                            <div class="chat-entry-text">
+                              {renderFormattedText(msg.text)}
+                              {msg.edited && <span class="chat-msg-edited">(edited)</span>}
+                            </div>
+                          )
+                        )}
+                        {isAllowedKlipyUrl(msg.gifUrl) && (
+                          <div class="chat-entry-gif-wrap">
+                            <img
+                              class="chat-entry-gif"
+                              src={getKlipyProxySrc(msg.gifUrl)}
+                              alt={msg.gifTitle || "GIF"}
+                              loading="lazy"
+                              decoding="async"
+                            />
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* Hover actions on each message */}
@@ -2807,22 +3206,31 @@ export default function ChatModal() {
                       >
                         <i class="fa-solid fa-id-card"></i>
                       </button>
+                      {cloudUser && (
+                        <button
+                          type="button"
+                          class="chat-entry-action-btn"
+                          title={`Reply to @${msg.author}`}
+                          onClick={() => {
+                            setReplyingTo(msg);
+                            window.setTimeout(() => chatInputRef.current?.focus(), 20);
+                          }}
+                        >
+                          <i class="fa-solid fa-reply"></i>
+                        </button>
+                      )}
+                      {isSelf && !isEditingThis && (
+                        <button
+                          type="button"
+                          class="chat-entry-action-btn"
+                          title="Edit message"
+                          onClick={() => handleStartEditMessage(msg)}
+                        >
+                          <i class="fa-solid fa-pen"></i>
+                        </button>
+                      )}
                       {!isSelf && (
                         <>
-                          <button
-                            type="button"
-                            class="chat-entry-action-btn"
-                            title={`Reply to @${msg.author}`}
-                            onClick={() =>
-                              setInputText((prev) =>
-                                prev.includes(`@${msg.author}`)
-                                  ? prev
-                                  : `@${msg.author} ${prev}`
-                              )
-                            }
-                          >
-                            <i class="fa-solid fa-reply"></i>
-                          </button>
                           <button
                             type="button"
                             class="chat-entry-action-btn"
@@ -2903,36 +3311,65 @@ export default function ChatModal() {
                 </div>
               </div>
             ) : (
-              <form class="chat-input-pill" onSubmit={handleSendMessage}>
-                <input
-                  type="text"
-                  class="chat-input-field"
-                  placeholder={
-                    activeChannelDef.isDm
-                      ? `message @${activeChannelDef.name}...`
-                      : `message #${activeChannelDef.name}...`
-                  }
-                  value={inputText}
-                  onInput={(e) => setInputText((e.target as HTMLInputElement).value)}
-                  maxLength={500}
-                />
-                <button
-                  type="button"
-                  class={`chat-gif-toggle-btn${showGifPicker ? " active" : ""}`}
-                  title="Send a GIF via KLIPY"
-                  onClick={() => setShowGifPicker((v) => !v)}
-                >
-                  GIF
-                </button>
-                <button
-                  type="submit"
-                  class="chat-submit-btn"
-                  disabled={!inputText.trim() || isSending}
-                  title="Send message"
-                >
-                  <i class="fa-solid fa-paper-plane"></i>
-                </button>
-              </form>
+              <>
+                {replyingTo && (
+                  <div class="chat-replying-bar">
+                    <div class="chat-replying-bar-left">
+                      <i class="fa-solid fa-reply" style={{ color: "#c084fc" }}></i>
+                      <span>
+                        replying to{" "}
+                        <strong>
+                          @
+                          {userMetaMap.get(replyingTo.author.toLowerCase())?.customization?.displayName?.trim() ||
+                            replyingTo.author}
+                        </strong>
+                      </span>
+                      <span class="chat-replying-bar-snippet">
+                        {replyingTo.text ? `— ${replyingTo.text}` : replyingTo.gifUrl ? "— [GIF]" : ""}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      class="chat-replying-cancel"
+                      title="Cancel reply"
+                      onClick={() => setReplyingTo(null)}
+                    >
+                      <i class="fa-solid fa-xmark"></i>
+                    </button>
+                  </div>
+                )}
+                <form class="chat-input-pill" onSubmit={handleSendMessage}>
+                  <input
+                    ref={chatInputRef}
+                    type="text"
+                    class="chat-input-field"
+                    placeholder={
+                      activeChannelDef.isDm
+                        ? `message @${activeChannelDef.name}...`
+                        : `message #${activeChannelDef.name}...`
+                    }
+                    value={inputText}
+                    onInput={(e) => setInputText((e.target as HTMLInputElement).value)}
+                    maxLength={500}
+                  />
+                  <button
+                    type="button"
+                    class={`chat-gif-toggle-btn${showGifPicker ? " active" : ""}`}
+                    title="Send a GIF via KLIPY"
+                    onClick={() => setShowGifPicker((v) => !v)}
+                  >
+                    GIF
+                  </button>
+                  <button
+                    type="submit"
+                    class="chat-submit-btn"
+                    disabled={!inputText.trim() || isSending}
+                    title="Send message"
+                  >
+                    <i class="fa-solid fa-paper-plane"></i>
+                  </button>
+                </form>
+              </>
             )}
 
             {cloudUser && !isCurrentDmBlocked && showGifPicker && (

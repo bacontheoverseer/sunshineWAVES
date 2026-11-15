@@ -3369,6 +3369,27 @@ app.post("/api/chat/user-profile", async (req, res) => {
   }
 });
 
+function broadcastChatPayload(channel, eventPayload) {
+  const ch = String(channel || "");
+  if (ch.startsWith("dm:")) {
+    const parts = ch
+      .slice(3)
+      .split(":")
+      .map((p) => (p || "").trim().toLowerCase())
+      .filter(Boolean);
+    for (const [, client] of liveClients.entries()) {
+      const verifiedU = client.verifiedUsername;
+      if (verifiedU && parts.includes(verifiedU)) {
+        try {
+          client.res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
+        } catch {}
+      }
+    }
+    return;
+  }
+  broadcastToClients(eventPayload, "all");
+}
+
 app.post("/api/chat/send", async (req, res) => {
   ensureChatMetaLoaded();
   try {
@@ -3406,6 +3427,20 @@ app.post("/api/chat/send", async (req, res) => {
     const authorCustom = authorProf?.customization || null;
     const authorRole = getUserChatRole(authorName);
 
+    let cleanReplyTo = null;
+    if (message?.replyTo && typeof message.replyTo === "object") {
+      const rid = String(message.replyTo.id || "").trim().slice(0, 80);
+      const rauthor = String(message.replyTo.author || "").trim().slice(0, 40);
+      if (rid && rauthor) {
+        cleanReplyTo = {
+          id: rid,
+          author: rauthor,
+          text: String(message.replyTo.text || "").trim().slice(0, 200),
+          hasGif: Boolean(message.replyTo.hasGif),
+        };
+      }
+    }
+
     const sanitizedMsg = {
       ...message,
       author: authorName,
@@ -3423,8 +3458,10 @@ app.post("/api/chat/send", async (req, res) => {
             gifTitle: typeof message?.gifTitle === "string" ? message.gifTitle.trim().slice(0, 120) : "GIF",
           }
         : {}),
+      ...(cleanReplyTo ? { replyTo: cleanReplyTo } : {}),
       channel: String(message.channel).trim().slice(0, 120),
     };
+    if (!cleanReplyTo) delete sanitizedMsg.replyTo;
 
     // Enforce authenticated sender & CloudSync validation for private DMs
     if (sanitizedMsg.channel.startsWith("dm:")) {
@@ -3476,21 +3513,133 @@ app.post("/api/chat/send", async (req, res) => {
       message: sanitizedMsg,
     };
 
-    if (sanitizedMsg.channel.startsWith("dm:")) {
-      const parts = sanitizedMsg.channel.split(":");
-      for (const [, client] of liveClients.entries()) {
-        const verifiedU = client.verifiedUsername;
-        if (verifiedU && parts.includes(verifiedU)) {
-          try {
-            client.res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
-          } catch {}
-        }
-      }
-    } else {
-      broadcastToClients(eventPayload, "all");
-    }
+    broadcastChatPayload(sanitizedMsg.channel, eventPayload);
 
     res.json({ success: true, message: sanitizedMsg });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/edit", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to edit messages" });
+    }
+
+    const messageId = String(req.body?.messageId || "").trim();
+    const cleanText = String(req.body?.text || "").trim().slice(0, 2000);
+    if (!messageId) {
+      return res.status(400).json({ success: false, error: "messageId required" });
+    }
+
+    const activeTimeout = getActiveTimeout(authUser.username);
+    if (activeTimeout) {
+      return res.status(403).json({
+        success: false,
+        timedOut: true,
+        until: activeTimeout.until,
+        error: "You cannot edit messages while timed out",
+      });
+    }
+
+    const idx = chatHistory.findIndex((m) => m.id === messageId);
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Message not found" });
+    }
+    const targetMsg = chatHistory[idx];
+    if (String(targetMsg.author || "").toLowerCase() !== authUser.username.toLowerCase()) {
+      return res.status(403).json({ success: false, error: "You can only edit your own messages" });
+    }
+    if (!cleanText && !targetMsg.gifUrl) {
+      return res.status(400).json({ success: false, error: "Edited message cannot be empty" });
+    }
+
+    if (cleanText) {
+      const mod = await moderateTextWithOpenAI(cleanText);
+      if (mod.flagged) {
+        return res.status(400).json({
+          success: false,
+          flagged: true,
+          category: mod.category,
+          error: mod.reason || "Edited message blocked by moderation",
+        });
+      }
+    }
+
+    const editedAt = Date.now();
+    chatHistory[idx] = {
+      ...targetMsg,
+      text: cleanText,
+      edited: true,
+      editedAt,
+    };
+    persistChatHistory();
+
+    broadcastChatPayload(targetMsg.channel, {
+      type: "chat-event",
+      event: "MESSAGE_EDITED",
+      messageId,
+      channel: targetMsg.channel,
+      text: cleanText,
+      edited: true,
+      editedAt,
+    });
+
+    res.json({ success: true, message: chatHistory[idx] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/delete-chat", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const actor = await getModActor(req);
+    const channel = String(req.body?.channel || "").trim().slice(0, 120);
+    if (!channel) {
+      return res.status(400).json({ success: false, error: "channel required" });
+    }
+
+    if (channel.startsWith("dm:")) {
+      if (!actor.usernameLower) {
+        return res.status(401).json({ success: false, error: "Sign in to CloudSync to delete a DM chat" });
+      }
+      const parts = channel
+        .slice(3)
+        .split(":")
+        .map((p) => (p || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (!parts.includes(actor.usernameLower)) {
+        return res.status(403).json({ success: false, error: "You can only delete your own DM chats" });
+      }
+    } else if (!actor.isMod) {
+      return res.status(403).json({
+        success: false,
+        error: "Only owners or staff moderators can delete a public channel chat",
+      });
+    }
+
+    let removed = 0;
+    for (let i = chatHistory.length - 1; i >= 0; i--) {
+      if (chatHistory[i]?.channel === channel) {
+        chatHistory.splice(i, 1);
+        removed++;
+      }
+    }
+    if (removed > 0) persistChatHistory();
+
+    broadcastChatPayload(channel, {
+      type: "chat-event",
+      event: "CHANNEL_CLEARED",
+      channel,
+      deletedChat: true,
+      by: actor.username || "staff",
+    });
+
+    res.json({ success: true, channel, removed });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -3627,16 +3776,13 @@ app.post("/api/chat/mod/delete-message", async (req, res) => {
       persistChatHistory();
     }
 
-    broadcastToClients(
-      {
-        type: "chat-event",
-        event: "MESSAGE_DELETED",
-        messageId,
-        channel: targetMsg?.channel || "",
-        by: actor.username || "staff",
-      },
-      "all"
-    );
+    broadcastChatPayload(targetMsg?.channel || "", {
+      type: "chat-event",
+      event: "MESSAGE_DELETED",
+      messageId,
+      channel: targetMsg?.channel || "",
+      by: actor.username || "staff",
+    });
     res.json({ success: true, messageId });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
