@@ -927,6 +927,22 @@ function getSharedCloudSyncDb() {
   return sharedCloudSyncDb;
 }
 
+const RESERVED_SYSTEM_KV_USERNAME = "__sunshine_kv__";
+const CHAT_META_KV_KEYS = [
+  "staff_moderators_v1",
+  "goat_users_v1",
+  "user_profiles_v2",
+  "chat_timeouts_v1",
+  "chat_groups_v1",
+  "chat_history_v1",
+];
+let supabaseHasAppKvTable = null; // null = probe on first sync, true/false once probed
+let supabaseKvSysUserId = null;
+let supabaseMetaHydrated = false;
+let supabaseMetaHydratePromise = null;
+let isHydratingSupabaseKv = false;
+const pendingSupabaseKvTimers = new Map();
+
 function kvGetJson(key, fallback) {
   try {
     const db = getSharedCloudSyncDb();
@@ -936,6 +952,22 @@ function kvGetJson(key, fallback) {
     }
   } catch {}
   return fallback;
+}
+
+function scheduleSupabaseKvSync(key) {
+  if (!USE_SUPABASE_CLOUDSYNC || isHydratingSupabaseKv) return;
+  const k = String(key);
+  if (pendingSupabaseKvTimers.has(k)) {
+    clearTimeout(pendingSupabaseKvTimers.get(k));
+  }
+  const delayMs = k === "staff_moderators_v1" || k === "goat_users_v1" ? 10 : 250;
+  const timer = setTimeout(() => {
+    pendingSupabaseKvTimers.delete(k);
+    void persistKvKeyToSupabaseAsync(k).catch((e) => {
+      console.warn("Supabase app_kv sync warning:", e?.message);
+    });
+  }, delayMs);
+  pendingSupabaseKvTimers.set(k, timer);
 }
 
 function kvSetJson(key, value) {
@@ -948,6 +980,7 @@ function kvSetJson(key, value) {
   } catch (e) {
     console.warn("kvSetJson warning:", e?.message);
   }
+  scheduleSupabaseKvSync(key);
 }
 
 const VALID_AVATAR_DECORATIONS = new Set([
@@ -1036,35 +1069,33 @@ function sanitizeProfileCustomizationServer(raw) {
   };
 }
 
-function ensureChatMetaLoaded() {
-  if (chatMetaLoadedFromDb) return;
-  chatMetaLoadedFromDb = true;
-  const savedMods = kvGetJson("staff_moderators_v1", []);
-  if (Array.isArray(savedMods)) {
-    for (const u of savedMods) {
+function applyChatMetaKvMap(kvMap) {
+  const mods = kvMap.staff_moderators_v1;
+  if (Array.isArray(mods)) {
+    for (const u of mods) {
       const clean = String(u || "").trim().toLowerCase();
       if (clean && !OWNER_USERNAMES.has(clean)) staffModerators.add(clean);
     }
   }
-  const savedGoats = kvGetJson("goat_users_v1", []);
-  if (Array.isArray(savedGoats)) {
-    for (const u of savedGoats) {
+  const goats = kvMap.goat_users_v1;
+  if (Array.isArray(goats)) {
+    for (const u of goats) {
       const clean = String(u || "").trim().toLowerCase();
       if (clean) goatUsers.add(clean);
     }
   }
-  const savedProfiles = kvGetJson("user_profiles_v2", {});
-  if (savedProfiles && typeof savedProfiles === "object") {
-    for (const [k, v] of Object.entries(savedProfiles)) {
+  const profs = kvMap.user_profiles_v2;
+  if (profs && typeof profs === "object") {
+    for (const [k, v] of Object.entries(profs)) {
       if (k && v && typeof v === "object") {
         userProfiles.set(k.toLowerCase(), v);
       }
     }
   }
-  const savedTimeouts = kvGetJson("chat_timeouts_v1", {});
-  if (savedTimeouts && typeof savedTimeouts === "object") {
+  const tms = kvMap.chat_timeouts_v1;
+  if (tms && typeof tms === "object") {
     const now = Date.now();
-    for (const [k, v] of Object.entries(savedTimeouts)) {
+    for (const [k, v] of Object.entries(tms)) {
       if (k && v && typeof v === "object") {
         if (v.until === -1 || Number(v.until) > now) {
           chatTimeouts.set(k.toLowerCase(), v);
@@ -1072,17 +1103,17 @@ function ensureChatMetaLoaded() {
       }
     }
   }
-  const savedHistory = kvGetJson("chat_history_v1", []);
-  if (Array.isArray(savedHistory) && typeof chatHistory !== "undefined" && chatHistory.length === 0) {
-    for (const m of savedHistory.slice(-250)) {
+  const hist = kvMap.chat_history_v1;
+  if (Array.isArray(hist) && typeof chatHistory !== "undefined" && chatHistory.length === 0) {
+    for (const m of hist.slice(-250)) {
       if (m && typeof m === "object" && m.id && m.author && m.channel) {
         chatHistory.push(m);
       }
     }
   }
-  const savedGroups = kvGetJson("chat_groups_v1", {});
-  if (savedGroups && typeof savedGroups === "object") {
-    for (const [gid, grp] of Object.entries(savedGroups)) {
+  const grps = kvMap.chat_groups_v1;
+  if (grps && typeof grps === "object") {
+    for (const [gid, grp] of Object.entries(grps)) {
       if (gid && grp && typeof grp === "object" && Array.isArray(grp.members)) {
         const members = Array.from(
           new Set(
@@ -1103,6 +1134,154 @@ function ensureChatMetaLoaded() {
       }
     }
   }
+}
+
+function ensureChatMetaLoaded() {
+  if (chatMetaLoadedFromDb) return;
+  chatMetaLoadedFromDb = true;
+  applyChatMetaKvMap({
+    staff_moderators_v1: kvGetJson("staff_moderators_v1", []),
+    goat_users_v1: kvGetJson("goat_users_v1", []),
+    user_profiles_v2: kvGetJson("user_profiles_v2", {}),
+    chat_timeouts_v1: kvGetJson("chat_timeouts_v1", {}),
+    chat_history_v1: kvGetJson("chat_history_v1", []),
+    chat_groups_v1: kvGetJson("chat_groups_v1", {}),
+  });
+}
+
+async function getOrCreateSupabaseSystemKvUserId() {
+  if (supabaseKvSysUserId) return supabaseKvSysUserId;
+  const existing = await dbFindUserByUsername(RESERVED_SYSTEM_KV_USERNAME);
+  if (existing?.id) {
+    supabaseKvSysUserId = Number(existing.id);
+    return supabaseKvSysUserId;
+  }
+  const created = await dbCreateUser(RESERVED_SYSTEM_KV_USERNAME, "!locked_system_kv_account!");
+  if (created?.id) {
+    supabaseKvSysUserId = Number(created.id);
+    return supabaseKvSysUserId;
+  }
+  const refetched = await dbFindUserByUsername(RESERVED_SYSTEM_KV_USERNAME);
+  if (refetched?.id) {
+    supabaseKvSysUserId = Number(refetched.id);
+    return supabaseKvSysUserId;
+  }
+  return null;
+}
+
+async function persistKvKeyToSupabaseAsync(key) {
+  if (!USE_SUPABASE_CLOUDSYNC) return;
+  const val = kvGetJson(key, null);
+  if (val === null || val === undefined) return;
+  if (supabaseHasAppKvTable !== false) {
+    const res = await supabaseRest("app_kv?on_conflict=k", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({
+        k: String(key),
+        v: JSON.stringify(val),
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    if (res.ok) {
+      supabaseHasAppKvTable = true;
+      return;
+    }
+    if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
+      supabaseHasAppKvTable = false;
+    }
+  }
+  const sysId = await getOrCreateSupabaseSystemKvUserId();
+  if (!sysId) return;
+  const snapshot = {};
+  for (const k of CHAT_META_KV_KEYS) {
+    const localVal = kvGetJson(k, null);
+    if (localVal !== null && localVal !== undefined) snapshot[k] = localVal;
+  }
+  snapshot[String(key)] = val;
+  await dbUpsertSyncPayload(sysId, JSON.stringify({ kv: snapshot }), new Date().toISOString());
+}
+
+async function ensureChatMetaReadyAsync() {
+  ensureChatMetaLoaded();
+  if (!USE_SUPABASE_CLOUDSYNC || supabaseMetaHydrated) return;
+  if (!supabaseMetaHydratePromise) {
+    supabaseMetaHydratePromise = (async () => {
+      try {
+        let remoteKv = {};
+        if (supabaseHasAppKvTable !== false) {
+          const res = await supabaseRest("app_kv?select=k,v");
+          if (res.ok && Array.isArray(res.json)) {
+            supabaseHasAppKvTable = true;
+            for (const row of res.json) {
+              if (row?.k && typeof row.v === "string") {
+                try {
+                  remoteKv[row.k] = JSON.parse(row.v);
+                } catch {}
+              }
+            }
+          } else if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
+            supabaseHasAppKvTable = false;
+          }
+        }
+        if (supabaseHasAppKvTable === false) {
+          const sysUser = await dbFindUserByUsername(RESERVED_SYSTEM_KV_USERNAME);
+          if (sysUser?.id) {
+            supabaseKvSysUserId = Number(sysUser.id);
+            const row = await dbGetSyncPayload(supabaseKvSysUserId);
+            if (row?.payload_json) {
+              try {
+                const parsed = JSON.parse(String(row.payload_json));
+                if (parsed?.kv && typeof parsed.kv === "object") {
+                  remoteKv = parsed.kv;
+                }
+              } catch {}
+            }
+          }
+        }
+        if (Object.keys(remoteKv).length > 0) {
+          isHydratingSupabaseKv = true;
+          try {
+            applyChatMetaKvMap(remoteKv);
+            for (const k of CHAT_META_KV_KEYS) {
+              if (remoteKv[k] !== undefined) kvSetJson(k, remoteKv[k]);
+            }
+          } finally {
+            isHydratingSupabaseKv = false;
+          }
+        }
+      } catch (e) {
+        console.warn("Supabase chat meta hydrate warning:", e?.message);
+      } finally {
+        supabaseMetaHydrated = true;
+      }
+    })();
+  }
+  await supabaseMetaHydratePromise;
+}
+
+function getCanonicalOwnerUsers(csMap = getCloudSyncUsersMap()) {
+  const registeredOwners = [];
+  if (csMap.size > 0) {
+    for (const o of OWNER_USERNAMES) {
+      const rec = csMap.get(o);
+      if (rec) registeredOwners.push(rec.username);
+    }
+    if (registeredOwners.length > 0) return registeredOwners;
+  }
+  return Array.from(OWNER_USERNAMES);
+}
+
+function getCanonicalStaffMods(csMap = getCloudSyncUsersMap()) {
+  const seen = new Set();
+  const out = [];
+  for (const m of staffModerators) {
+    const clean = String(m || "").trim().toLowerCase();
+    if (!clean || OWNER_USERNAMES.has(clean) || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(csMap.get(clean)?.username || clean);
+  }
+  return out;
 }
 
 function persistChatGroups() {
@@ -1482,7 +1661,7 @@ function setCloudSyncAuthCookie(res, token, req) {
   const isHttps =
     req?.secure ||
     req?.headers?.["x-forwarded-proto"] === "https";
-  const maxAge = 7 * 24 * 60 * 60;
+  const maxAge = 30 * 24 * 60 * 60;
   const cookieParts = [
     `token=${token}`,
     "Path=/",
@@ -1519,7 +1698,8 @@ async function getAuthenticatedCloudSyncUser(req) {
     if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
     return { id: Number(row.id), username: String(row.username) };
   } catch {
-    return null;
+    // Transient Supabase / DB connectivity blip should not silently strip verified moderator auth
+    return { id: Number(claims.id), username: String(claims.username) };
   }
 }
 
@@ -1528,6 +1708,12 @@ app.post("/api/auth/register", async (req, res) => {
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
+
+    if (username.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "reserved username" });
+    }
 
     if (username.length < 3 || username.length > 20) {
       return res
@@ -1562,7 +1748,7 @@ app.post("/api/auth/register", async (req, res) => {
     }
     const userId = created.id;
 
-    const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
     const token = signCloudSyncJwt({ id: userId, username, v: 1, exp });
     setCloudSyncAuthCookie(res, token, req);
     invalidateCloudSyncUsersCache();
@@ -1588,7 +1774,7 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
-    if (!username || !password) {
+    if (!username || !password || username.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) {
       return res
         .status(400)
         .json({ success: false, user: null, error: "missing username or password" });
@@ -1609,7 +1795,7 @@ app.post("/api/auth/login", async (req, res) => {
     const userId = Number(row.id);
     const canonicalUsername = String(row.username);
     const tokenVersion = Number(row.token_version || 1);
-    const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
     const token = signCloudSyncJwt({
       id: userId,
       username: canonicalUsername,
@@ -1789,6 +1975,7 @@ function buildCloudSyncUsersMap(rows) {
   for (const r of rows || []) {
     if (r && r.username) {
       const clean = String(r.username).trim();
+      if (!clean || clean.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) continue;
       map.set(clean.toLowerCase(), {
         id: Number(r.id),
         username: clean,
@@ -1997,7 +2184,14 @@ function getPresenceSnapshot() {
   }
 
   const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
-  return { onlineUsers, offlineUsers, registeredUsers, goatUsers: getCanonicalGoatUsers(csMap) };
+  return {
+    onlineUsers,
+    offlineUsers,
+    registeredUsers,
+    staffMods: getCanonicalStaffMods(csMap),
+    ownerUsers: getCanonicalOwnerUsers(csMap),
+    goatUsers: getCanonicalGoatUsers(csMap),
+  };
 }
 
 function verifyAdmin(req, res, next) {
@@ -3212,7 +3406,7 @@ app.post("/api/chat/moderate", async (req, res) => {
 });
 
 async function getModActor(req) {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   const keyHeader =
     req.headers["x-admin-key"] ||
     req.query?.adminKey ||
@@ -3238,10 +3432,10 @@ async function getModActor(req) {
 }
 
 app.get("/api/chat/state", async (req, res) => {
-  ensureChatMetaLoaded();
-  const [authUser] = await Promise.all([
+  await ensureChatMetaReadyAsync();
+  const [authUser, csMap] = await Promise.all([
     getAuthenticatedCloudSyncUser(req),
-    getCloudSyncUsersMapAsync().catch(() => null),
+    getCloudSyncUsersMapAsync().catch(() => new Map()),
   ]);
   const verifiedUserKey = authUser ? authUser.username.toLowerCase() : "";
   if (authUser) touchKnownUser(authUser.username);
@@ -3277,8 +3471,8 @@ app.get("/api/chat/state", async (req, res) => {
     onlineUsers: presence.onlineUsers,
     offlineUsers: presence.offlineUsers,
     registeredUsers: presence.registeredUsers,
-    staffMods: Array.from(staffModerators),
-    ownerUsers: Array.from(OWNER_USERNAMES),
+    staffMods: getCanonicalStaffMods(csMap),
+    ownerUsers: getCanonicalOwnerUsers(csMap),
     goatUsers: presence.goatUsers,
     selfRole,
     selfTimeout,
@@ -3286,7 +3480,7 @@ app.get("/api/chat/state", async (req, res) => {
 });
 
 app.get("/api/chat/user-profile", async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   const rawTarget = (req.query.username || req.query.user || "").toString().trim();
   if (!rawTarget) {
     return res.status(400).json({ success: false, exists: false, error: "username is required" });
@@ -4033,7 +4227,7 @@ app.post("/api/chat/react", async (req, res) => {
 
 // --- Staff Moderator Selection & Chat Moderation Endpoints ---
 app.get("/api/chat/staff", async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   const actor = await getModActor(req);
   const csMap = await getCloudSyncUsersMapAsync().catch(() => new Map());
   const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
@@ -4054,8 +4248,8 @@ app.get("/api/chat/staff", async (req, res) => {
 
   res.json({
     success: true,
-    owners: Array.from(OWNER_USERNAMES),
-    staffMods: Array.from(staffModerators).map((m) => csMap.get(m)?.username || m),
+    owners: getCanonicalOwnerUsers(csMap),
+    staffMods: getCanonicalStaffMods(csMap),
     goatUsers: getCanonicalGoatUsers(csMap),
     registeredUsers,
     timeouts: timeoutsList,
@@ -4064,7 +4258,7 @@ app.get("/api/chat/staff", async (req, res) => {
 });
 
 app.post("/api/chat/staff", async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   try {
     const actor = await getModActor(req);
     if (!actor.isOwner) {
@@ -4110,13 +4304,15 @@ app.post("/api/chat/staff", async (req, res) => {
     }
     persistChatHistory();
 
-    const canonicalMods = Array.from(staffModerators).map((m) => csMap.get(m)?.username || m);
+    const canonicalMods = getCanonicalStaffMods(csMap);
+    const canonicalOwners = getCanonicalOwnerUsers(csMap);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     broadcastToClients(
       {
         type: "chat-event",
         event: "STAFF_UPDATED",
         staffMods: canonicalMods,
+        ownerUsers: canonicalOwners,
         targetUsername: csMap.get(key)?.username || rawUsername,
         role: nextRole,
       },
@@ -5414,6 +5610,7 @@ server.listen(PORT, () => {
     `server listening on ${PORT}!! ~ caching: ${CACHING_ENABLED ? "yes" : "no"} ~ cloudsync: ${USE_SUPABASE_CLOUDSYNC ? "supabase" : "sqlite"}`,
   );
   void getCloudSyncUsersMapAsync().catch(() => {});
+  void ensureChatMetaReadyAsync().catch(() => {});
 
   if (NODE_ENV === "development") {
     spawnServices();

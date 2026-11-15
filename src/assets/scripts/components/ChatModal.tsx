@@ -456,6 +456,8 @@ export default function ChatModal() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [staffMods, setStaffMods] = useState<string[]>([]);
   const [ownerUsers, setOwnerUsers] = useState<string[]>([]);
+  const ownerUsersRef = useRef<string[]>([]);
+  ownerUsersRef.current = ownerUsers;
   const [goatUsers, setGoatUsers] = useState<string[]>([]);
   const [selfRole, setSelfRole] = useState<ChatRole>("member");
   const [selfTimeout, setSelfTimeout] = useState<{ until: number; reason?: string } | null>(null);
@@ -1412,6 +1414,7 @@ export default function ChatModal() {
       let authToken = "";
       try { authToken = localStorage.getItem("auth_token") || ""; } catch {}
       fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`, {
+        credentials: "same-origin",
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
       })
         .then((r) => (r.ok ? r.json() : null))
@@ -1515,11 +1518,18 @@ export default function ChatModal() {
     };
 
     fetchChatAndPresenceState();
+    const onVisWake = () => {
+      if (!document.hidden) fetchChatAndPresenceState();
+    };
+    document.addEventListener("visibilitychange", onVisWake);
     const pollInterval = window.setInterval(
       fetchChatAndPresenceState,
       isOpen ? 8000 : 45000
     );
-    return () => window.clearInterval(pollInterval);
+    return () => {
+      window.clearInterval(pollInterval);
+      document.removeEventListener("visibilitychange", onVisWake);
+    };
   }, [cloudUser, isOpen, ingestIncomingMessage]);
 
   useEffect(() => {
@@ -1616,7 +1626,9 @@ export default function ChatModal() {
         if (Array.isArray(detail.ownerUsers)) setOwnerUsers(detail.ownerUsers);
         if (cloudUser) {
           const lower = cloudUser.toLowerCase();
-          const owners = Array.isArray(detail.ownerUsers) ? detail.ownerUsers : [];
+          const owners = Array.isArray(detail.ownerUsers)
+            ? detail.ownerUsers
+            : ownerUsersRef.current;
           const mods = Array.isArray(detail.staffMods) ? detail.staffMods : [];
           if (owners.some((u: string) => u.toLowerCase() === lower)) {
             setSelfRole("owner");
@@ -1660,11 +1672,31 @@ export default function ChatModal() {
       if (Array.isArray(detail.offlineUsers)) {
         setServerOfflineUsers(detail.offlineUsers);
       }
+      if (Array.isArray(detail.staffMods)) {
+        setStaffMods(detail.staffMods);
+      }
+      if (Array.isArray(detail.ownerUsers)) {
+        setOwnerUsers(detail.ownerUsers);
+      }
       if (Array.isArray(detail.goatUsers)) {
         setGoatUsers(detail.goatUsers);
       }
       if (Array.isArray(detail.registeredUsers)) {
         setRegisteredCloudSyncUsers(detail.registeredUsers);
+      }
+      if (cloudUser && (Array.isArray(detail.ownerUsers) || Array.isArray(detail.staffMods))) {
+        const lower = cloudUser.toLowerCase();
+        const owners = Array.isArray(detail.ownerUsers)
+          ? detail.ownerUsers
+          : ownerUsersRef.current;
+        const mods = Array.isArray(detail.staffMods) ? detail.staffMods : [];
+        if (owners.some((u: string) => u.toLowerCase() === lower)) {
+          setSelfRole("owner");
+        } else if (mods.some((u: string) => u.toLowerCase() === lower)) {
+          setSelfRole("mod");
+        } else if (Array.isArray(detail.staffMods)) {
+          setSelfRole("member");
+        }
       }
     };
 

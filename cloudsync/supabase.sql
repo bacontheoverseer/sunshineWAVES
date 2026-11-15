@@ -29,3 +29,12 @@ CREATE TABLE IF NOT EXISTS public.kofi_subscriptions (
 );
 
 ALTER TABLE public.kofi_subscriptions ENABLE ROW LEVEL SECURITY;
+
+
+CREATE TABLE IF NOT EXISTS public.app_kv (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.app_kv ENABLE ROW LEVEL SECURITY;

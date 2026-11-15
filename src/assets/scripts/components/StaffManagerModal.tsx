@@ -48,12 +48,27 @@ export function StaffManagerContent({
       if (!res.ok) return;
       const data = await res.json();
       if (data.success) {
-        setOwners(Array.isArray(data.owners) ? data.owners : []);
-        setStaffMods(Array.isArray(data.staffMods) ? data.staffMods : []);
-        setGoatUsers(Array.isArray(data.goatUsers) ? data.goatUsers : []);
-        setRegisteredUsers(
-          Array.isArray(data.registeredUsers) ? data.registeredUsers : []
+        const dedupeList = (arr: unknown): string[] => {
+          if (!Array.isArray(arr)) return [];
+          const seen = new Set<string>();
+          const out: string[] = [];
+          for (const item of arr) {
+            const s = String(item || "").trim();
+            const k = s.toLowerCase();
+            if (!s || seen.has(k)) continue;
+            seen.add(k);
+            out.push(s);
+          }
+          return out;
+        };
+        const cleanOwners = dedupeList(data.owners);
+        const ownerKeys = new Set(cleanOwners.map((o) => o.toLowerCase()));
+        setOwners(cleanOwners);
+        setStaffMods(
+          dedupeList(data.staffMods).filter((m) => !ownerKeys.has(m.toLowerCase()))
         );
+        setGoatUsers(dedupeList(data.goatUsers));
+        setRegisteredUsers(dedupeList(data.registeredUsers));
         setTimeouts(Array.isArray(data.timeouts) ? data.timeouts : []);
         setActorRole(data.actorRole || "member");
       }
