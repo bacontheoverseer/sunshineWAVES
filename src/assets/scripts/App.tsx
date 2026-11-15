@@ -5,6 +5,7 @@ import SearchBar from "./components/SearchBar.tsx";
 import Bookmarks from "./components/Bookmarks.tsx";
 import Footer from "./components/Footer.tsx";
 import TopBar from "./components/TopBar.tsx";
+import HomeProfileCard from "./components/HomeProfileCard.tsx";
 
 const loadGamesPage = () => import("./components/GamesPage.tsx");
 const GamesPage = lazy(loadGamesPage);
@@ -29,10 +30,10 @@ export default function App() {
       <Sidebar />
       <div class="content-area">
         <NavBar />
-        <div class="main-container">
+        <HomeProfileCard>
           <div class="title"><img src="/sunshinelogo.png" /></div>
           <SearchBar />
-        </div>
+        </HomeProfileCard>
         <Bookmarks />
         <Suspense fallback={null}>
           <GamesPage />

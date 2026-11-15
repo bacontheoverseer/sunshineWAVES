@@ -127,6 +127,9 @@ export default function SettingsMenu() {
   const [betaHomepageDecorations, setBetaHomepageDecorations] = useState(
     () => localStorage.getItem("betaHomepageDecorations") === "true",
   );
+  const [homepageProfileTheme, setHomepageProfileTheme] = useState(
+    () => localStorage.getItem("homepageProfileTheme") !== "false",
+  );
   const [versionInfo, setVersionInfo] = useState("");
 
   useEffect(() => {
@@ -310,6 +313,13 @@ export default function SettingsMenu() {
       );
       document.dispatchEvent(
         new CustomEvent("betaHomepageDecorationsUpdated", { detail: value }),
+      );
+    } else if (key === "homepageProfileTheme") {
+      window.dispatchEvent(
+        new CustomEvent("homepageProfileThemeUpdated", { detail: value }),
+      );
+      document.dispatchEvent(
+        new CustomEvent("homepageProfileThemeUpdated", { detail: value }),
       );
     }
   };
@@ -536,6 +546,19 @@ export default function SettingsMenu() {
               >
                 <i class="fa-solid fa-wand-magic-sparkles" /> customize profile
               </button>
+            </div>
+            <div class="settings-item">
+              <label>homepage profile theme</label>
+              <p>
+                automatically match your homepage card theme and frame to your chat profile.
+              </p>
+              <Toggle
+                id="homepage-profile-theme-toggle"
+                checked={homepageProfileTheme}
+                onChange={(v) =>
+                  handleToggle("homepageProfileTheme", v, setHomepageProfileTheme)
+                }
+              />
             </div>
             <div class="settings-item">
               <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
