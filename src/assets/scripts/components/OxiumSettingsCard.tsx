@@ -71,9 +71,15 @@ export default function OxiumSettingsCard({ active }: OxiumSettingsCardProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalTab, setModalTab] = useState<"request" | "mysites">("request");
   const [mySites, setMySites] = useState<OxiumPartner[]>([]);
-  const [oxiumOrigin, setOxiumOrigin] = useState(() =>
-    typeof window !== "undefined" ? window.location.origin : "https://operationcookie.com",
-  );
+  const [oxiumOrigin, setOxiumOrigin] = useState(() => {
+    if (typeof window !== "undefined") {
+      const orig = window.location?.origin;
+      if (orig && orig !== "null" && /^https?:\/\//i.test(orig)) {
+        return orig.replace(/\/+$/, "");
+      }
+    }
+    return "";
+  });
   const [loadingSites, setLoadingSites] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ text: string; ok: boolean } | null>(null);

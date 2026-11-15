@@ -798,7 +798,10 @@ app.use((req, res, next) => {
     req.path.startsWith("/epoxy/") ||
     req.path.startsWith("/libcurl/") ||
     req.path.startsWith("/s/") ||
-    req.path.startsWith("/assets/")
+    req.path.startsWith("/assets/") ||
+    req.path === "/oxium" ||
+    req.path.startsWith("/oxium/") ||
+    req.path === "/oxium.js"
   )
     return next();
   const key = req.originalUrl;
@@ -5675,7 +5678,11 @@ app.get("/oxium.js", (req, res) => {
   res.send(renderOxiumSdkScript({ oxiumOrigin: getOxiumRequestOrigin(req) }));
 });
 
-app.get(["/oxium/docs", "/oxium/guide", "/oxium/docs.md"], (req, res) => {
+app.get(["/oxium", "/oxium/"], (_req, res) => {
+  res.redirect(302, "/oxium/docs");
+});
+
+app.get(["/oxium/docs", "/oxium/docs/", "/oxium/docs.html", "/oxium/guide", "/oxium/guide/", "/oxium/docs.md"], (req, res) => {
   setOxiumCorsHeaders(req, res);
   const oxiumOrigin = getOxiumRequestOrigin(req);
   const accept = String(req.headers.accept || "").toLowerCase();
