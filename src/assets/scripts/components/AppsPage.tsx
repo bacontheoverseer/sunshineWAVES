@@ -345,13 +345,11 @@ export default function AppsPage() {
     (window as any).hideAppsMenu = hide;
     (window as any).toggleAppsMenu = toggle;
 
-    const appsBtn = document.getElementById("apps-btn");
     const brand =
       document.getElementById("branding-container") ||
       document.getElementById("brand");
 
-    const onAppsClick = (e: MouseEvent) => {
-      e.preventDefault();
+    const onToggleAppsEvent = () => {
       toggle();
     };
     const onBrandClick = (e: MouseEvent) => {
@@ -359,22 +357,33 @@ export default function AppsPage() {
       if (document.body.classList.contains("apps-view")) hide();
     };
 
-    if (appsBtn) appsBtn.addEventListener("click", onAppsClick);
+    window.addEventListener("sunshine:toggle-apps", onToggleAppsEvent);
     if (brand) brand.addEventListener("click", onBrandClick);
 
+    const w = window as unknown as { __pendingTopNav?: string };
+    if (w.__pendingTopNav === "apps") {
+      delete w.__pendingTopNav;
+      show();
+    }
+
     return () => {
-      if (appsBtn) appsBtn.removeEventListener("click", onAppsClick);
+      window.removeEventListener("sunshine:toggle-apps", onToggleAppsEvent);
       if (brand) brand.removeEventListener("click", onBrandClick);
     };
   }, [show, hide, toggle]);
 
   const handleLaunchApp = useCallback(
-    (appUrl: string) => {
-      if (!appUrl.trim()) return;
+    async (appUrl: string) => {
+      const clean = appUrl.trim();
+      if (!clean) return;
       hide();
+      const deadline = Date.now() + 2500;
+      while (!(window as any).sunshineApp?.handleSearch && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
       if ((window as any).sunshineApp?.handleSearch) {
         // Do NOT pass appName as gameName so proxy apps/websites are never treated as games
-        (window as any).sunshineApp.handleSearch(appUrl.trim());
+        (window as any).sunshineApp.handleSearch(clean);
       }
     },
     [hide]

@@ -193,7 +193,7 @@ const pageCache = new LRUCache({ max: parseInt(process.env.PAGE_CACHE_MAX || "50
 
 app.use((req, res, next) => {
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   next();
 });
@@ -621,7 +621,12 @@ if (NODE_ENV === "production") {
           );
           res.setHeader(
             "Cache-Control",
-            req.path.startsWith("/assets/data") ? NO_CACHE_CC : IMMUTABLE_CC,
+            req.path.startsWith("/assets/data") ||
+              req.path === "/b/all.js" ||
+              req.path === "/b/s/jetty.all.js" ||
+              req.path === "/b/s/jetty.sync.js"
+              ? NO_CACHE_CC
+              : IMMUTABLE_CC,
           );
           res.setHeader("Vary", "Accept-Encoding");
           res.setHeader("X-File-Cache", "HIT");
@@ -635,7 +640,7 @@ if (NODE_ENV === "production") {
 
 app.get("/b/all.js", (req, res) => {
   const fp = path.join(srcPath, "b", "all.js");
-  if (sendCached(res, fp, "public, max-age=31536000, immutable")) return;
+  if (sendCached(res, fp, "public, max-age=0, must-revalidate")) return;
 
   const rawPieces = Object.values(bCache).filter(Boolean);
   if (rawPieces.length === 0) return res.status(404).send("bundle not found");
@@ -648,9 +653,7 @@ app.get("/b/all.js", (req, res) => {
   const sep = Buffer.from(";\n");
   const body = Buffer.concat(pieces.map((b, i) => i === 0 ? b : Buffer.concat([sep, b])));
   res.setHeader("Content-Type", "application/javascript; charset=utf-8");
-  res.setHeader("Cache-Control", CACHING_ENABLED
-    ? "public, max-age=31536000, immutable"
-    : "public, max-age=0, must-revalidate");
+  res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
   res.send(body);
 });
 
@@ -2114,7 +2117,9 @@ function getPresenceSnapshot() {
 
   const onlineByUsername = new Map();
   for (const c of liveClients.values()) {
-    if (now - (c.lastSeen || 0) > 25000) continue;
+    if (c.res?.writableEnded || c.res?.destroyed) continue;
+    // Allow 75s so Chrome background-tab timer throttling (up to 60s) never drops live users offline
+    if (now - (c.lastSeen || 0) > 75000) continue;
     const clean = String(c.username || "").trim();
     if (!clean) continue;
     const key = clean.toLowerCase();
@@ -3657,7 +3662,20 @@ app.post("/api/chat/user-profile", async (req, res) => {
     }
     persistChatHistory();
 
+    const role = getUserChatRole(authUser.username);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    broadcastToClients(
+      {
+        type: "chat-event",
+        event: "PROFILE_UPDATED",
+        username: authUser.username,
+        bio: cleanBio,
+        statusText: cleanStatus,
+        customization: nextCustomization,
+        role,
+      },
+      "all",
+    );
     res.json({ success: true, profile: updated });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

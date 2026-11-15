@@ -73,7 +73,25 @@ export default function TopBar() {
         <a href="#" id="choi" class="icon-btn" title="Games">
           <i class="fa-solid fa-gamepad"></i>
         </a>
-        <a href="#" id="apps-btn" class="icon-btn" title="Apps (Proxy)">
+        <a
+          href="#"
+          id="apps-btn"
+          class="icon-btn"
+          title="Apps (Proxy)"
+          onClick={(e) => {
+            e.preventDefault();
+            const w = window as unknown as {
+              toggleAppsMenu?: () => void;
+              __pendingTopNav?: string;
+            };
+            if (typeof w.toggleAppsMenu === "function") {
+              w.toggleAppsMenu();
+            } else {
+              w.__pendingTopNav = w.__pendingTopNav === "apps" ? undefined : "apps";
+              window.dispatchEvent(new CustomEvent("sunshine:toggle-apps"));
+            }
+          }}
+        >
           <i class="fa-solid fa-table-cells-large"></i>
         </a>
         <a

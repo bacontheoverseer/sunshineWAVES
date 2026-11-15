@@ -51,45 +51,108 @@ function parseStuffResponse(input: unknown): StuffResponse {
   return parsed;
 }
 
-try {
-  if (
-    localStorage.getItem("backend") !== "ultraviolet" &&
-    typeof (window as unknown as Record<string, unknown>)[
+let _scramjetInitPromise: Promise<void> | null = null;
+let _scramjetControllerCreated = false;
+
+function deleteCorruptScramjetDb(): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase("$scramjet");
+      const timer = window.setTimeout(resolve, 600);
+      req.onsuccess = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+      req.onerror = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+      req.onblocked = () => {
+        window.clearTimeout(timer);
+        resolve();
+      };
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function waitForScramjetController(timeoutMs = 3500): Promise<
+  (new (config: unknown) => { init(): Promise<void> }) | null
+> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const loader = (window as unknown as Record<string, unknown>)[
       "$scramjetLoadController"
-    ] === "function"
-  ) {
-    const controllerFactory = (
-      (window as unknown as Record<string, unknown>)[
-        "$scramjetLoadController"
-      ] as () => Record<string, unknown>
-    )();
-    const ScramjetControllerRef = controllerFactory[
-      "ScramjetController"
-    ] as new (config: unknown) => { init(): Promise<void> };
-    const scramjet = new ScramjetControllerRef({
-      prefix: "/b/s/r/",
-      files: {
-        wasm: "/b/s/jetty.wasm.wasm",
-        all: "/b/s/jetty.all.js",
-        sync: "/b/s/jetty.sync.js",
-      },
-      flags: {
-        sourcemaps: false,
-        captureErrors: false,
-        rewriterLogs: false,
-        strictRewrites: false,
-        destructureRewrites: false,
-      },
-    });
-    (window as unknown as Record<string, unknown>)["scramjetReady"] =
-      scramjet.init();
-  } else {
-    (window as unknown as Record<string, unknown>)["scramjetReady"] =
-      Promise.resolve();
+    ];
+    if (typeof loader === "function") {
+      try {
+        const controllerFactory = (loader as () => Record<string, unknown>)();
+        if (controllerFactory?.["ScramjetController"]) {
+          return controllerFactory["ScramjetController"] as new (config: unknown) => {
+            init(): Promise<void>;
+          };
+        }
+      } catch {}
+    }
+    await new Promise((r) => setTimeout(r, 50));
   }
-} catch (e) {
-  (window as unknown as Record<string, unknown>)["scramjetReady"] =
-    Promise.resolve();
+  return null;
+}
+
+export async function ensureScramjetReady(): Promise<void> {
+  if (_scramjetInitPromise) return _scramjetInitPromise;
+  _scramjetInitPromise = (async () => {
+    try {
+      const ScramjetControllerRef = await waitForScramjetController(3500);
+      if (!ScramjetControllerRef) return;
+      const createController = () =>
+        new ScramjetControllerRef({
+          prefix: "/b/s/r/",
+          files: {
+            wasm: "/b/s/jetty.wasm.wasm",
+            all: "/b/s/jetty.all.js",
+            sync: "/b/s/jetty.sync.js",
+          },
+          flags: {
+            sourcemaps: false,
+            captureErrors: false,
+            rewriterLogs: false,
+            strictRewrites: false,
+            destructureRewrites: false,
+          },
+        });
+
+      const scramjet = createController();
+      _scramjetControllerCreated = true;
+      try {
+        await scramjet.init();
+      } catch {
+        // Recover cleanly from stale/corrupt $scramjet IndexedDB object stores
+        await deleteCorruptScramjetDb();
+        try {
+          await createController().init();
+        } catch {}
+      }
+    } catch {}
+  })();
+  try {
+    await _scramjetInitPromise;
+  } finally {
+    if (!_scramjetControllerCreated) {
+      _scramjetInitPromise = null;
+    }
+  }
+}
+
+{
+  const w = window as unknown as Record<string, unknown>;
+  w["ensureScramjetReady"] = ensureScramjetReady;
+  if (localStorage.getItem("backend") !== "ultraviolet") {
+    w["scramjetReady"] = ensureScramjetReady();
+  } else {
+    w["scramjetReady"] = Promise.resolve();
+  }
 }
 
 let _scrollShadowInitialized = false;

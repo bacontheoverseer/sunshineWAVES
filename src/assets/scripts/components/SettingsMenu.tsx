@@ -124,6 +124,9 @@ export default function SettingsMenu() {
   const [focusCloaking, setFocusCloaking] = useState(
     () => localStorage.getItem("focusCloaking") !== "false",
   );
+  const [betaHomepageDecorations, setBetaHomepageDecorations] = useState(
+    () => localStorage.getItem("betaHomepageDecorations") === "true",
+  );
   const [versionInfo, setVersionInfo] = useState("");
 
   useEffect(() => {
@@ -300,6 +303,13 @@ export default function SettingsMenu() {
     if (key === "focusCloaking") {
       document.dispatchEvent(
         new CustomEvent("focusCloakingUpdated", { detail: value }),
+      );
+    } else if (key === "betaHomepageDecorations") {
+      window.dispatchEvent(
+        new CustomEvent("betaHomepageDecorationsUpdated", { detail: value }),
+      );
+      document.dispatchEvent(
+        new CustomEvent("betaHomepageDecorationsUpdated", { detail: value }),
       );
     }
   };
@@ -526,6 +536,52 @@ export default function SettingsMenu() {
               >
                 <i class="fa-solid fa-wand-magic-sparkles" /> customize profile
               </button>
+            </div>
+            <div class="settings-item">
+              <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>homepage decorations</span>
+                <span
+                  style={{
+                    fontSize: "10px",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                    padding: "2px 7px",
+                    borderRadius: "999px",
+                    background: "rgba(168, 85, 247, 0.18)",
+                    border: "1px solid rgba(168, 85, 247, 0.45)",
+                    color: "#d8b4fe",
+                    fontWeight: 600,
+                  }}
+                >
+                  beta
+                </span>
+              </label>
+              <p>
+                enable draggable, customizable animated profile decorations &amp; auras directly on the homepage.
+              </p>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                <Toggle
+                  id="beta-homepage-decorations-toggle"
+                  checked={betaHomepageDecorations}
+                  onChange={(v) =>
+                    handleToggle("betaHomepageDecorations", v, setBetaHomepageDecorations)
+                  }
+                />
+                {betaHomepageDecorations && (
+                  <button
+                    type="button"
+                    class="legal-pill-btn"
+                    onClick={() => {
+                      toggleMenu();
+                      window.setTimeout(() => {
+                        window.dispatchEvent(new CustomEvent("openHomepageDecorEditor"));
+                      }, 140);
+                    }}
+                  >
+                    <i class="fa-solid fa-sliders" /> customize homepage
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 

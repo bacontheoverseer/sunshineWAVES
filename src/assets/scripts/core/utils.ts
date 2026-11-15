@@ -160,7 +160,22 @@ export function encodeMochiUrl(url: string): string {
 
 export function getProxyUrl(url: string): string {
   if (!url) return "";
-  const encoded = encodeMochiUrl(url);
+  const trimmed = String(url).trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:") ||
+    trimmed.startsWith("about:")
+  ) {
+    return trimmed;
+  }
+  try {
+    if (typeof window !== "undefined" && trimmed.startsWith(window.location.origin)) {
+      return trimmed;
+    }
+  } catch {}
+  const encoded = encodeMochiUrl(trimmed);
   return "/!!/" + encoded + "/";
 }
 

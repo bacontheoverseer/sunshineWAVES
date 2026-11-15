@@ -18,6 +18,9 @@ const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
 const ChatModal = lazy(() => import("./components/ChatModal.tsx"));
 const AdminPanel = lazy(() => import("./components/AdminPanel.tsx"));
 const WelcomeTour = lazy(() => import("./components/WelcomeTour.tsx"));
+const HomepageDecorations = lazy(
+  () => import("./components/HomepageDecorations.tsx"),
+);
 
 export default function App() {
   return (
@@ -51,6 +54,9 @@ export default function App() {
         </div>
         <Footer />
       </div>
+      <Suspense fallback={null}>
+        <HomepageDecorations />
+      </Suspense>
       <Suspense fallback={null}>
         <NewTabModal />
       </Suspense>

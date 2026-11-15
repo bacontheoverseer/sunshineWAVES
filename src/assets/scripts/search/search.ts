@@ -99,7 +99,17 @@ async function getUrl(url: string): Promise<string> {
       (window as any)["__uv$config"].encodeUrl(url)
     );
   } else if (selectedBackend === "scramjet") {
-    await (window as any).scramjetReady;
+    try {
+      const w = window as unknown as {
+        ensureScramjetReady?: () => Promise<void>;
+        scramjetReady?: Promise<void>;
+      };
+      if (typeof w.ensureScramjetReady === "function") {
+        await w.ensureScramjetReady();
+      } else if (w.scramjetReady) {
+        await w.scramjetReady;
+      }
+    } catch {}
     return "/b/s/r/" + url;
   }
   return url;

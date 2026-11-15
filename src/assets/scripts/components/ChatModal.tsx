@@ -575,6 +575,88 @@ export default function ChatModal() {
     [cloudUser]
   );
 
+  const applyProfileUpdateLocally = useCallback(
+    (payload: {
+      username: string;
+      bio?: string;
+      statusText?: string;
+      customization?: ProfileCustomization;
+      role?: "owner" | "mod" | "member";
+    }) => {
+      const cleanName = String(payload.username || "").trim();
+      if (!cleanName) return;
+      const lower = cleanName.toLowerCase();
+      const cleanCustom = payload.customization
+        ? sanitizeCustomization(payload.customization, cleanName)
+        : undefined;
+
+      if (cleanCustom) {
+        saveLocalProfileCustomization(cleanName, cleanCustom);
+      }
+
+      if (cloudUser && lower === cloudUser.toLowerCase()) {
+        if (cleanCustom) setEditingCustom(cleanCustom);
+        if (typeof payload.bio === "string") setEditingBio(payload.bio);
+        if (typeof payload.statusText === "string") {
+          setEditingStatusText(payload.statusText);
+        }
+      }
+
+      setProfileData((prev) => {
+        if (!prev || prev.username.toLowerCase() !== lower) return prev;
+        return {
+          ...prev,
+          ...(typeof payload.bio === "string" ? { bio: payload.bio } : {}),
+          ...(typeof payload.statusText === "string"
+            ? { statusText: payload.statusText }
+            : {}),
+          ...(cleanCustom ? { customization: cleanCustom } : {}),
+          ...(payload.role ? { role: payload.role } : {}),
+        };
+      });
+
+      const patchUserList = (list: OnlineUser[]) =>
+        list.map((u) =>
+          u.username.toLowerCase() === lower
+            ? {
+                ...u,
+                ...(typeof payload.bio === "string" ? { bio: payload.bio } : {}),
+                ...(typeof payload.statusText === "string"
+                  ? { statusText: payload.statusText }
+                  : {}),
+                ...(cleanCustom ? { customization: cleanCustom } : {}),
+                ...(payload.role ? { role: payload.role } : {}),
+              }
+            : u
+        );
+
+      setServerOnlineUsers(patchUserList);
+      setServerOfflineUsers(patchUserList);
+
+      if (cleanCustom || payload.role) {
+        setMessages((prev) => {
+          let changed = false;
+          const next = prev.map((m) => {
+            if ((m.author || "").toLowerCase() !== lower) return m;
+            changed = true;
+            return {
+              ...m,
+              ...(cleanCustom ? { customization: cleanCustom } : {}),
+              ...(cleanCustom?.avatarColor ? { avatarColor: cleanCustom.avatarColor } : {}),
+              ...(payload.role ? { role: payload.role } : {}),
+            };
+          });
+          if (!changed) return prev;
+          try {
+            localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+      }
+    },
+    [cloudUser]
+  );
+
   const saveProfilePayload = useCallback(
     async (payload: {
       bio: string;
@@ -612,32 +694,23 @@ export default function ChatModal() {
           data.profile?.customization || cleanCustom,
           cloudUser
         );
-        saveLocalProfileCustomization(cloudUser, savedCustom);
-        setEditingCustom(savedCustom);
-        setEditingBio(data.profile?.bio ?? payload.bio);
-        setEditingStatusText(data.profile?.statusText ?? payload.statusText);
-        setProfileData((prev) =>
-          prev
-            ? {
-                ...prev,
-                bio: data.profile?.bio ?? payload.bio,
-                statusText: data.profile?.statusText ?? payload.statusText,
-                customization: savedCustom,
-              }
-            : prev
-        );
-        setServerOnlineUsers((prev) =>
-          prev.map((u) =>
-            u.username.toLowerCase() === cloudUser.toLowerCase()
-              ? {
-                  ...u,
-                  bio: data.profile?.bio ?? payload.bio,
-                  statusText: data.profile?.statusText ?? payload.statusText,
-                  customization: savedCustom,
-                }
-              : u
-          )
-        );
+        const savedBio = data.profile?.bio ?? payload.bio;
+        const savedStatusText = data.profile?.statusText ?? payload.statusText;
+        applyProfileUpdateLocally({
+          username: cloudUser,
+          bio: savedBio,
+          statusText: savedStatusText,
+          customization: savedCustom,
+        });
+        try {
+          broadcastRef.current?.postMessage({
+            type: "PROFILE_UPDATED",
+            username: cloudUser,
+            bio: savedBio,
+            statusText: savedStatusText,
+            customization: savedCustom,
+          });
+        } catch {}
         notifyToast("profile & animations saved!", "success");
         return true;
       } catch {
@@ -647,7 +720,7 @@ export default function ChatModal() {
         setSavingProfile(false);
       }
     },
-    [cloudUser, editingCustom, savingProfile]
+    [cloudUser, savingProfile, applyProfileUpdateLocally]
   );
 
   const handleSaveMyProfile = useCallback(
@@ -814,17 +887,30 @@ export default function ChatModal() {
         const existingIdx = prev.findIndex((m) => m.id === incoming.id);
         if (existingIdx >= 0) {
           const existing = prev[existingIdx];
-          if (
+          const editChanged =
             existing &&
             incoming.edited &&
-            (existing.text !== incoming.text || !existing.edited || existing.editedAt !== incoming.editedAt)
-          ) {
+            (existing.text !== incoming.text || !existing.edited || existing.editedAt !== incoming.editedAt);
+          const metaChanged =
+            existing &&
+            (existing.role !== incoming.role ||
+              existing.avatarColor !== incoming.avatarColor ||
+              JSON.stringify(existing.customization || null) !==
+                JSON.stringify(incoming.customization || null));
+          if (editChanged || metaChanged) {
             const next = prev.slice();
             next[existingIdx] = {
               ...existing,
-              text: incoming.text,
-              edited: true,
-              ...(incoming.editedAt ? { editedAt: incoming.editedAt } : {}),
+              ...(editChanged
+                ? {
+                    text: incoming.text,
+                    edited: true,
+                    ...(incoming.editedAt ? { editedAt: incoming.editedAt } : {}),
+                  }
+                : {}),
+              ...(incoming.role ? { role: incoming.role } : {}),
+              ...(incoming.avatarColor ? { avatarColor: incoming.avatarColor } : {}),
+              ...(incoming.customization ? { customization: incoming.customization } : {}),
             };
             try {
               localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
@@ -1640,6 +1726,14 @@ export default function ChatModal() {
         }
       } else if (evtKind === "GOAT_UPDATED") {
         if (Array.isArray(detail.goatUsers)) setGoatUsers(detail.goatUsers);
+      } else if (evtKind === "PROFILE_UPDATED" && detail.username) {
+        applyProfileUpdateLocally({
+          username: String(detail.username),
+          bio: typeof detail.bio === "string" ? detail.bio : undefined,
+          statusText: typeof detail.statusText === "string" ? detail.statusText : undefined,
+          customization: detail.customization,
+          role: detail.role,
+        });
       } else if (evtKind === "MOD_UPDATE" && detail.targetUsername) {
         const targetLower = String(detail.targetUsername).toLowerCase();
         if (cloudUser && targetLower === cloudUser.toLowerCase()) {
@@ -1671,6 +1765,30 @@ export default function ChatModal() {
       }
       if (Array.isArray(detail.offlineUsers)) {
         setServerOfflineUsers(detail.offlineUsers);
+      }
+      const combinedUsers: OnlineUser[] = [
+        ...(Array.isArray(detail.onlineUsers) ? detail.onlineUsers : []),
+        ...(Array.isArray(detail.offlineUsers) ? detail.offlineUsers : []),
+      ];
+      if (combinedUsers.length > 0) {
+        setProfileData((prev) => {
+          if (!prev) return prev;
+          const lower = prev.username.toLowerCase();
+          const match = combinedUsers.find((u) => u.username?.toLowerCase() === lower);
+          if (!match) return prev;
+          const isOnline = Array.isArray(detail.onlineUsers)
+            ? detail.onlineUsers.some((u: OnlineUser) => u.username?.toLowerCase() === lower)
+            : prev.isOnline;
+          return {
+            ...prev,
+            online: isOnline,
+            isIdle: Boolean(match.isIdle),
+            ...(typeof match.bio === "string" ? { bio: match.bio } : {}),
+            ...(typeof match.statusText === "string" ? { statusText: match.statusText } : {}),
+            ...(match.customization ? { customization: match.customization } : {}),
+            ...(match.role ? { role: match.role } : {}),
+          };
+        });
       }
       if (Array.isArray(detail.staffMods)) {
         setStaffMods(detail.staffMods);
@@ -1756,6 +1874,14 @@ export default function ChatModal() {
           filterMessagesLocally((m) => m.channel !== event.data.channel);
         } else if (event.data?.type === "VOICE_EVENT" && event.data.payload) {
           handleVoiceEvent(event.data.payload);
+        } else if (event.data?.type === "PROFILE_UPDATED" && event.data.username) {
+          applyProfileUpdateLocally({
+            username: String(event.data.username),
+            bio: typeof event.data.bio === "string" ? event.data.bio : undefined,
+            statusText: typeof event.data.statusText === "string" ? event.data.statusText : undefined,
+            customization: event.data.customization,
+            role: event.data.role,
+          });
         }
       };
       broadcastRef.current = bc;
@@ -1788,6 +1914,7 @@ export default function ChatModal() {
     ingestIncomingMessage,
     filterMessagesLocally,
     updateMessageLocally,
+    applyProfileUpdateLocally,
     handleVoiceEvent,
     handleOpenCustomizer,
   ]);

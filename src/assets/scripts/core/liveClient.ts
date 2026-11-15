@@ -1387,8 +1387,12 @@ export function initLiveClient(): void {
   // Setup periodic heartbeat every 12 seconds so online status & game playtime stay live without overloading Raspberry Pi
   if (heartbeatInterval) window.clearInterval(heartbeatInterval);
   heartbeatInterval = window.setInterval(() => {
-    if (!document.hidden) sendHeartbeat();
+    sendHeartbeat();
   }, 12000);
+
+  document.addEventListener("visibilitychange", () => {
+    sendHeartbeat();
+  });
 
   // Send initial heartbeat
   sendHeartbeat();
