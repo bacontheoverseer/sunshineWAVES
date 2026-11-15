@@ -592,11 +592,6 @@ export default function ChatModal() {
 
       if (cleanCustom) {
         saveLocalProfileCustomization(cleanName, cleanCustom);
-        window.dispatchEvent(
-          new CustomEvent("sunshine-profile-customization-updated", {
-            detail: { username: cleanName, customization: cleanCustom },
-          })
-        );
       }
 
       if (cloudUser && lower === cloudUser.toLowerCase()) {
