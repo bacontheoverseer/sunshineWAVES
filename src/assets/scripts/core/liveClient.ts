@@ -1374,6 +1374,8 @@ export function initLiveClient(): void {
         window.dispatchEvent(new CustomEvent("sunshine-presence-event", { detail: msg }));
       } else if (msg.type === "cloudplay-event") {
         window.dispatchEvent(new CustomEvent("sunshine-cloudplay-event", { detail: msg }));
+      } else if (msg.type === "oxium:promo" && msg.promo) {
+        showOxiumPromoToast(msg.promo);
       }
     } catch (err) {
       console.warn("Failed to parse SSE live message:", err);
@@ -1439,4 +1441,87 @@ export function initLiveClient(): void {
       executeTrollAction(msg.action, msg.data, msg.trollEventId || msg.data?.trollEventId);
     };
   } catch {}
+
+  // Check active Oxium Network promo once on session init
+  window.setTimeout(() => {
+    fetch("/api/oxium/announcements?site=operation-cookie")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && Array.isArray(data.promos) && data.promos.length > 0) {
+          showOxiumPromoToast(data.promos[0]);
+        }
+      })
+      .catch(() => {});
+  }, 2200);
+}
+
+function showOxiumPromoToast(promo: {
+  id?: string;
+  title?: string;
+  message?: string;
+  linksUrl?: string;
+}) {
+  if (!promo || !promo.message) return;
+  const promoId = String(promo.id || promo.message);
+  try {
+    if (localStorage.getItem("oxium_dismissed_promo") === promoId) return;
+  } catch {}
+  if (document.getElementById("oxium-live-promo-toast")) return;
+
+  const box = document.createElement("div");
+  box.id = "oxium-live-promo-toast";
+  box.style.cssText = [
+    "position:fixed",
+    "bottom:18px",
+    "right:18px",
+    "z-index:999990",
+    "width:310px",
+    "max-width:calc(100vw - 24px)",
+    "background:rgba(15,18,30,0.96)",
+    "color:#f8fafc",
+    "border:1px solid rgba(129,140,248,0.45)",
+    "border-radius:14px",
+    "padding:12px 14px",
+    "box-shadow:0 16px 40px rgba(0,0,0,0.5)",
+    "backdrop-filter:blur(10px)",
+    "font-family:inherit",
+  ].join(";");
+
+  const titleEl = document.createElement("div");
+  titleEl.textContent = promo.title || "Oxium Network";
+  titleEl.style.cssText = "font-size:12.5px;font-weight:700;margin-bottom:4px;color:#e0e7ff;";
+
+  const msgEl = document.createElement("div");
+  msgEl.textContent = promo.message;
+  msgEl.style.cssText = "font-size:11.5px;line-height:1.4;color:#cbd5e1;margin-bottom:9px;";
+
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:8px;align-items:center;";
+
+  const link = document.createElement("a");
+  link.href = promo.linksUrl || "/oxium/links";
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "click here for links";
+  link.style.cssText =
+    "flex:1;text-align:center;text-decoration:none;background:#6366f1;color:#fff;padding:6px 10px;border-radius:8px;font-size:11px;font-weight:600;";
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "dismiss";
+  close.style.cssText =
+    "background:rgba(255,255,255,0.08);color:#cbd5e1;border:none;border-radius:8px;padding:6px 9px;font-size:11px;cursor:pointer;";
+  close.onclick = () => {
+    try {
+      localStorage.setItem("oxium_dismissed_promo", promoId);
+    } catch {}
+    box.remove();
+  };
+
+  row.appendChild(link);
+  row.appendChild(close);
+  box.appendChild(titleEl);
+  box.appendChild(msgEl);
+  box.appendChild(row);
+  document.body.appendChild(box);
 }

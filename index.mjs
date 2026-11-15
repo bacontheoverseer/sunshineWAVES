@@ -15,6 +15,25 @@ import rateLimit from "express-rate-limit";
 import cookieParser from "cookie-parser";
 import { server as wisp } from "@mercuryworkshop/wisp-js";
 import { renderStandaloneLegalHtml } from "./src/assets/scripts/core/legalDocs.js";
+import {
+  OXIUM_PARTNERS_KV_KEY,
+  OXIUM_SYNC_KV_KEY,
+  OXIUM_PROMOS_KV_KEY,
+  normalizeOxiumSlug,
+  sanitizeOxiumLinks,
+  sanitizeOxiumOrigins,
+  sanitizeOxiumFeatures,
+  sanitizeOxiumColor,
+  sanitizeOxiumUrl,
+  sanitizePartnerRecord,
+  filterSafeCloudSyncExport,
+  isOriginAllowedForSite,
+  renderOxiumAuthHtml,
+  renderOxiumLinksHtml,
+  renderOxiumSdkScript,
+  renderOxiumDocsHtml,
+  renderOxiumDocsMarkdown,
+} from "./src/assets/scripts/core/oxiumServer.js";
 
 let shuttingDown = false;
 
@@ -938,6 +957,9 @@ const CHAT_META_KV_KEYS = [
   "chat_timeouts_v1",
   "chat_groups_v1",
   "chat_history_v1",
+  OXIUM_PARTNERS_KV_KEY,
+  OXIUM_SYNC_KV_KEY,
+  OXIUM_PROMOS_KV_KEY,
 ];
 let supabaseHasAppKvTable = null; // null = probe on first sync, true/false once probed
 let supabaseKvSysUserId = null;
@@ -1688,8 +1710,11 @@ async function getAuthenticatedCloudSyncUser(req) {
     (req.headers.authorization?.startsWith("Bearer ")
       ? req.headers.authorization.slice(7).trim()
       : null);
+  const headerClaims = verifyCloudSyncJwt(headerToken);
+  const cookieClaims = verifyCloudSyncJwt(cookieToken);
   const claims =
-    verifyCloudSyncJwt(headerToken) || verifyCloudSyncJwt(cookieToken);
+    (headerClaims && !String(headerClaims.typ || "").startsWith("oxium_") ? headerClaims : null) ||
+    (cookieClaims && !String(cookieClaims.typ || "").startsWith("oxium_") ? cookieClaims : null);
   if (!claims || !claims.id || !claims.username) return null;
 
   try {
@@ -5408,6 +5433,723 @@ app.get(["/privacy", "/privacy-policy"], (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "public, max-age=300");
   res.send(cachedPrivacyHtml);
+});
+
+// =========================================================================
+// The Oxium Network (Multi-Site Auth, Sync, Import & Promo Links)
+// =========================================================================
+
+function getOxiumRequestOrigin(req) {
+  const xfProto = String(req.headers["x-forwarded-proto"] || "")
+    .split(",")[0]
+    .trim();
+  const proto = xfProto || req.protocol || "https";
+  const host = String(req.headers["x-forwarded-host"] || req.get("host") || "").trim();
+  return host ? `${proto}://${host}` : "https://operationcookie.com";
+}
+
+function getOxiumPartnersMap() {
+  const raw = kvGetJson(OXIUM_PARTNERS_KV_KEY, {});
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function getOxiumSyncMap() {
+  const raw = kvGetJson(OXIUM_SYNC_KV_KEY, {});
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function getOxiumPromosList() {
+  const raw = kvGetJson(OXIUM_PROMOS_KV_KEY, []);
+  return Array.isArray(raw) ? raw : [];
+}
+
+function getOxiumSiteUser(req) {
+  const headerToken =
+    req.headers["x-oxium-token"] ||
+    (req.headers.authorization?.startsWith("Bearer ")
+      ? req.headers.authorization.slice(7).trim()
+      : null);
+  const claims = verifyCloudSyncJwt(headerToken);
+  if (
+    !claims ||
+    claims.typ !== "oxium_site" ||
+    !claims.id ||
+    !claims.username ||
+    !claims.siteId
+  ) {
+    return null;
+  }
+  return {
+    id: Number(claims.id),
+    username: String(claims.username),
+    siteId: String(claims.siteId),
+  };
+}
+
+function isOxiumPreviewAuthorized(req, site, cloudUser) {
+  if (!site) return false;
+  if (cloudUser && site.ownerUsername && cloudUser.username.toLowerCase() === site.ownerUsername.toLowerCase()) {
+    return true;
+  }
+  const adminKey = req.headers["x-admin-key"] || req.query.adminKey;
+  if (adminKey && adminKey === ADMIN_SECRET) return true;
+  if (cloudUser && isUserAdminOrOwner(cloudUser.username)) return true;
+  return false;
+}
+
+function isUserAdminOrOwner(username) {
+  const lower = String(username || "").trim().toLowerCase();
+  if (!lower) return false;
+  if (lower === ADMIN_USERNAME.toLowerCase()) return true;
+  const mods = Array.isArray(kvGetJson("staff_moderators_v1", []))
+    ? kvGetJson("staff_moderators_v1", []).map((u) => String(u).toLowerCase())
+    : [];
+  return mods.includes(lower);
+}
+
+function checkOxiumSiteOriginAccess(req, site) {
+  const reqOrigin = String(req.headers.origin || "").trim();
+  if (!reqOrigin) return true;
+  if (reqOrigin === getOxiumRequestOrigin(req)) return true;
+  return isOriginAllowedForSite(reqOrigin, site);
+}
+
+function buildOxiumProfileSummary(username) {
+  const profiles = kvGetJson("user_profiles_v2", {});
+  const p = profiles && typeof profiles === "object"
+    ? profiles[String(username || "").trim().toLowerCase()]
+    : null;
+  if (!p || typeof p !== "object") return null;
+  return {
+    displayName: String(p.displayName || username || "").slice(0, 40),
+    avatarUrl: typeof p.avatarUrl === "string" ? p.avatarUrl : "",
+    avatarDecoration: typeof p.avatarDecoration === "string" ? p.avatarDecoration : "none",
+    bannerColor: typeof p.bannerColor === "string" ? p.bannerColor : "#6366f1",
+  };
+}
+
+function sanitizeOxiumSyncDataPayload(rawObj) {
+  if (!rawObj || typeof rawObj !== "object" || Array.isArray(rawObj)) return {};
+  const clean = {};
+  const blockedKeyRe = /(auth_token|auth_user|token|secret|password|admin|cookie_admin|oxium_)/i;
+  let count = 0;
+  for (const [k, v] of Object.entries(rawObj)) {
+    const cleanKey = String(k || "").trim().slice(0, 96);
+    if (!cleanKey || blockedKeyRe.test(cleanKey)) continue;
+    if (v === undefined || v === null) continue;
+    const strVal = typeof v === "string" ? v : JSON.stringify(v);
+    if (!strVal || strVal.length > 65536) continue;
+    clean[cleanKey] = strVal;
+    count++;
+    if (count >= 64) break;
+  }
+  return clean;
+}
+
+async function resolveOxiumImportPayload(userId, sourceSlug, targetSiteSlug) {
+  const cleanSource = normalizeOxiumSlug(sourceSlug);
+  if (!cleanSource) return { source: "", data: {} };
+  if (cleanSource === "operation-cookie") {
+    const row = await dbGetSyncPayload(userId);
+    return {
+      source: "operation-cookie",
+      data: row?.payload_json ? filterSafeCloudSyncExport(row.payload_json) : {},
+    };
+  }
+  if (cleanSource === targetSiteSlug) {
+    return { source: cleanSource, data: {} };
+  }
+  const syncMap = getOxiumSyncMap();
+  const entry = syncMap[`${userId}:${cleanSource}`];
+  return {
+    source: cleanSource,
+    data: entry?.data && typeof entry.data === "object" ? sanitizeOxiumSyncDataPayload(entry.data) : {},
+  };
+}
+
+function setOxiumCorsHeaders(req, res) {
+  const reqOrigin = String(req.headers.origin || "*").trim() || "*";
+  res.setHeader("Access-Control-Allow-Origin", reqOrigin === "null" ? "*" : reqOrigin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Oxium-Token, X-Oxium-Setup-Key, X-CloudSync-Token");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+}
+
+function getOxiumSetupTokenUser(req) {
+  const rawKey =
+    req.headers["x-oxium-setup-key"] ||
+    (req.headers.authorization?.startsWith("Bearer ")
+      ? req.headers.authorization.slice(7).trim()
+      : null);
+  const claims = verifyCloudSyncJwt(rawKey);
+  if (!claims || claims.typ !== "oxium_setup" || !claims.id || !claims.username) {
+    return null;
+  }
+  return {
+    id: Number(claims.id),
+    username: String(claims.username),
+  };
+}
+
+async function handleOxiumPartnerRequestSubmission(req, res, { actorUser, isAgentEndpoint = false }) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const requestedSlug = normalizeOxiumSlug(body.slug || body.name || "");
+    if (!requestedSlug || requestedSlug.length < 2) {
+      return res.status(400).json({ success: false, error: "Site name / slug must be at least 2 alphanumeric characters." });
+    }
+    const name = String(body.name || "").trim();
+    if (!name || name.length < 2) {
+      return res.status(400).json({ success: false, error: "Site name is required." });
+    }
+    const sanitizedOrigins = sanitizeOxiumOrigins(body.allowedOrigins || []);
+    if (isAgentEndpoint && sanitizedOrigins.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "At least one valid http/https origin in allowedOrigins is required.",
+      });
+    }
+    if (!actorUser && !String(body.contact || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        error: isAgentEndpoint
+          ? "Provide a valid X-Oxium-Setup-Key header or include a contact handle/email."
+          : "Sign in to CloudSync or enter a contact handle/email.",
+      });
+    }
+    const partners = getOxiumPartnersMap();
+    const existing = partners[requestedSlug] || null;
+    if (existing) {
+      const sameOwner =
+        actorUser &&
+        existing.ownerUsername &&
+        existing.ownerUsername.toLowerCase() === actorUser.username.toLowerCase();
+      if (!sameOwner && !isUserAdminOrOwner(actorUser?.username)) {
+        return res.status(409).json({
+          success: false,
+          error: `The slug "${requestedSlug}" is already registered on the Oxium Network.`,
+        });
+      }
+    }
+    const nextRecord = sanitizePartnerRecord(
+      {
+        ...body,
+        slug: requestedSlug,
+        ownerUsername: existing?.ownerUsername || actorUser?.username || "",
+      },
+      existing
+    );
+    if (!existing) {
+      nextRecord.status = "pending";
+      nextRecord.approvedAt = null;
+      nextRecord.rejectReason = "";
+    }
+    partners[requestedSlug] = nextRecord;
+    kvSetJson(OXIUM_PARTNERS_KV_KEY, partners);
+    const oxiumOrigin = getOxiumRequestOrigin(req);
+    res.json({
+      success: true,
+      status: nextRecord.status,
+      partner: nextRecord,
+      oxiumOrigin,
+      embedSnippet: `<script src="${oxiumOrigin}/oxium.js" data-site="${nextRecord.slug}"></script>`,
+      previewUrl: `${oxiumOrigin}/oxium/auth?site=${encodeURIComponent(nextRecord.slug)}&preview=1`,
+      linksUrl: `${oxiumOrigin}/oxium/links/${encodeURIComponent(nextRecord.slug)}`,
+      docsUrl: `${oxiumOrigin}/oxium/docs`,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e?.message || "Failed to submit Oxium request" });
+  }
+}
+
+app.options("/api/oxium/*rest", (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  res.status(204).end();
+});
+
+app.get("/oxium.js", (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=120");
+  res.send(renderOxiumSdkScript({ oxiumOrigin: getOxiumRequestOrigin(req) }));
+});
+
+app.get(["/oxium/docs", "/oxium/guide", "/oxium/docs.md"], (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  const oxiumOrigin = getOxiumRequestOrigin(req);
+  const accept = String(req.headers.accept || "").toLowerCase();
+  const wantsMarkdown =
+    req.path.endsWith(".md") ||
+    String(req.query.format || "").toLowerCase() === "md" ||
+    String(req.query.raw || "") === "1" ||
+    (accept.includes("text/markdown") && !accept.includes("text/html"));
+  if (wantsMarkdown) {
+    res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=120");
+    return res.send(renderOxiumDocsMarkdown({ oxiumOrigin }));
+  }
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=120");
+  res.send(renderOxiumDocsHtml({ oxiumOrigin }));
+});
+
+app.get(["/oxium/auth", "/oxium/login/:slug"], async (req, res) => {
+  const slug = normalizeOxiumSlug(req.params.slug || req.query.site || "");
+  if (!slug) {
+    return res.status(400).send("Missing ?site=<slug> parameter.");
+  }
+  const partners = getOxiumPartnersMap();
+  const site = partners[slug];
+  if (!site) {
+    return res.status(404).send("Oxium partner site not found.");
+  }
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  const wantPreview = String(req.query.preview || "") === "1";
+  const isApproved = site.status === "approved";
+  const canPreview = wantPreview || isOxiumPreviewAuthorized(req, site, cloudUser);
+  if (!isApproved && !canPreview) {
+    return res.status(403).send("This Oxium partner integration is pending approval.");
+  }
+  const oxiumOrigin = getOxiumRequestOrigin(req);
+  const rawTargetOrigin = String(req.query.origin || "").trim();
+  const validTargetOrigin =
+    rawTargetOrigin && (isOriginAllowedForSite(rawTargetOrigin, site) || (wantPreview && rawTargetOrigin === oxiumOrigin))
+      ? rawTargetOrigin
+      : "";
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  res.send(
+    renderOxiumAuthHtml({
+      site,
+      oxiumOrigin,
+      targetOrigin: validTargetOrigin,
+      isPreview: !isApproved || wantPreview,
+    })
+  );
+});
+
+app.get(["/oxium/links", "/oxium/links/:slug"], (req, res) => {
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store");
+  const partners = Object.values(getOxiumPartnersMap());
+  const selectedSlug = normalizeOxiumSlug(req.params.slug || req.query.site || "");
+  res.send(
+    renderOxiumLinksHtml({
+      partners,
+      selectedSlug,
+      oxiumOrigin: getOxiumRequestOrigin(req),
+    })
+  );
+});
+
+app.post("/api/oxium/setup-key", async (req, res) => {
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  if (!cloudUser) {
+    return res.status(401).json({ success: false, error: "Sign in to CloudSync to mint a scoped setup key." });
+  }
+  const ttlSeconds = 2 * 60 * 60;
+  const setupKey = signCloudSyncJwt({
+    typ: "oxium_setup",
+    id: cloudUser.id,
+    username: cloudUser.username,
+    nonce: crypto.randomBytes(6).toString("hex"),
+    exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+  });
+  res.json({
+    success: true,
+    setupKey,
+    expiresInSeconds: ttlSeconds,
+    username: cloudUser.username,
+  });
+});
+
+app.post("/api/oxium/request", async (req, res) => {
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  return handleOxiumPartnerRequestSubmission(req, res, {
+    actorUser: cloudUser,
+    isAgentEndpoint: false,
+  });
+});
+
+app.post("/api/oxium/agent-request", async (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  const setupUser = getOxiumSetupTokenUser(req);
+  const cloudUser = setupUser ? null : await getAuthenticatedCloudSyncUser(req);
+  return handleOxiumPartnerRequestSubmission(req, res, {
+    actorUser: setupUser || cloudUser,
+    isAgentEndpoint: true,
+  });
+});
+
+app.get("/api/oxium/my-requests", async (req, res) => {
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  if (!cloudUser) {
+    return res.status(401).json({ success: false, error: "Sign in to view your Oxium partner requests." });
+  }
+  const partners = Object.values(getOxiumPartnersMap())
+    .filter(
+      (p) =>
+        p &&
+        p.ownerUsername &&
+        p.ownerUsername.toLowerCase() === cloudUser.username.toLowerCase()
+    )
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+  res.json({
+    success: true,
+    partners,
+    oxiumOrigin: getOxiumRequestOrigin(req),
+  });
+});
+
+app.post("/api/oxium/partner/update", async (req, res) => {
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  if (!cloudUser) {
+    return res.status(401).json({ success: false, error: "Sign in required." });
+  }
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const slug = normalizeOxiumSlug(body.slug || "");
+  const partners = getOxiumPartnersMap();
+  const existing = partners[slug];
+  if (!existing) {
+    return res.status(404).json({ success: false, error: "Partner site not found." });
+  }
+  const isOwner =
+    existing.ownerUsername &&
+    existing.ownerUsername.toLowerCase() === cloudUser.username.toLowerCase();
+  if (!isOwner && !isUserAdminOrOwner(cloudUser.username)) {
+    return res.status(403).json({ success: false, error: "You do not own this Oxium partner site." });
+  }
+  const updated = sanitizePartnerRecord(
+    {
+      ...existing,
+      tagline: body.tagline !== undefined ? body.tagline : existing.tagline,
+      description: body.description !== undefined ? body.description : existing.description,
+      logoUrl: body.logoUrl !== undefined ? body.logoUrl : existing.logoUrl,
+      bannerUrl: body.bannerUrl !== undefined ? body.bannerUrl : existing.bannerUrl,
+      accentColor: body.accentColor !== undefined ? sanitizeOxiumColor(body.accentColor) : existing.accentColor,
+      allowedOrigins: body.allowedOrigins !== undefined ? sanitizeOxiumOrigins(body.allowedOrigins) : existing.allowedOrigins,
+      links: body.links !== undefined ? sanitizeOxiumLinks(body.links, body.allowedOrigins ?? existing.allowedOrigins) : existing.links,
+      features: body.features !== undefined ? sanitizeOxiumFeatures(body.features) : existing.features,
+      contact: body.contact !== undefined ? body.contact : existing.contact,
+    },
+    existing
+  );
+  partners[slug] = updated;
+  kvSetJson(OXIUM_PARTNERS_KV_KEY, partners);
+  res.json({ success: true, partner: updated });
+});
+
+app.get("/api/oxium/import-sources", async (req, res) => {
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  if (!cloudUser) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+  const targetSlug = normalizeOxiumSlug(req.query.site || "");
+  const sources = [];
+  try {
+    const ocRow = await dbGetSyncPayload(cloudUser.id);
+    if (ocRow?.payload_json) {
+      const safe = filterSafeCloudSyncExport(ocRow.payload_json);
+      sources.push({
+        slug: "operation-cookie",
+        label: "Operation Cookie",
+        itemCount: Object.keys(safe).length,
+      });
+    }
+  } catch {}
+  const partners = getOxiumPartnersMap();
+  const syncMap = getOxiumSyncMap();
+  for (const entry of Object.values(syncMap)) {
+    if (!entry || Number(entry.userId) !== cloudUser.id) continue;
+    const sSlug = normalizeOxiumSlug(entry.siteSlug);
+    if (!sSlug || sSlug === targetSlug) continue;
+    const itemCount = entry.data && typeof entry.data === "object" ? Object.keys(entry.data).length : 0;
+    if (itemCount === 0) continue;
+    sources.push({
+      slug: sSlug,
+      label: partners[sSlug]?.name || sSlug,
+      itemCount,
+    });
+  }
+  res.json({ success: true, sources });
+});
+
+app.post("/api/oxium/authorize", async (req, res) => {
+  const cloudUser = await getAuthenticatedCloudSyncUser(req);
+  if (!cloudUser) {
+    return res.status(401).json({ success: false, error: "Please sign in first." });
+  }
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const slug = normalizeOxiumSlug(body.siteSlug || "");
+  const partners = getOxiumPartnersMap();
+  const site = partners[slug];
+  if (!site) {
+    return res.status(404).json({ success: false, error: "Unknown Oxium site." });
+  }
+  const isApproved = site.status === "approved";
+  const wantPreview = Boolean(body.preview);
+  if (!isApproved && !(wantPreview && isOxiumPreviewAuthorized(req, site, cloudUser))) {
+    return res.status(403).json({ success: false, error: "This site is not approved on the Oxium Network yet." });
+  }
+  const targetOrigin = String(body.targetOrigin || "").trim();
+  const oxiumOrigin = getOxiumRequestOrigin(req);
+  if (
+    targetOrigin &&
+    !isOriginAllowedForSite(targetOrigin, site) &&
+    !(wantPreview && targetOrigin === oxiumOrigin)
+  ) {
+    return res.status(403).json({ success: false, error: "Target origin is not on this site's allowlist." });
+  }
+  const siteToken = signCloudSyncJwt({
+    id: cloudUser.id,
+    username: cloudUser.username,
+    siteId: site.slug,
+    typ: "oxium_site",
+    v: 1,
+  });
+  let importedData = null;
+  let importSource = "";
+  if (body.importFromSite) {
+    const resolved = await resolveOxiumImportPayload(
+      cloudUser.id,
+      body.importFromSite,
+      site.slug
+    );
+    importSource = resolved.source;
+    importedData = resolved.data;
+  }
+  res.json({
+    success: true,
+    siteToken,
+    user: { id: cloudUser.id, username: cloudUser.username },
+    profile: buildOxiumProfileSummary(cloudUser.username),
+    importSource,
+    importedData,
+  });
+});
+
+app.get("/api/oxium/sync", (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  const oxUser = getOxiumSiteUser(req);
+  if (!oxUser) {
+    return res.status(401).json({ success: false, error: "Missing or invalid Oxium site token." });
+  }
+  const requestedSite = normalizeOxiumSlug(req.query.site || oxUser.siteId);
+  if (requestedSite !== oxUser.siteId) {
+    return res.status(403).json({ success: false, error: "Token is scoped to a different Oxium site." });
+  }
+  const site = getOxiumPartnersMap()[oxUser.siteId];
+  if (!site || site.status !== "approved") {
+    return res.status(403).json({ success: false, error: "Oxium site is not active." });
+  }
+  if (!checkOxiumSiteOriginAccess(req, site)) {
+    return res.status(403).json({ success: false, error: "Origin not allowlisted for this site." });
+  }
+  const syncMap = getOxiumSyncMap();
+  const entry = syncMap[`${oxUser.id}:${oxUser.siteId}`] || null;
+  res.json({
+    success: true,
+    siteSlug: oxUser.siteId,
+    updatedAt: entry?.updatedAt || null,
+    data: entry?.data || {},
+  });
+});
+
+app.post("/api/oxium/sync", (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  const oxUser = getOxiumSiteUser(req);
+  if (!oxUser) {
+    return res.status(401).json({ success: false, error: "Missing or invalid Oxium site token." });
+  }
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const requestedSite = normalizeOxiumSlug(body.siteSlug || oxUser.siteId);
+  if (requestedSite !== oxUser.siteId) {
+    return res.status(403).json({ success: false, error: "Token is scoped to a different Oxium site." });
+  }
+  const site = getOxiumPartnersMap()[oxUser.siteId];
+  if (!site || site.status !== "approved") {
+    return res.status(403).json({ success: false, error: "Oxium site is not active." });
+  }
+  if (!checkOxiumSiteOriginAccess(req, site)) {
+    return res.status(403).json({ success: false, error: "Origin not allowlisted for this site." });
+  }
+  const syncMap = getOxiumSyncMap();
+  const bucketKey = `${oxUser.id}:${oxUser.siteId}`;
+  const prevData =
+    syncMap[bucketKey]?.data && typeof syncMap[bucketKey].data === "object"
+      ? syncMap[bucketKey].data
+      : {};
+  const incoming = sanitizeOxiumSyncDataPayload(body.data || {});
+  const merged = body.replace === true ? incoming : { ...prevData, ...incoming };
+  const updatedAt = Date.now();
+  syncMap[bucketKey] = {
+    userId: oxUser.id,
+    siteSlug: oxUser.siteId,
+    updatedAt,
+    data: merged,
+  };
+  kvSetJson(OXIUM_SYNC_KV_KEY, syncMap);
+  res.json({ success: true, siteSlug: oxUser.siteId, updatedAt, data: merged });
+});
+
+app.post("/api/oxium/import", async (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  const oxUser = getOxiumSiteUser(req);
+  if (!oxUser) {
+    return res.status(401).json({ success: false, error: "Missing or invalid Oxium site token." });
+  }
+  const site = getOxiumPartnersMap()[oxUser.siteId];
+  if (!site || site.status !== "approved") {
+    return res.status(403).json({ success: false, error: "Oxium site is not active." });
+  }
+  if (!checkOxiumSiteOriginAccess(req, site)) {
+    return res.status(403).json({ success: false, error: "Origin not allowlisted for this site." });
+  }
+  const fromSite = normalizeOxiumSlug(req.body?.fromSite || "operation-cookie");
+  const resolved = await resolveOxiumImportPayload(oxUser.id, fromSite, oxUser.siteId);
+  res.json({
+    success: true,
+    siteSlug: oxUser.siteId,
+    importSource: resolved.source,
+    data: resolved.data,
+  });
+});
+
+app.get("/api/oxium/announcements", (req, res) => {
+  setOxiumCorsHeaders(req, res);
+  const oxiumOrigin = getOxiumRequestOrigin(req);
+  const currentSite = normalizeOxiumSlug(req.query.site || "");
+  const partners = getOxiumPartnersMap();
+  const promos = getOxiumPromosList()
+    .filter((p) => p && p.active !== false)
+    .map((p) => {
+      const targetSlug = normalizeOxiumSlug(p.siteSlug || "");
+      return {
+        id: String(p.id || ""),
+        siteSlug: targetSlug,
+        siteName: partners[targetSlug]?.name || p.siteName || targetSlug || "Oxium Partner",
+        title: String(p.title || "Oxium Network").slice(0, 100),
+        message: String(p.message || "").slice(0, 220),
+        linksUrl:
+          sanitizeOxiumUrl(p.linksUrl) ||
+          (targetSlug ? `${oxiumOrigin}/oxium/links/${targetSlug}` : `${oxiumOrigin}/oxium/links`),
+        createdAt: Number(p.createdAt || Date.now()),
+      };
+    })
+    .filter((p) => !currentSite || p.siteSlug !== currentSite)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  res.json({ success: true, promos });
+});
+
+app.get("/api/admin/oxium/partners", verifyAdmin, (req, res) => {
+  const partners = Object.values(getOxiumPartnersMap()).sort(
+    (a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0)
+  );
+  const promos = getOxiumPromosList().sort(
+    (a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)
+  );
+  res.json({
+    success: true,
+    partners,
+    promos,
+    oxiumOrigin: getOxiumRequestOrigin(req),
+  });
+});
+
+app.post("/api/admin/oxium/partners/:slug/status", verifyAdmin, (req, res) => {
+  const slug = normalizeOxiumSlug(req.params.slug || "");
+  const partners = getOxiumPartnersMap();
+  const existing = partners[slug];
+  if (!existing) {
+    return res.status(404).json({ success: false, error: "Partner not found." });
+  }
+  const action = String(req.body?.action || req.body?.status || "").toLowerCase();
+  if (action === "delete") {
+    delete partners[slug];
+    kvSetJson(OXIUM_PARTNERS_KV_KEY, partners);
+    return res.json({ success: true, deleted: slug });
+  }
+  if (action !== "approved" && action !== "approve" && action !== "rejected" && action !== "reject" && action !== "pending") {
+    return res.status(400).json({ success: false, error: "Invalid status action." });
+  }
+  const nextStatus = action === "approve" ? "approved" : action === "reject" ? "rejected" : action;
+  existing.status = nextStatus;
+  existing.updatedAt = Date.now();
+  if (nextStatus === "approved") {
+    existing.approvedAt = existing.approvedAt || Date.now();
+    existing.rejectReason = "";
+  } else if (nextStatus === "rejected") {
+    existing.rejectReason = String(req.body?.reason || "").trim().slice(0, 200);
+  }
+  partners[slug] = existing;
+  kvSetJson(OXIUM_PARTNERS_KV_KEY, partners);
+  res.json({ success: true, partner: existing });
+});
+
+app.get("/api/admin/oxium/promos", verifyAdmin, (_req, res) => {
+  res.json({ success: true, promos: getOxiumPromosList() });
+});
+
+app.post("/api/admin/oxium/promos", verifyAdmin, (req, res) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const action = String(body.action || "create").toLowerCase();
+  let promos = getOxiumPromosList();
+  const oxiumOrigin = getOxiumRequestOrigin(req);
+
+  if (action === "delete") {
+    const id = String(body.id || "").trim();
+    promos = promos.filter((p) => String(p.id) !== id);
+    kvSetJson(OXIUM_PROMOS_KV_KEY, promos);
+    return res.json({ success: true, promos });
+  }
+
+  if (action === "toggle") {
+    const id = String(body.id || "").trim();
+    promos = promos.map((p) => (String(p.id) === id ? { ...p, active: !p.active } : p));
+    kvSetJson(OXIUM_PROMOS_KV_KEY, promos);
+    return res.json({ success: true, promos });
+  }
+
+  if (action === "broadcast") {
+    const id = String(body.id || "").trim();
+    const target = promos.find((p) => String(p.id) === id);
+    if (!target) return res.status(404).json({ success: false, error: "Promo not found." });
+    const count = broadcastToClients({ type: "oxium:promo", promo: target, timestamp: Date.now() }, "all");
+    return res.json({ success: true, count, promo: target });
+  }
+
+  const siteSlug = normalizeOxiumSlug(body.siteSlug || "");
+  const partners = getOxiumPartnersMap();
+  const partnerName = partners[siteSlug]?.name || siteSlug || "Featured Site";
+  const title = String(body.title || `Like Operation Cookie?`).trim().slice(0, 100);
+  const message = String(body.message || `Try out ${partnerName}! Click here for links.`)
+    .trim()
+    .slice(0, 220);
+  if (!message) {
+    return res.status(400).json({ success: false, error: "Promo message is required." });
+  }
+  const promo = {
+    id: `oxp_${Date.now().toString(36)}_${crypto.randomBytes(2).toString("hex")}`,
+    siteSlug,
+    siteName: partnerName,
+    title,
+    message,
+    linksUrl:
+      sanitizeOxiumUrl(body.linksUrl) ||
+      (siteSlug ? `${oxiumOrigin}/oxium/links/${siteSlug}` : `${oxiumOrigin}/oxium/links`),
+    active: body.active !== false,
+    createdAt: Date.now(),
+  };
+  promos.unshift(promo);
+  if (promos.length > 25) promos = promos.slice(0, 25);
+  kvSetJson(OXIUM_PROMOS_KV_KEY, promos);
+  let delivered = 0;
+  if (promo.active && body.broadcast !== false) {
+    delivered = broadcastToClients({ type: "oxium:promo", promo, timestamp: Date.now() }, "all");
+  }
+  res.json({ success: true, promo, promos, delivered });
 });
 
 app.use((_req, res) => {

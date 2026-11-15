@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import { playAudioUrl, clearChaosEffects, normalizeSoundUrl } from "../core/liveClient";
 import { StaffManagerContent } from "./StaffManagerModal";
+import OxiumAdminTab from "./OxiumAdminTab";
 
 interface ClientRecord {
   id: string;
@@ -78,7 +79,7 @@ export default function AdminPanel() {
   const [adminUsername, setAdminUsername] = useState("bacon");
   const [keyInput, setKeyInput] = useState("");
   const [authError, setAuthError] = useState("");
-  const [activeTab, setActiveTab] = useState<"soundboard" | "tts" | "pranks" | "users" | "staff">("soundboard");
+  const [activeTab, setActiveTab] = useState<"soundboard" | "tts" | "pranks" | "users" | "staff" | "oxium">("soundboard");
   const [target, setTarget] = useState<string>("all");
   const [targetDropdownOpen, setTargetDropdownOpen] = useState(false);
   const [clients, setClients] = useState<ClientRecord[]>([]);
@@ -503,6 +504,7 @@ export default function AdminPanel() {
     { id: "pranks" as const, icon: "fa-wand-magic-sparkles", label: "visual trolls" },
     { id: "users" as const, icon: "fa-users", label: `users (${clients.length})` },
     { id: "staff" as const, icon: "fa-shield-halved", label: "staff & mods" },
+    { id: "oxium" as const, icon: "fa-cubes", label: "oxium network" },
   ];
 
   return (
@@ -1005,6 +1007,16 @@ export default function AdminPanel() {
               {activeTab === "staff" && (
                 <div class="admin-section">
                   <StaffManagerContent
+                    adminKey={adminKey}
+                    notify={(type, msg) => toast(type === "error" ? "error" : "success", msg)}
+                  />
+                </div>
+              )}
+
+              {/* TAB 6: OXIUM NETWORK */}
+              {activeTab === "oxium" && (
+                <div class="admin-section">
+                  <OxiumAdminTab
                     adminKey={adminKey}
                     notify={(type, msg) => toast(type === "error" ? "error" : "success", msg)}
                   />

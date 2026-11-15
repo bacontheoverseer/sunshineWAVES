@@ -4,6 +4,7 @@ import {
   PRIVACY_SECTIONS,
   TERMS_SECTIONS,
 } from "../core/legalDocs.js";
+import OxiumSettingsCard from "./OxiumSettingsCard";
 
 interface SelectorProps {
   label: string;
@@ -660,6 +661,7 @@ export default function SettingsMenu() {
                 onChange={(v) => handleSetting("transport", v, setTransport)}
               />
             </div>
+            <OxiumSettingsCard active={activeTab === "advanced" && isOpen} />
           </div>
 
           <div class={`tab-content${activeTab === "legal" ? " active" : ""}`}>
