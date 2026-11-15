@@ -1012,6 +1012,14 @@ function sanitizeProfileCustomizationServer(raw) {
     customTag: typeof src.customTag === "string" ? src.customTag.trim().slice(0, 18) : "",
     avatarUrl: sanitizeCustomMediaUrlServer(src.avatarUrl),
     bannerUrl: sanitizeCustomMediaUrlServer(src.bannerUrl),
+    decorationUrl: sanitizeCustomMediaUrlServer(src.decorationUrl),
+    profileEffectUrl: sanitizeCustomMediaUrlServer(src.profileEffectUrl),
+    nameplateUrl: sanitizeCustomMediaUrlServer(src.nameplateUrl),
+    cardFrameUrl: sanitizeCustomMediaUrlServer(src.cardFrameUrl),
+    cardFrameId:
+      typeof src.cardFrameId === "string"
+        ? src.cardFrameId.trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64)
+        : "",
     avatarColor: sanitizeHexColorServer(src.avatarColor, ""),
     avatarSecondary: sanitizeHexColorServer(src.avatarSecondary, "#18181b"),
     cardBgColor: sanitizeHexColorServer(src.cardBgColor, ""),
@@ -3175,12 +3183,14 @@ app.get("/api/chat/image-proxy", async (req, res) => {
       return res.status(415).send("Unsupported image type");
     }
 
-    const body = await readLimitedResponseBuffer(upstream, 4 * 1024 * 1024);
+    const body = await readLimitedResponseBuffer(upstream, 8 * 1024 * 1024);
     if (!body || body.length === 0) {
-      return res.status(413).send("Image empty or exceeds 4MB limit");
+      return res.status(413).send("Image empty or exceeds 8MB limit");
     }
 
-    chatImageProxyCache.set(rawUrl, { body, contentType });
+    if (body.length <= 4 * 1024 * 1024) {
+      chatImageProxyCache.set(rawUrl, { body, contentType });
+    }
     res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");

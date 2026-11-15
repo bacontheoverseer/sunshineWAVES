@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "preact/hooks";
 import {
-  AVATAR_DECORATIONS,
   AVATAR_EMOJIS,
   BANNER_STYLES,
   BIO_STYLES,
@@ -11,8 +10,6 @@ import {
   ChatRole,
   NAME_FONTS,
   NAME_STYLES,
-  NAMEPLATES,
-  PROFILE_EFFECTS,
   ProfileCustomization,
   getBannerInlineStyle,
   getDefaultCustomization,
@@ -20,11 +17,14 @@ import {
 } from "../core/profileCustomization.ts";
 import {
   GoatBadge,
+  NameplateMediaLayer,
   ProfileEffectLayer,
+  ProfileFrameLayer,
   RoleBadge,
   UserAvatar,
   getNameClasses,
 } from "./ProfileVisuals.tsx";
+import CollectiblePickerPanel from "./CollectiblePickerPanel.tsx";
 import ImageCropModal from "./ImageCropModal.tsx";
 
 interface ProfileCustomizerModalProps {
@@ -109,7 +109,12 @@ export default function ProfileCustomizerModal({
   onSave,
   onClose,
 }: ProfileCustomizerModalProps) {
-  const [tab, setTab] = useState<"identity" | "avatar" | "banner" | "theme">("avatar");
+  const [tab, setTab] = useState<
+    "profile" | "decoration" | "effect" | "nameplate" | "frame"
+  >("profile");
+  const [profileSub, setProfileSub] = useState<
+    "identity" | "avatar" | "banner" | "theme"
+  >("identity");
   const [custom, setCustom] = useState<ProfileCustomization>(initialCustom);
   const [bio, setBio] = useState(initialBio);
   const [statusText, setStatusText] = useState(initialStatusText);
@@ -161,6 +166,10 @@ export default function ProfileCustomizerModal({
     setCustom((prev) => ({ ...prev, [key]: value }));
   };
 
+  const patchCustom = (patch: Partial<ProfileCustomization>) => {
+    setCustom((prev) => ({ ...prev, ...patch }));
+  };
+
   const handleFileUpload = async (
     kind: "avatar" | "banner",
     file?: File | null,
@@ -197,8 +206,12 @@ export default function ProfileCustomizerModal({
     !custom.bannerUrl && custom.bannerStyle !== "solid"
       ? `banner-${custom.bannerStyle}`
       : "";
-  const nameplateClass =
-    custom.nameplate !== "none" ? `has-nameplate nameplate-${custom.nameplate}` : "";
+  const nameplateClass = [
+    custom.nameplate !== "none" ? `has-nameplate nameplate-${custom.nameplate}` : "",
+    custom.nameplateUrl ? "has-nameplate has-media-nameplate" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const bioClass = `bio-${custom.bioStyle}`;
 
   return (
@@ -245,10 +258,11 @@ export default function ProfileCustomizerModal({
             <div class="chat-customizer-tabs">
               {(
                 [
-                  ["identity", "identity"],
-                  ["avatar", "avatar & frame"],
-                  ["banner", "banner & fx"],
-                  ["theme", "name & theme"],
+                  ["profile", "profile"],
+                  ["decoration", "decoration"],
+                  ["effect", "effect"],
+                  ["nameplate", "nameplate"],
+                  ["frame", "frame"],
                 ] as const
               ).map(([id, label]) => (
                 <button
@@ -265,6 +279,39 @@ export default function ProfileCustomizerModal({
               ))}
             </div>
 
+            {tab === "profile" && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                {(
+                  [
+                    ["identity", "identity & bio"],
+                    ["avatar", "avatar"],
+                    ["banner", "banner"],
+                    ["theme", "name & theme"],
+                  ] as const
+                ).map(([sid, slabel]) => (
+                  <button
+                    key={sid}
+                    type="button"
+                    class={`chat-vibe-pill ${profileSub === sid ? "active" : ""}`}
+                    onClick={() => {
+                      setProfileSub(sid);
+                      setGifPickerFor(null);
+                    }}
+                  >
+                    {slabel}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {tab !== "profile" && (
+              <CollectiblePickerPanel
+                kind={tab}
+                custom={custom}
+                onPatch={patchCustom}
+              />
+            )}
+
             {uploadError && (
               <div
                 style={{
@@ -280,7 +327,7 @@ export default function ProfileCustomizerModal({
               </div>
             )}
 
-            {tab === "identity" && (
+            {tab === "profile" && profileSub === "identity" && (
               <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
                 <div>
                   <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
@@ -387,7 +434,7 @@ export default function ProfileCustomizerModal({
               </div>
             )}
 
-            {tab === "avatar" && (
+            {tab === "profile" && profileSub === "avatar" && (
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 <div>
                   <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
@@ -497,37 +544,6 @@ export default function ProfileCustomizerModal({
 
                 <div>
                   <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
-                    animated avatar frame (discord style)
-                  </div>
-                  <div class="chat-customizer-grid">
-                    {AVATAR_DECORATIONS.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        class={`chat-style-chip ${
-                          custom.avatarDecoration === opt.id ? "active" : ""
-                        }`}
-                        onClick={() => updateField("avatarDecoration", opt.id)}
-                      >
-                        <span>{opt.label}</span>
-                        {opt.previewColor && (
-                          <span
-                            style={{
-                              width: "8px",
-                              height: "8px",
-                              borderRadius: "50%",
-                              background: opt.previewColor,
-                              flexShrink: 0,
-                            }}
-                          />
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
                     fallback gradient colors & emoji
                   </div>
                   <div class="chat-swatch-row" style={{ marginBottom: "6px" }}>
@@ -572,7 +588,7 @@ export default function ProfileCustomizerModal({
               </div>
             )}
 
-            {tab === "banner" && (
+            {tab === "profile" && profileSub === "banner" && (
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 <div>
                   <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
@@ -703,30 +719,10 @@ export default function ProfileCustomizerModal({
                     ))}
                   </div>
                 </div>
-
-                <div>
-                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
-                    full-card animated profile effects
-                  </div>
-                  <div class="chat-customizer-grid">
-                    {PROFILE_EFFECTS.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        class={`chat-style-chip ${
-                          custom.profileEffect === opt.id ? "active" : ""
-                        }`}
-                        onClick={() => updateField("profileEffect", opt.id)}
-                      >
-                        <span>{opt.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
               </div>
             )}
 
-            {tab === "theme" && (
+            {tab === "profile" && profileSub === "theme" && (
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 <div>
                   <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
@@ -773,24 +769,6 @@ export default function ProfileCustomizerModal({
                         type="button"
                         class={`chat-style-chip ${custom.bioStyle === opt.id ? "active" : ""}`}
                         onClick={() => updateField("bioStyle", opt.id)}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
-                    animated member list nameplate
-                  </div>
-                  <div class="chat-customizer-grid">
-                    {NAMEPLATES.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        class={`chat-style-chip ${custom.nameplate === opt.id ? "active" : ""}`}
-                        onClick={() => updateField("nameplate", opt.id)}
                       >
                         {opt.label}
                       </button>
@@ -848,12 +826,15 @@ export default function ProfileCustomizerModal({
           </div>
 
           {/* RIGHT: LIVE PREVIEW */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div
+            class="chat-customizer-preview-panel"
+            style={{ display: "flex", flexDirection: "column", gap: "10px" }}
+          >
             <div class="chat-profile-section-title">live preview</div>
 
             {/* Preview Profile Card */}
             <div
-              class={`chat-profile-card theme-${custom.cardTheme} ${
+              class={`chat-profile-card preview-only theme-${custom.cardTheme} ${
                 custom.profileEffect === "lightning-border" ? "effect-lightning-border" : ""
               }`}
               style={{
@@ -862,7 +843,14 @@ export default function ProfileCustomizerModal({
                 ...(custom.cardBgColor ? { background: custom.cardBgColor } : {}),
               }}
             >
-              <ProfileEffectLayer effect={custom.profileEffect} />
+              <ProfileEffectLayer
+                effect={custom.profileEffect}
+                effectUrl={custom.profileEffectUrl}
+              />
+              <ProfileFrameLayer
+                frameId={custom.cardFrameId}
+                frameUrl={custom.cardFrameUrl}
+              />
               <div class="chat-profile-scroll">
                 <div class={`chat-profile-banner ${bannerClass}`} style={bannerStyle} />
                 <div class="chat-profile-body">
@@ -927,6 +915,7 @@ export default function ProfileCustomizerModal({
               }}
             >
               <div class={`chat-user-item ${nameplateClass}`} style={{ padding: "5px 8px" }}>
+                <NameplateMediaLayer url={custom.nameplateUrl} />
                 <div class="chat-user-avatar-wrap">
                   <UserAvatar
                     username={username}

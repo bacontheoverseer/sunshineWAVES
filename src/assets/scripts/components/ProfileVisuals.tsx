@@ -3,6 +3,10 @@ import {
   ProfileCustomization,
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
+import {
+  findFrameLayers,
+  findProfileEffectLayers,
+} from "../core/collectibleCatalog.ts";
 
 interface UserAvatarProps {
   username: string;
@@ -28,6 +32,7 @@ export function UserAvatar({
   const bg1 = custom?.avatarColor || fallbackColor;
   const bg2 = custom?.avatarSecondary || "#18181b";
   const mediaSrc = custom?.avatarUrl ? getSafeMediaProxySrc(custom.avatarUrl) : "";
+  const decUrl = custom?.decorationUrl ? getSafeMediaProxySrc(custom.decorationUrl) : "";
   const dec = custom?.avatarDecoration && custom.avatarDecoration !== "none"
     ? custom.avatarDecoration
     : "";
@@ -52,7 +57,17 @@ export function UserAvatar({
           <span>{username.slice(0, 1).toLowerCase()}</span>
         )}
       </div>
-      {dec && <span class={`avatar-dec-ring dec-${dec}`} aria-hidden="true" />}
+      {decUrl ? (
+        <img
+          src={decUrl}
+          alt=""
+          class="avatar-dec-img"
+          aria-hidden="true"
+          decoding="async"
+        />
+      ) : dec ? (
+        <span class={`avatar-dec-ring dec-${dec}`} aria-hidden="true" />
+      ) : null}
       {children}
     </div>
   );
@@ -115,7 +130,36 @@ const PARTICLE_SEEDS = [
 
 const CONFETTI_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#38bdf8", "#a855f7"];
 
-export function ProfileEffectLayer({ effect }: { effect?: string }) {
+export function ProfileEffectLayer({
+  effect,
+  effectUrl,
+}: {
+  effect?: string | undefined;
+  effectUrl?: string | undefined;
+}) {
+  const mediaLayers = effectUrl
+    ? findProfileEffectLayers(effectUrl)
+        .map((u) => getSafeMediaProxySrc(u))
+        .filter(Boolean)
+    : [];
+  if (mediaLayers.length > 0) {
+    return (
+      <div
+        class="chat-profile-effect-layer chat-profile-effect-media"
+        aria-hidden="true"
+      >
+        {mediaLayers.map((src) => (
+          <img
+            key={src}
+            src={src}
+            alt=""
+            class="chat-profile-effect-img"
+            decoding="async"
+          />
+        ))}
+      </div>
+    );
+  }
   if (!effect || effect === "none" || effect === "lightning-border") return null;
 
   return (
@@ -199,5 +243,69 @@ export function ProfileEffectLayer({ effect }: { effect?: string }) {
         return null;
       })}
     </div>
+  );
+}
+
+/** Multi-layer animated Discord-style border frame rendered around a profile card. */
+export function ProfileFrameLayer({
+  frameId,
+  frameUrl,
+}: {
+  frameId?: string | undefined;
+  frameUrl?: string | undefined;
+}) {
+  if (frameUrl) {
+    const src = getSafeMediaProxySrc(frameUrl);
+    if (!src) return null;
+    return (
+      <div class="chat-profile-frame-layer" aria-hidden="true">
+        <img
+          src={src}
+          alt=""
+          class="chat-profile-frame-img frame-slot-f"
+          decoding="async"
+        />
+      </div>
+    );
+  }
+  if (!frameId) return null;
+  const layers = findFrameLayers(frameId);
+  if (layers.length === 0) return null;
+  return (
+    <div class="chat-profile-frame-layer" aria-hidden="true">
+      {layers.map(([slot, url]) => {
+        const src = getSafeMediaProxySrc(url);
+        if (!src) return null;
+        return (
+          <img
+            key={`${slot}:${src}`}
+            src={src}
+            alt=""
+            class={`chat-profile-frame-img frame-slot-${slot}`}
+            decoding="async"
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** Animated Discord-style nameplate strip layered behind sidebar rows / preview rows. */
+export function NameplateMediaLayer({
+  url,
+}: {
+  url?: string | undefined;
+}) {
+  if (!url) return null;
+  const src = getSafeMediaProxySrc(url);
+  if (!src) return null;
+  return (
+    <img
+      src={src}
+      alt=""
+      class="chat-nameplate-media"
+      aria-hidden="true"
+      decoding="async"
+    />
   );
 }

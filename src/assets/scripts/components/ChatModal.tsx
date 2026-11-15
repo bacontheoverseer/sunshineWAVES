@@ -22,7 +22,9 @@ import EmojiPicker, { getJumboEmojiCount } from "./EmojiPicker.tsx";
 import GroupChatModal, { ChatGroupDef } from "./GroupChatModal.tsx";
 import {
   GoatBadge,
+  NameplateMediaLayer,
   ProfileEffectLayer,
+  ProfileFrameLayer,
   RoleBadge,
   UserAvatar,
   getNameClasses,
@@ -229,6 +231,11 @@ function isStaleUninitializedCustom(c: ProfileCustomization | null | undefined):
     !c.customTag &&
     !c.avatarUrl &&
     !c.bannerUrl &&
+    !c.decorationUrl &&
+    !c.profileEffectUrl &&
+    !c.nameplateUrl &&
+    !c.cardFrameId &&
+    !c.cardFrameUrl &&
     !c.cardBgColor &&
     !c.avatarEmoji &&
     c.avatarColor?.toLowerCase() === "#6366f1" &&
@@ -4027,14 +4034,19 @@ export default function ChatModal() {
                 const blocked = isUserBlocked(u.username);
                 const playingActive = Boolean(u.isPlayingGame && u.game && u.game !== "browsing");
                 const uCustom = u.customization || null;
-                const npClass =
+                const npClass = [
                   uCustom?.nameplate && uCustom.nameplate !== "none"
                     ? `has-nameplate nameplate-${uCustom.nameplate}`
-                    : "";
+                    : "",
+                  uCustom?.nameplateUrl ? "has-nameplate has-media-nameplate" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
                 const dotStatus = getEffectivePresenceDot(uCustom?.presenceStatus, u.isIdle);
                 const displayName = uCustom?.displayName?.trim() || u.username;
                 return (
                   <div key={`online_${u.username}`} class={`chat-user-item ${npClass}`}>
+                    <NameplateMediaLayer url={uCustom?.nameplateUrl} />
                     <div
                       class="chat-user-avatar-wrap"
                       title={`View @${u.username}'s profile`}
@@ -4147,13 +4159,18 @@ export default function ChatModal() {
                 offlineUsers.map((u) => {
                   const blocked = isUserBlocked(u.username);
                   const uCustom = u.customization || null;
-                  const npClass =
+                  const npClass = [
                     uCustom?.nameplate && uCustom.nameplate !== "none"
                       ? `has-nameplate nameplate-${uCustom.nameplate}`
-                      : "";
+                      : "",
+                    uCustom?.nameplateUrl ? "has-nameplate has-media-nameplate" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ");
                   const displayName = uCustom?.displayName?.trim() || u.username;
                   return (
                     <div key={`offline_${u.username}`} class={`chat-user-item offline ${npClass}`}>
+                      <NameplateMediaLayer url={uCustom?.nameplateUrl} />
                       <div
                         class="chat-user-avatar-wrap"
                         title={`View @${u.username}'s profile`}
@@ -4342,7 +4359,14 @@ export default function ChatModal() {
                   }`}
                   style={custom.cardBgColor ? { background: custom.cardBgColor } : undefined}
                 >
-                  <ProfileEffectLayer effect={custom.profileEffect} />
+                  <ProfileEffectLayer
+                    effect={custom.profileEffect}
+                    effectUrl={custom.profileEffectUrl}
+                  />
+                  <ProfileFrameLayer
+                    frameId={custom.cardFrameId}
+                    frameUrl={custom.cardFrameUrl}
+                  />
 
                   <div class="chat-profile-scroll">
                     <div class={`chat-profile-banner ${bannerClass}`} style={bannerStyle}>

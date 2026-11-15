@@ -75,6 +75,11 @@ export interface ProfileCustomization {
   customTag: string;
   avatarUrl: string;
   bannerUrl: string;
+  decorationUrl: string;
+  profileEffectUrl: string;
+  nameplateUrl: string;
+  cardFrameId: string;
+  cardFrameUrl: string;
   avatarColor: string;
   avatarSecondary: string;
   cardBgColor: string;
@@ -317,6 +322,11 @@ export function getDefaultCustomization(username = ""): ProfileCustomization {
     customTag: "",
     avatarUrl: "",
     bannerUrl: "",
+    decorationUrl: "",
+    profileEffectUrl: "",
+    nameplateUrl: "",
+    cardFrameId: "",
+    cardFrameUrl: "",
     avatarColor: baseColor,
     avatarSecondary: "#18181b",
     cardBgColor: "",
@@ -355,6 +365,14 @@ export function sanitizeCustomization(
       typeof obj.customTag === "string" ? obj.customTag.trim().slice(0, 18) : "",
     avatarUrl: isValidCustomMediaUrl(obj.avatarUrl) ? obj.avatarUrl.trim() : "",
     bannerUrl: isValidCustomMediaUrl(obj.bannerUrl) ? obj.bannerUrl.trim() : "",
+    decorationUrl: isValidCustomMediaUrl(obj.decorationUrl) ? obj.decorationUrl.trim() : "",
+    profileEffectUrl: isValidCustomMediaUrl(obj.profileEffectUrl) ? obj.profileEffectUrl.trim() : "",
+    nameplateUrl: isValidCustomMediaUrl(obj.nameplateUrl) ? obj.nameplateUrl.trim() : "",
+    cardFrameId:
+      typeof obj.cardFrameId === "string"
+        ? obj.cardFrameId.trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64)
+        : "",
+    cardFrameUrl: isValidCustomMediaUrl(obj.cardFrameUrl) ? obj.cardFrameUrl.trim() : "",
     avatarColor: isValidHexColor(obj.avatarColor)
       ? obj.avatarColor.trim().toLowerCase()
       : defaults.avatarColor,
