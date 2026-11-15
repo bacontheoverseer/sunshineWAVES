@@ -51,28 +51,210 @@ function parseStuffResponse(input: unknown): StuffResponse {
   return parsed;
 }
 
+const SCRAMJET_IDB_STORES = [
+  "config",
+  "cookies",
+  "redirectTrackers",
+  "referrerPolicies",
+  "publicSuffixList",
+] as const;
+
 let _scramjetInitPromise: Promise<void> | null = null;
 let _scramjetControllerCreated = false;
+let _pageIdbGuardInstalled = false;
+const _openPageScramjetDbs = new Set<IDBDatabase>();
 
-function deleteCorruptScramjetDb(): Promise<void> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+): Promise<T> {
   return new Promise((resolve) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(fallback);
+      }
+    }, ms);
+    promise.then(
+      (val) => {
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(val);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(fallback);
+        }
+      },
+    );
+  });
+}
+
+function ensureScramjetObjectStores(db: IDBDatabase): void {
+  for (const store of SCRAMJET_IDB_STORES) {
+    if (!db.objectStoreNames.contains(store)) {
+      db.createObjectStore(store);
+    }
+  }
+}
+
+function hasAllScramjetStores(db: IDBDatabase): boolean {
+  return SCRAMJET_IDB_STORES.every((store) => db.objectStoreNames.contains(store));
+}
+
+function installPageScramjetIdbGuard(): void {
+  if (_pageIdbGuardInstalled) return;
+  if (typeof IDBFactory === "undefined" || !IDBFactory.prototype?.open) return;
+  _pageIdbGuardInstalled = true;
+  const origOpen = IDBFactory.prototype.open;
+  IDBFactory.prototype.open = function patchedPageScramjetOpen(
+    name: string,
+    version?: number,
+  ) {
+    const req =
+      version !== undefined
+        ? origOpen.call(this, name, version)
+        : origOpen.call(this, name);
+    if (name === "$scramjet") {
+      req.addEventListener("upgradeneeded", (ev) => {
+        try {
+          const db = (ev.target as IDBOpenDBRequest | null)?.result || req.result;
+          if (db) ensureScramjetObjectStores(db);
+        } catch {}
+      });
+      req.addEventListener("success", () => {
+        try {
+          const db = req.result;
+          if (!db) return;
+          _openPageScramjetDbs.add(db);
+          db.addEventListener("close", () => _openPageScramjetDbs.delete(db));
+          // Release page handle immediately on versionchange so healing deletes never deadlock
+          db.addEventListener("versionchange", () => {
+            try {
+              db.close();
+            } catch {}
+            _openPageScramjetDbs.delete(db);
+          });
+        } catch {}
+      });
+    }
+    return req;
+  };
+}
+
+async function closeAllScramjetConnections(): Promise<void> {
+  for (const db of _openPageScramjetDbs) {
+    try {
+      db.close();
+    } catch {}
+  }
+  _openPageScramjetDbs.clear();
+
+  if (!("serviceWorker" in navigator)) return;
+  const targets: ServiceWorker[] = [];
+  if (navigator.serviceWorker.controller) {
+    targets.push(navigator.serviceWorker.controller);
+  }
+  try {
+    const reg = await navigator.serviceWorker.getRegistration("/b/s/r/");
+    for (const sw of [reg?.active, reg?.waiting, reg?.installing]) {
+      if (sw && !targets.includes(sw)) targets.push(sw);
+    }
+  } catch {}
+
+  await Promise.all(
+    targets.map(
+      (sw) =>
+        new Promise<void>((resolve) => {
+          const timer = window.setTimeout(resolve, 200);
+          try {
+            const channel = new MessageChannel();
+            channel.port1.onmessage = () => {
+              window.clearTimeout(timer);
+              try {
+                channel.port1.close();
+              } catch {}
+              resolve();
+            };
+            sw.postMessage({ type: "sunshine-close-scramjet-idb" }, [
+              channel.port2,
+            ]);
+          } catch {
+            window.clearTimeout(timer);
+            resolve();
+          }
+        }),
+    ),
+  );
+}
+
+function probeScramjetIdb(timeoutMs = 1200): Promise<"ok" | "heal" | "timeout"> {
+  if (typeof indexedDB === "undefined") return Promise.resolve("ok");
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (status: "ok" | "heal" | "timeout") => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(status);
+      }
+    };
+    const timer = window.setTimeout(() => finish("timeout"), timeoutMs);
+    try {
+      const req = indexedDB.open("$scramjet");
+      req.onupgradeneeded = () => {
+        try {
+          if (req.result) ensureScramjetObjectStores(req.result);
+        } catch {}
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          const valid = db.version === 1 && hasAllScramjetStores(db);
+          try {
+            db.close();
+          } catch {}
+          _openPageScramjetDbs.delete(db);
+          finish(valid ? "ok" : "heal");
+        } catch {
+          finish("heal");
+        }
+      };
+      req.onerror = () => finish("heal");
+      req.onblocked = () => finish("heal");
+    } catch {
+      finish("heal");
+    }
+  });
+}
+
+function deleteCorruptScramjetDb(timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (deleted: boolean) => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(deleted);
+      }
+    };
+    const timer = window.setTimeout(() => finish(false), timeoutMs);
     try {
       const req = indexedDB.deleteDatabase("$scramjet");
-      const timer = window.setTimeout(resolve, 600);
-      req.onsuccess = () => {
-        window.clearTimeout(timer);
-        resolve();
-      };
-      req.onerror = () => {
-        window.clearTimeout(timer);
-        resolve();
-      };
+      req.onsuccess = () => finish(true);
+      req.onerror = () => finish(false);
+      // Do not resolve early on onblocked: let closeAllScramjetConnections unblock onsuccess
       req.onblocked = () => {
-        window.clearTimeout(timer);
-        resolve();
+        void closeAllScramjetConnections();
       };
     } catch {
-      resolve();
+      finish(false);
     }
   });
 }
@@ -100,7 +282,21 @@ async function waitForScramjetController(timeoutMs = 3500): Promise<
   return null;
 }
 
+function notifyScramjetWorkerReady(): void {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker
+    .getRegistration("/b/s/r/")
+    .then((reg) => {
+      try {
+        const worker = reg?.active || reg?.waiting;
+        worker?.postMessage({ type: "sunshine-scramjet-ready" });
+      } catch {}
+    })
+    .catch(() => {});
+}
+
 export async function ensureScramjetReady(): Promise<void> {
+  installPageScramjetIdbGuard();
   if (_scramjetInitPromise) return _scramjetInitPromise;
   _scramjetInitPromise = (async () => {
     try {
@@ -123,16 +319,46 @@ export async function ensureScramjetReady(): Promise<void> {
           },
         });
 
-      const scramjet = createController();
-      _scramjetControllerCreated = true;
-      try {
-        await scramjet.init();
-      } catch {
-        // Recover cleanly from stale/corrupt $scramjet IndexedDB object stores
-        await deleteCorruptScramjetDb();
-        try {
-          await createController().init();
-        } catch {}
+      const probeStatus = await probeScramjetIdb(1200);
+      if (probeStatus === "heal") {
+        await closeAllScramjetConnections();
+        await deleteCorruptScramjetDb(1500);
+      }
+
+      let initialized = false;
+      const runInitWithTimeout = async () => {
+        const controller = createController() as {
+          init(): Promise<void>;
+          db?: IDBDatabase;
+        };
+        const ok = await withTimeout(
+          controller.init().then(
+            () => true,
+            () => false,
+          ),
+          3000,
+          false,
+        );
+        if (!ok) {
+          try {
+            controller.db?.close();
+          } catch {}
+        }
+        return ok;
+      };
+
+      initialized = await runInitWithTimeout();
+      if (!initialized) {
+        // Recover cleanly from stale/corrupt/blocked $scramjet IndexedDB stores
+        await closeAllScramjetConnections();
+        const deleted = await deleteCorruptScramjetDb(1500);
+        if (deleted) {
+          initialized = await runInitWithTimeout();
+        }
+      }
+      if (initialized) {
+        _scramjetControllerCreated = true;
+        notifyScramjetWorkerReady();
       }
     } catch {}
   })();
@@ -300,7 +526,9 @@ export function initializeLoad(): void {
           );
         }
         if ("caches" in window) {
-          await Promise.all((await caches.keys()).map((e) => caches.delete(e)));
+          await Promise.all(
+            (await caches.keys()).map((e) => caches.delete(e).catch(() => false)),
+          );
         }
       } catch (e) {
         console.error("automatic update failed:", e);
@@ -475,6 +703,14 @@ export function initializeLoad(): void {
   };
 
   window.SharePromoter.init();
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event: MessageEvent) => {
+      if (event.data?.type === "sunshine-request-scramjet-config") {
+        void ensureScramjetReady();
+      }
+    });
+  }
 }
 
 if (document.readyState === "loading") {

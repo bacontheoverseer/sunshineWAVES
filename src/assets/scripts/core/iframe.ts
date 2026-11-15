@@ -133,13 +133,184 @@ export function stopIframeLoading(iframe: HTMLIFrameElement): void {
   }
 }
 
-export function navigateIframeTo(iframe: HTMLIFrameElement, url: string): void {
+const RETRY_IFRAME_BACKOFF_MS = [250, 500, 900, 1400, 2000, 2500];
+
+function getProxyScopeFromUrl(rawUrl: string): string | null {
+  if (!rawUrl || rawUrl === "about:blank") return null;
+  try {
+    const parsed = new URL(rawUrl, window.location.origin);
+    if (parsed.origin !== window.location.origin) return null;
+    if (parsed.pathname.startsWith("/b/s/")) return "/b/s/r/";
+    if (parsed.pathname.startsWith("/b/u/")) return "/b/u/r/";
+  } catch {}
+  return null;
+}
+
+async function isActiveServiceWorkerForScope(scope: string): Promise<boolean> {
+  if (!("serviceWorker" in navigator)) return false;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration(scope);
+    return reg?.active?.state === "activated";
+  } catch {
+    return false;
+  }
+}
+
+function escapeHtmlAttr(val: string): string {
+  return val
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function renderProxyUnavailableFrame(
+  iframe: HTMLIFrameElement,
+  targetUrl: string,
+): void {
+  iframe.dataset.proxyUnavailable = "true";
+  const safeUrl = escapeHtmlAttr(targetUrl);
+  iframe.srcdoc = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  body{margin:0;height:100vh;background:#050505;color:#e7e7e7;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;text-align:center}
+  .card{max-width:420px;padding:24px}
+  h2{margin:0 0 10px;font-size:20px;font-weight:700}
+  p{margin:0 0 18px;font-size:13px;color:#b8b8b8;line-height:1.5}
+  button{background:#fff;color:#050505;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer}
+  button:hover{opacity:.9}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>proxy still connecting</h2>
+    <p>the service worker or transport wasn't ready in time. Click retry to reconnect and load this page.</p>
+    <button id="retryBtn" type="button" data-url="${safeUrl}">Retry connection</button>
+  </div>
+  <script>
+    document.getElementById("retryBtn").addEventListener("click", function () {
+      this.disabled = true;
+      this.textContent = "Reconnecting...";
+      window.parent.postMessage({ type: "sunshine-retry-proxy", url: this.getAttribute("data-url") }, "*");
+    });
+  </script>
+</body>
+</html>`;
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("message", (event: MessageEvent) => {
+    const data = event.data as { type?: string; url?: string } | null;
+    if (data?.type !== "sunshine-retry-proxy" || typeof data.url !== "string") return;
+    const tabs = window.sunshineApp?.tabs || [];
+    const matchingTab = tabs.find((t) => t.iframe?.contentWindow === event.source);
+    if (matchingTab?.iframe) {
+      navigateIframeTo(matchingTab.iframe, data.url, { forceSwRetry: true });
+    }
+  });
+}
+
+async function prepareProxyNavigation(
+  targetScope: string,
+  forceSwRetry: boolean,
+): Promise<boolean> {
+  const app = window.sunshineApp as unknown as Record<string, unknown>;
+  const w = window as unknown as Record<string, unknown>;
+
+  const runScramjetInit = async () => {
+    if (targetScope !== "/b/s/r/") return;
+    const ensureFn = w["ensureScramjetReady"];
+    const p =
+      typeof ensureFn === "function"
+        ? (ensureFn as () => Promise<void>)()
+        : w["scramjetReady"] &&
+            typeof (w["scramjetReady"] as Promise<unknown>).then === "function"
+          ? (w["scramjetReady"] as Promise<unknown>)
+          : null;
+    if (p) {
+      await Promise.race([p, new Promise<void>((r) => setTimeout(r, 4500))]).catch(
+        () => {},
+      );
+    }
+  };
+
+  const ensureSwFn = app?.["ensureServiceWorkerReady"] as
+    | ((opts?: { scope?: string; forceReRegister?: boolean }) => Promise<unknown>)
+    | undefined;
+  const ensureProxyFn = app?.["ensureProxyReady"] as (() => Promise<unknown>) | undefined;
+  const waitTransportFn = app?.["waitForTransport"] as
+    | ((timeoutMs: number) => Promise<void>)
+    | undefined;
+
+  try {
+    if (typeof ensureProxyFn === "function") {
+      await ensureProxyFn();
+    }
+    await Promise.all([
+      runScramjetInit(),
+      typeof ensureSwFn === "function"
+        ? ensureSwFn({ scope: targetScope, forceReRegister: forceSwRetry })
+        : Promise.resolve(),
+    ]);
+    if (typeof waitTransportFn === "function") {
+      await waitTransportFn(10000);
+    }
+    if (await isActiveServiceWorkerForScope(targetScope)) {
+      return true;
+    }
+  } catch (e: unknown) {
+    console.warn(
+      "navigateIframeTo: transport/service worker not ready, attempting recovery...",
+      (e as Error).message,
+    );
+  }
+
+  const conn = w["sunshineConnection"] as
+    | {
+        recoverOnWake?: (opts?: { forceReapply?: boolean }) => Promise<void>;
+        ensureServiceWorkerReady?: (opts?: { scope?: string; forceReRegister?: boolean }) => Promise<unknown>;
+      }
+    | undefined;
+  try {
+    await runScramjetInit();
+    if (conn?.ensureServiceWorkerReady) {
+      await conn.ensureServiceWorkerReady({ scope: targetScope, forceReRegister: true });
+    } else if (typeof ensureSwFn === "function") {
+      await ensureSwFn({ scope: targetScope, forceReRegister: true });
+    }
+    if (conn?.recoverOnWake) {
+      await conn.recoverOnWake({ forceReapply: true });
+    }
+    if (typeof waitTransportFn === "function") {
+      await waitTransportFn(8000);
+    }
+  } catch (recoveryErr: unknown) {
+    console.warn(
+      "navigateIframeTo: recovery failed",
+      (recoveryErr as Error)?.message,
+    );
+  }
+
+  return await isActiveServiceWorkerForScope(targetScope);
+}
+
+export function navigateIframeTo(
+  iframe: HTMLIFrameElement,
+  url: string,
+  options?: { isRecoveryRetry?: boolean; forceSwRetry?: boolean },
+): void {
   if (!url || !iframe) return;
   const iframeExt = iframe as HTMLIFrameElement & Record<string, unknown>;
   const tab = window.sunshineApp.tabs!.find((t) => t.iframe === iframe);
   showLoading((tab?.id || getTabIdFromIframe(iframe)) ?? undefined);
   window.sunshineApp.isLoading = true;
   delete iframe.dataset.reloadAttempted;
+  if (!options?.isRecoveryRetry) {
+    delete iframe.dataset.reloadCount;
+    delete iframe.dataset.lastReloadAt;
+  }
   iframe.parentElement?.classList.remove("loaded");
 
   if (tab) {
@@ -155,6 +326,7 @@ export function navigateIframeTo(iframe: HTMLIFrameElement, url: string): void {
 
   iframe.dataset.navigationStarted = "true";
   iframe.removeAttribute("srcdoc");
+  delete iframe.dataset.proxyUnavailable;
   delete iframe.dataset.manualUrl;
 
   if (iframeExt.__usableTimeout) {
@@ -169,39 +341,28 @@ export function navigateIframeTo(iframe: HTMLIFrameElement, url: string): void {
     delete iframe.dataset.retryTimer;
   }
 
-  const isProxyUrl = url.startsWith("/b/s/") || url.startsWith("/b/u/");
-  if (
-    isProxyUrl &&
-    (window.sunshineApp?.waitForTransport || window.sunshineApp?.ensureProxyReady)
-  ) {
+  const proxyScope = getProxyScopeFromUrl(url);
+  if (proxyScope) {
     (async () => {
-      try {
-        if (typeof window.sunshineApp.ensureProxyReady === "function") {
-          await (window.sunshineApp.ensureProxyReady as () => Promise<unknown>)();
-        }
-        if (typeof window.sunshineApp.waitForTransport === "function") {
-          await (window.sunshineApp.waitForTransport as (timeout: number) => Promise<void>)(10000);
-        }
-      } catch (e: unknown) {
-        console.warn(
-          "navigateIframeTo: transport not ready, attempting recovery...",
-          (e as Error).message,
-        );
-        const conn = (window as unknown as Record<string, unknown>)["sunshineConnection"] as
-          { recoverOnWake?: () => Promise<void> } | undefined;
-        if (conn?.recoverOnWake) {
-          try {
-            await conn.recoverOnWake();
-            if (typeof window.sunshineApp.waitForTransport === "function") {
-              await (window.sunshineApp.waitForTransport as (timeout: number) => Promise<void>)(6000);
-            }
-          } catch {
-            console.warn("navigateIframeTo: recovery failed, navigating anyway");
-          }
-        }
-      }
-      if (iframe.dataset.navSeq === navSeq) {
+      const ready = await prepareProxyNavigation(
+        proxyScope,
+        Boolean(options?.forceSwRetry),
+      );
+      if (iframe.dataset.navSeq !== navSeq) return;
+      if (ready) {
+        iframe.removeAttribute("srcdoc");
         iframe.src = url;
+      } else {
+        hideLoading((tab?.id || getTabIdFromIframe(iframe)) ?? undefined);
+        window.sunshineApp.isLoading = false;
+        iframe.parentElement?.classList.add("loaded");
+        if (tab && !tab.fixedTitle) {
+          tab.title = "Connection Error";
+        }
+        if (window.sunshineApp.renderTabs) {
+          (window.sunshineApp.renderTabs as () => void)();
+        }
+        renderProxyUnavailableFrame(iframe, url);
       }
     })();
   } else {
@@ -377,7 +538,7 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
   const tabToUpdate = window.sunshineApp.tabs!.find(
     (tab) => tab.iframe === iframe,
   );
-  if (!tabToUpdate) return;
+  if (!tabToUpdate || iframe.dataset.proxyUnavailable === "true") return;
   const prevTitle = tabToUpdate.title;
   const prevFavicon = tabToUpdate.favicon;
   let isReloading = false;
@@ -389,29 +550,46 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
     const realUrl = decodeUrl(currentProxiedUrl);
 
     const newTitle = (doc.title || "").trim();
+    const bodyText = (doc.body?.innerText || "").trim();
+    const isExpress404Fallthrough =
+      newTitle === "404" &&
+      (!!doc.getElementById("msgBox") ||
+        bodyText.includes("Your content will be available very soon"));
+    const isProxyTransientError =
+      newTitle === "Scramjet" || newTitle === "Error";
+    const currentUrl = iframe.dataset.manualUrl || iframe.src;
+    const isProxyTarget = !!getProxyScopeFromUrl(currentUrl);
+    const shouldRecoverProxy =
+      isProxyTarget && (isExpress404Fallthrough || isProxyTransientError);
+
     if (!tabToUpdate.fixedTitle) {
-      if (newTitle) {
+      if (newTitle && !shouldRecoverProxy) {
         tabToUpdate.title = newTitle;
-      } else if (tabToUpdate.title === "fetching data...") {
+      } else if (tabToUpdate.title === "fetching data..." || shouldRecoverProxy) {
         try {
-          tabToUpdate.title = new URL(realUrl).hostname || "new tab";
+          tabToUpdate.title =
+            prevTitle &&
+            prevTitle !== "404" &&
+            prevTitle !== "Scramjet" &&
+            prevTitle !== "Error"
+              ? prevTitle
+              : new URL(realUrl).hostname || "fetching data...";
         } catch (e) {
-          tabToUpdate.title = "new tab";
+          tabToUpdate.title = "fetching data...";
         }
       }
     }
 
-    if (
-      tabToUpdate.title === "404" ||
-      tabToUpdate.title === "Scramjet" ||
-      tabToUpdate.title === "Error"
-    ) {
-      const MAX_RELOADS = tabToUpdate.title === "404" ? 10 : 5;
-      const MIN_INTERVAL_MS = tabToUpdate.title === "404" ? 450 : 750;
+    if (shouldRecoverProxy) {
+      const MAX_RELOADS = RETRY_IFRAME_BACKOFF_MS.length;
       const reloadCount = parseInt(iframe.dataset.reloadCount || "0", 10);
       const lastReloadAt = parseInt(iframe.dataset.lastReloadAt || "0", 10);
+      const minIntervalMs =
+        RETRY_IFRAME_BACKOFF_MS[
+          Math.min(reloadCount, RETRY_IFRAME_BACKOFF_MS.length - 1)
+        ] ?? 600;
       const now = Date.now();
-      const elapsed = lastReloadAt ? now - lastReloadAt : MIN_INTERVAL_MS;
+      const elapsed = lastReloadAt ? now - lastReloadAt : minIntervalMs;
       const isActiveTab = document.body.classList.contains("split-view")
         ? tabToUpdate.id === (window.sunshineApp as any)?.splitPair?.left ||
           tabToUpdate.id === (window.sunshineApp as any)?.splitPair?.right ||
@@ -420,25 +598,44 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
       if (reloadCount < MAX_RELOADS && isActiveTab) {
         iframe.dataset.reloadCount = (reloadCount + 1).toString();
         isReloading = true;
-        tabToUpdate.title =
-          prevTitle && prevTitle !== "404" && prevTitle !== "Scramjet"
-            ? prevTitle
-            : "fetching data...";
+        if (!tabToUpdate.fixedTitle) {
+          tabToUpdate.title =
+            prevTitle &&
+            prevTitle !== "404" &&
+            prevTitle !== "Scramjet" &&
+            prevTitle !== "Error"
+              ? prevTitle
+              : "fetching data...";
+        }
         iframe.parentElement?.classList.remove("loaded");
 
-        const currentUrl = iframe.dataset.manualUrl || iframe.src;
-        const delayMs = elapsed >= MIN_INTERVAL_MS ? 0 : MIN_INTERVAL_MS - elapsed;
+        const delayMs = elapsed >= minIntervalMs ? 0 : minIntervalMs - elapsed;
         if (iframe.dataset.retryTimer) {
           window.clearTimeout(Number(iframe.dataset.retryTimer));
         }
         const timerId = window.setTimeout(() => {
           delete iframe.dataset.retryTimer;
           iframe.dataset.lastReloadAt = Date.now().toString();
-          navigateIframeTo(iframe, currentUrl);
+          navigateIframeTo(iframe, currentUrl, {
+            isRecoveryRetry: true,
+            forceSwRetry: isExpress404Fallthrough && reloadCount >= 1,
+          });
         }, delayMs);
         iframe.dataset.retryTimer = String(timerId);
         return;
       }
+
+      hideLoading(tabToUpdate.id);
+      window.sunshineApp.isLoading = false;
+      iframe.parentElement?.classList.add("loaded");
+      if (!tabToUpdate.fixedTitle) {
+        tabToUpdate.title = "Connection Error";
+      }
+      renderProxyUnavailableFrame(iframe, currentUrl);
+      if (window.sunshineApp.renderTabs) {
+        (window.sunshineApp.renderTabs as () => void)();
+      }
+      return;
     } else if (newTitle) {
       delete iframe.dataset.reloadCount;
       delete iframe.dataset.lastReloadAt;
@@ -720,7 +917,14 @@ export function initializeIframe(
       newUrl = iframe.dataset.manualUrl ?? iframe.src;
     }
 
-    if (newUrl && newUrl !== "about:blank") historyManager.push(newUrl);
+    if (
+      newUrl &&
+      newUrl !== "about:blank" &&
+      newUrl !== "about:srcdoc" &&
+      iframe.dataset.proxyUnavailable !== "true"
+    ) {
+      historyManager.push(newUrl);
+    }
 
     updateTabDetails(iframe);
 

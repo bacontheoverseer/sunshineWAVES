@@ -50,16 +50,66 @@ function preconnectToOrigin(origin) {
     .catch(() => {});
 }
 
+async function safeCacheOpen(cacheName) {
+  try {
+    if (typeof caches === "undefined") return null;
+    return await caches.open(cacheName);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function safeCacheMatch(request, cacheName) {
+  try {
+    if (typeof caches === "undefined") return null;
+    if (cacheName) {
+      const cache = await safeCacheOpen(cacheName);
+      if (!cache) return null;
+      return (await cache.match(request)) || null;
+    }
+    return (await caches.match(request)) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function safeCachePut(cacheName, request, response) {
+  try {
+    const cache = await safeCacheOpen(cacheName);
+    if (!cache || !response) return;
+    await cache.put(request, response);
+  } catch (e) {}
+}
+
+async function safeCacheKeys() {
+  try {
+    if (typeof caches === "undefined") return [];
+    return await caches.keys();
+  } catch (e) {
+    return [];
+  }
+}
+
+async function safeCacheDelete(cacheName) {
+  try {
+    if (typeof caches === "undefined") return false;
+    return await caches.delete(cacheName);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function capCache(cacheName, maxEntries) {
   if (_trimmingCaches.has(cacheName)) return;
   _trimmingCaches.add(cacheName);
   try {
-    const cache = await caches.open(cacheName);
+    const cache = await safeCacheOpen(cacheName);
+    if (!cache) return;
     const keys = await cache.keys();
     const over = keys.length - maxEntries;
     if (over > 0) {
       const doomed = keys.slice(0, over);
-      await Promise.all(doomed.map((k) => cache.delete(k)));
+      await Promise.all(doomed.map((k) => cache.delete(k).catch(() => false)));
     }
   } catch (e) {
   } finally {

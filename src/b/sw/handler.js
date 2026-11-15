@@ -1,17 +1,23 @@
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(SHELL_CACHE)
-      .then((cache) => cache.addAll(PRECACHE).catch(() => {}))
-      .then(() => self.skipWaiting()),
+    (async () => {
+      try {
+        const cache = await safeCacheOpen(SHELL_CACHE);
+        if (cache) {
+          await cache.addAll(PRECACHE).catch(() => {});
+        }
+      } catch (e) {}
+      await self.skipWaiting();
+    })(),
   );
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    Promise.all([
-      caches.keys().then((keys) => {
-        return Promise.all(
+    (async () => {
+      try {
+        const keys = await safeCacheKeys();
+        await Promise.all(
           keys
             .filter(
               (k) =>
@@ -21,13 +27,16 @@ self.addEventListener("activate", (event) => {
                 k !== PREFETCH_CACHE &&
                 k !== LARGE_CACHE,
             )
-            .map((k) => caches.delete(k)),
+            .map((k) => safeCacheDelete(k)),
         );
-      }),
-      self.registration.navigationPreload
-        ? self.registration.navigationPreload.enable()
-        : Promise.resolve(),
-    ]).then(() => self.clients.claim()),
+      } catch (e) {}
+      try {
+        if (self.registration.navigationPreload) {
+          await self.registration.navigationPreload.enable();
+        }
+      } catch (e) {}
+      await self.clients.claim();
+    })(),
   );
 });
 
@@ -94,9 +103,9 @@ async function handleLargeFile(request, realUrl) {
       if (!isRangeRequest(request)) {
         const cl = parseInt(response.headers.get("content-length") || "0", 10);
         if (cl < LARGE_SIZE_THRESHOLD) {
-          const cache = await caches.open(LARGE_CACHE);
-          cache.put(request, response.clone()).catch(() => {});
-          capCache(LARGE_CACHE, MAX_LARGE_CACHE_ENTRIES);
+          void safeCachePut(LARGE_CACHE, request, response.clone()).then(() =>
+            capCache(LARGE_CACHE, MAX_LARGE_CACHE_ENTRIES),
+          );
         }
       }
       return response;
@@ -251,13 +260,11 @@ async function handleLocalOriginGet(event, request, url, preloadPromise) {
     }
     if (networkRes && networkRes.ok) {
       const clone = networkRes.clone();
-      caches
-        .open(SHELL_CACHE)
-        .then((c) => c.put(request, clone).catch(() => {}));
+      void safeCachePut(SHELL_CACHE, request, clone);
       return networkRes;
     }
     if (networkRes && networkRes.status === 304) return networkRes;
-    const cached = await caches.match(request);
+    const cached = await safeCacheMatch(request);
     if (cached) return cached;
     if (networkRes) return networkRes;
     return new Response("offline", { status: 503 });
@@ -271,7 +278,7 @@ async function handleLocalOriginGet(event, request, url, preloadPromise) {
     path.startsWith("/s/")
   ) {
     const isHashed = HASHED_ASSET_REGEX.test(path);
-    const cached = await caches.match(request);
+    const cached = await safeCacheMatch(request);
     if (cached) {
       if (!isHashed) {
         fetch(request)
@@ -279,10 +286,9 @@ async function handleLocalOriginGet(event, request, url, preloadPromise) {
             if (res && res.ok) {
               const cl = parseInt(res.headers.get("content-length") || "0", 10);
               if (cl < LARGE_SIZE_THRESHOLD) {
-                caches.open(RUNTIME_CACHE).then((c) => {
-                  c.put(request, res);
-                  capCache(RUNTIME_CACHE, MAX_RUNTIME);
-                });
+                void safeCachePut(RUNTIME_CACHE, request, res).then(() =>
+                  capCache(RUNTIME_CACHE, MAX_RUNTIME),
+                );
               }
             }
           })
@@ -295,10 +301,9 @@ async function handleLocalOriginGet(event, request, url, preloadPromise) {
       const cl = parseInt(res.headers.get("content-length") || "0", 10);
       if (cl < LARGE_SIZE_THRESHOLD) {
         const clone = res.clone();
-        caches.open(RUNTIME_CACHE).then((c) => {
-          c.put(request, clone);
-          capCache(RUNTIME_CACHE, MAX_RUNTIME);
-        });
+        void safeCachePut(RUNTIME_CACHE, request, clone).then(() =>
+          capCache(RUNTIME_CACHE, MAX_RUNTIME),
+        );
       }
       return res;
     }
@@ -319,10 +324,9 @@ async function handleLocalOriginGet(event, request, url, preloadPromise) {
             const cl = parseInt(mochiRes.headers.get("content-length") || "0", 10);
             if (cl < LARGE_SIZE_THRESHOLD) {
               const clone = mochiRes.clone();
-              caches.open(RUNTIME_CACHE).then((c) => {
-                c.put(request, clone);
-                capCache(RUNTIME_CACHE, MAX_RUNTIME);
-              });
+              void safeCachePut(RUNTIME_CACHE, request, clone).then(() =>
+                capCache(RUNTIME_CACHE, MAX_RUNTIME),
+              );
             }
             return mochiRes;
           }
@@ -507,7 +511,7 @@ self.addEventListener("fetch", (event) => {
           ) {
             return fetch(request);
           }
-          if (scramjet.route(event)) {
+          if (scramjet?.config?.prefix && scramjet.route(event)) {
             return await runProxyEngine(
               scramjet,
               event,
@@ -519,7 +523,7 @@ self.addEventListener("fetch", (event) => {
           }
         }
 
-        if (isUltraviolet && uv.route(event)) {
+        if (isUltraviolet && typeof uv !== "undefined" && uv.route(event)) {
           return await runProxyEngine(
             uv,
             event,
@@ -528,6 +532,29 @@ self.addEventListener("fetch", (event) => {
             realUrl,
             isNavigate,
           );
+        }
+
+        const isProxyPath =
+          url.pathname.startsWith("/b/s/r/") ||
+          url.pathname.startsWith("/b/u/r/");
+        if (isProxyPath) {
+          if (realUrl && realUrl.startsWith("http")) {
+            const mf = await tryWithTimeout(
+              mochiFetch(request, realUrl),
+              MOCHI_TIMEOUT_MS,
+            );
+            if (mf) return patchHtml(mf, realUrl);
+          }
+          if (isNavigate) {
+            return new Response(
+              "<!doctype html><title>Scramjet</title><body style='background:#050505;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>Initializing proxy...</body>",
+              {
+                status: 503,
+                headers: { "Content-Type": "text/html; charset=utf-8" },
+              },
+            );
+          }
+          return new Response("proxy initializing", { status: 503 });
         }
 
         if (url.origin === self.location.origin && request.method === "GET") {
@@ -543,7 +570,7 @@ self.addEventListener("fetch", (event) => {
           );
           if (mf) return patchHtml(mf, realUrl);
         }
-        const fallback = await caches.match(request);
+        const fallback = await safeCacheMatch(request);
         if (fallback) return fallback;
         return new Response("error", { status: 500 });
       }

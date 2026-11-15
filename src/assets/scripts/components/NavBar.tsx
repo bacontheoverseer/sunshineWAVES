@@ -160,10 +160,19 @@ export default function NavBar() {
         if (!activeTab.fixedTitle) activeTab.title = "fetching data...";
         if (!activeTab.fixedFavicon) activeTab.favicon = null;
         store.notify();
-        try {
-          activeTab.iframe.contentWindow.location.reload();
-        } catch (e) {
-          navigateIframeTo(activeTab.iframe, activeTab.iframe.src);
+        if (
+          activeTab.iframe.dataset.proxyUnavailable === "1" ||
+          activeTab.iframe.hasAttribute("srcdoc")
+        ) {
+          navigateIframeTo(activeTab.iframe, activeTab.iframe.src, {
+            forceSwRetry: true,
+          });
+        } else {
+          try {
+            activeTab.iframe.contentWindow.location.reload();
+          } catch (e) {
+            navigateIframeTo(activeTab.iframe, activeTab.iframe.src);
+          }
         }
       }
     }

@@ -271,13 +271,38 @@ async function matchPrefetchedNavHtml(request) {
 }
 
 async function ensureScramjetConfig() {
-  if (scramjetConfigLoaded) return;
+  if (scramjetConfigLoaded && scramjet?.config?.prefix) return true;
   if (!scramjetConfigPromise) {
-    scramjetConfigPromise = scramjet.loadConfig().then(() => {
-      scramjetConfigLoaded = true;
+    scramjetConfigPromise = (async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await scramjet.loadConfig();
+          if (scramjet?.config?.prefix) {
+            scramjetConfigLoaded = true;
+            return true;
+          }
+        } catch {}
+        if (attempt < 2) {
+          try {
+            const clients = await self.clients.matchAll({
+              includeUncontrolled: true,
+              type: "window",
+            });
+            for (let i = 0; i < clients.length; i++) {
+              try {
+                clients[i].postMessage({ type: "sunshine-request-scramjet-config" });
+              } catch {}
+            }
+          } catch {}
+          await new Promise((r) => setTimeout(r, 80 * (attempt + 1)));
+        }
+      }
+      return !!(scramjet && scramjet.config && scramjet.config.prefix);
+    })().finally(() => {
+      scramjetConfigPromise = null;
     });
   }
-  await scramjetConfigPromise;
+  return await scramjetConfigPromise;
 }
 
 async function runProxyWithMochiFallback(

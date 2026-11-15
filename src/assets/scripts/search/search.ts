@@ -85,10 +85,14 @@ function generateSearchUrl(query: string): string {
 
 async function getUrl(url: string): Promise<string> {
   const selectedBackend = localStorage.getItem("backend") ?? "scramjet";
+  const withDeadline = (p: Promise<unknown> | undefined, ms = 4500) =>
+    p
+      ? Promise.race([p, new Promise<void>((r) => setTimeout(r, ms))]).catch(
+          () => {},
+        )
+      : Promise.resolve();
   if ((window as any).sunshineApp?.ensureProxyReady) {
-    try {
-      await (window as any).sunshineApp.ensureProxyReady();
-    } catch {}
+    await withDeadline((window as any).sunshineApp.ensureProxyReady(), 6000);
   }
   if (
     selectedBackend === "ultraviolet" &&
@@ -99,17 +103,15 @@ async function getUrl(url: string): Promise<string> {
       (window as any)["__uv$config"].encodeUrl(url)
     );
   } else if (selectedBackend === "scramjet") {
-    try {
-      const w = window as unknown as {
-        ensureScramjetReady?: () => Promise<void>;
-        scramjetReady?: Promise<void>;
-      };
-      if (typeof w.ensureScramjetReady === "function") {
-        await w.ensureScramjetReady();
-      } else if (w.scramjetReady) {
-        await w.scramjetReady;
-      }
-    } catch {}
+    const w = window as unknown as {
+      ensureScramjetReady?: () => Promise<void>;
+      scramjetReady?: Promise<void>;
+    };
+    if (typeof w.ensureScramjetReady === "function") {
+      await withDeadline(w.ensureScramjetReady(), 4500);
+    } else if (w.scramjetReady) {
+      await withDeadline(w.scramjetReady, 4500);
+    }
     return "/b/s/r/" + url;
   }
   return url;
@@ -165,32 +167,6 @@ export async function handleSearch(
       ? new URL(searchURL, window.location.origin).href
       : await getUrl(searchURL);
 
-    const isProxyUrl =
-      finalUrlToLoad.startsWith("/b/s/") || finalUrlToLoad.startsWith("/b/u/");
-    if (isProxyUrl && (window as any).sunshineApp?.waitForTransport) {
-      let transportReady = false;
-      try {
-        await (window as any).sunshineApp.waitForTransport(10000);
-        transportReady = true;
-      } catch (e: unknown) {
-        console.warn(
-          "transport not ready on first attempt, triggering recovery...",
-          (e as Error).message,
-        );
-        if ((window as any).sunshineConnection?.recoverOnWake) {
-          try {
-            await (window as any).sunshineConnection.recoverOnWake();
-            await (window as any).sunshineApp.waitForTransport(8000);
-            transportReady = true;
-          } catch (retryErr: unknown) {
-            console.error(
-              "transport not ready after recovery, cannot navigate:",
-              (retryErr as Error).message,
-            );
-          }
-        }
-      }
-    }
     navigateIframeTo(activeTab.iframe, finalUrlToLoad);
   }
 }

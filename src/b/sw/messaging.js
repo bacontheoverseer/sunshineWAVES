@@ -83,6 +83,27 @@ self.addEventListener("message", (event) => {
     return;
   }
 
+  if (data.type === "sunshine-close-scramjet-idb" && isScramjet) {
+    try {
+      self.__sunshineCloseScramjetDbs?.();
+    } catch {}
+    scramjetConfigLoaded = false;
+    if (scramjet) scramjet.config = null;
+    if (event.ports && event.ports[0]) {
+      try {
+        event.ports[0].postMessage({ closed: true });
+      } catch {}
+    }
+    return;
+  }
+
+  if (data.type === "sunshine-scramjet-ready" && isScramjet) {
+    if (!scramjetConfigLoaded || !scramjet?.config?.prefix) {
+      event.waitUntil(ensureScramjetConfig());
+    }
+    return;
+  }
+
   if (data.type === "sunshine-prefetch" && typeof data.url === "string") {
     event.waitUntil(prefetchProxiedNavFromClient(data.url));
   }
