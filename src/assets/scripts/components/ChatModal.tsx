@@ -249,6 +249,24 @@ function notifyDmOrMentionToast(
   }
 }
 
+function extractMsgEpochMs(msg: ChatMessage): number | null {
+  const m = /^msg_(\d{12,15})_/.exec(msg.id || "");
+  if (!m || !m[1]) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function shouldGroupMessages(prev: ChatMessage | undefined, curr: ChatMessage): boolean {
+  if (!prev) return false;
+  if (prev.author.toLowerCase() !== curr.author.toLowerCase()) return false;
+  const prevMs = extractMsgEpochMs(prev);
+  const currMs = extractMsgEpochMs(curr);
+  if (prevMs !== null && currMs !== null && currMs - prevMs > 7 * 60 * 1000) {
+    return false;
+  }
+  return true;
+}
+
 function formatElapsedDuration(startedAtMs: number | undefined, nowMs: number): string {
   if (!startedAtMs || startedAtMs <= 0) return "1s";
   const totalSec = Math.max(1, Math.floor((nowMs - startedAtMs) / 1000));
@@ -2714,7 +2732,8 @@ export default function ChatModal() {
                 </span>
               </div>
             ) : (
-              channelMessages.map((msg) => {
+              channelMessages.map((msg, idx) => {
+                const isGrouped = shouldGroupMessages(channelMessages[idx - 1], msg);
                 const isSelf =
                   cloudUser && msg.author.toLowerCase() === cloudUser.toLowerCase();
                 const authorMeta = userMetaMap.get(msg.author.toLowerCase());
@@ -2728,32 +2747,40 @@ export default function ChatModal() {
                 );
                 const displayName = msgCustom?.displayName?.trim() || msg.author;
                 return (
-                  <div key={msg.id} class="chat-entry">
-                    <UserAvatar
-                      username={msg.author}
-                      custom={msgCustom}
-                      fallbackColor={msg.avatarColor || stringToColor(msg.author)}
-                      className="chat-entry-avatar"
-                      title={`View @${msg.author}'s profile`}
-                      onClick={() => openUserProfile(msg.author)}
-                    />
-                    <div class="chat-entry-content">
-                      <div class="chat-entry-header">
-                        <span
-                          class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
-                            msgCustom
-                          )}`}
-                          title={`View @${msg.author}'s profile`}
-                          onClick={() => openUserProfile(msg.author)}
-                        >
-                          {displayName}
-                        </span>
-                        <RoleBadge role={authorRole} />
-                        {msgCustom?.customTag && (
-                          <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
-                        )}
-                        <span class="chat-entry-time">{msg.timestamp}</span>
+                  <div key={msg.id} class={`chat-entry ${isGrouped ? "is-grouped" : ""}`}>
+                    {isGrouped ? (
+                      <div class="chat-entry-gutter" aria-hidden="true">
+                        <span class="chat-entry-hover-time">{msg.timestamp}</span>
                       </div>
+                    ) : (
+                      <UserAvatar
+                        username={msg.author}
+                        custom={msgCustom}
+                        fallbackColor={msg.avatarColor || stringToColor(msg.author)}
+                        className="chat-entry-avatar"
+                        title={`View @${msg.author}'s profile`}
+                        onClick={() => openUserProfile(msg.author)}
+                      />
+                    )}
+                    <div class="chat-entry-content">
+                      {!isGrouped && (
+                        <div class="chat-entry-header">
+                          <span
+                            class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
+                              msgCustom
+                            )}`}
+                            title={`View @${msg.author}'s profile`}
+                            onClick={() => openUserProfile(msg.author)}
+                          >
+                            {displayName}
+                          </span>
+                          <RoleBadge role={authorRole} />
+                          {msgCustom?.customTag && (
+                            <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
+                          )}
+                          <span class="chat-entry-time">{msg.timestamp}</span>
+                        </div>
+                      )}
                       {msg.text && (
                         <div class="chat-entry-text">{renderFormattedText(msg.text)}</div>
                       )}
