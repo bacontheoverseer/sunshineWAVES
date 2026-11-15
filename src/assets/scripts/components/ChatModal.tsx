@@ -13,6 +13,7 @@ import {
 } from "../core/profileCustomization.ts";
 import ProfileCustomizerModal from "./ProfileCustomizerModal.tsx";
 import StaffManagerModal from "./StaffManagerModal.tsx";
+import EmojiPicker, { getJumboEmojiCount } from "./EmojiPicker.tsx";
 import {
   ProfileEffectLayer,
   RoleBadge,
@@ -316,6 +317,7 @@ export default function ChatModal() {
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [gifSearch, setGifSearch] = useState("");
   const [gifItems, setGifItems] = useState<KlipyGifItem[]>([]);
   const [gifLoading, setGifLoading] = useState(false);
@@ -324,6 +326,7 @@ export default function ChatModal() {
   const [gifPage, setGifPage] = useState(1);
   const [gifHasNext, setGifHasNext] = useState(false);
   const gifPickerRef = useRef<HTMLDivElement>(null);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
   const gifAbortRef = useRef<AbortController | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -1566,6 +1569,8 @@ export default function ChatModal() {
           setShowCustomizer(false);
         } else if (showGifPicker) {
           setShowGifPicker(false);
+        } else if (showEmojiPicker) {
+          setShowEmojiPicker(false);
         } else if (replyingTo) {
           setReplyingTo(null);
         } else if (viewingProfileUsername) {
@@ -1618,6 +1623,7 @@ export default function ChatModal() {
     showStaffModal,
     showCustomizer,
     showGifPicker,
+    showEmojiPicker,
     viewingProfileUsername,
     cloudUser,
     ingestIncomingMessage,
@@ -1689,19 +1695,53 @@ export default function ChatModal() {
     return () => window.clearTimeout(timer);
   }, [isOpen, showGifPicker, gifSearch, fetchKlipyGifs]);
 
-  // Close GIF picker when clicking outside
+  // Close GIF or Emoji picker when clicking outside
   useEffect(() => {
-    if (!showGifPicker) return;
+    if (!showGifPicker && !showEmojiPicker) return;
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (!target) return;
-      if (gifPickerRef.current?.contains(target)) return;
-      if (target.closest(".chat-gif-toggle-btn")) return;
-      setShowGifPicker(false);
+      if (
+        showGifPicker &&
+        !gifPickerRef.current?.contains(target) &&
+        !target.closest(".chat-gif-toggle-btn")
+      ) {
+        setShowGifPicker(false);
+      }
+      if (
+        showEmojiPicker &&
+        !emojiPickerRef.current?.contains(target) &&
+        !target.closest(".chat-emoji-toggle-btn")
+      ) {
+        setShowEmojiPicker(false);
+      }
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [showGifPicker]);
+  }, [showGifPicker, showEmojiPicker]);
+
+  const handleInsertEmoji = useCallback((emoji: string) => {
+    const input = chatInputRef.current;
+    if (input) {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? input.value.length;
+      setInputText((prev) => {
+        const safeStart = Math.min(start, prev.length);
+        const safeEnd = Math.min(Math.max(end, safeStart), prev.length);
+        const next = prev.slice(0, safeStart) + emoji + prev.slice(safeEnd);
+        return next.slice(0, 500);
+      });
+      requestAnimationFrame(() => {
+        input.focus();
+        const pos = Math.min(start + emoji.length, 500);
+        try {
+          input.setSelectionRange(pos, pos);
+        } catch {}
+      });
+    } else {
+      setInputText((prev) => (prev + emoji).slice(0, 500));
+    }
+  }, []);
 
   // Scroll to bottom when messages change or channel changes
   useEffect(() => {
@@ -1786,6 +1826,7 @@ export default function ChatModal() {
       if (text) setInputText("");
       if (activeReply) setReplyingTo(null);
       if (validGif) setShowGifPicker(false);
+      setShowEmojiPicker(false);
 
       try {
         broadcastRef.current?.postMessage({ type: "NEW_MESSAGE", message: newMsg });
@@ -3175,12 +3216,22 @@ export default function ChatModal() {
                             </div>
                           </form>
                         ) : (
-                          msg.text && (
-                            <div class="chat-entry-text">
-                              {renderFormattedText(msg.text)}
-                              {msg.edited && <span class="chat-msg-edited">(edited)</span>}
-                            </div>
-                          )
+                          msg.text &&
+                          (() => {
+                            const jumboCount = getJumboEmojiCount(msg.text);
+                            const jumboCls =
+                              jumboCount > 0
+                                ? ` is-jumbo-emoji${jumboCount <= 3 ? " is-jumbo-lg" : ""}`
+                                : "";
+                            return (
+                              <div class={`chat-entry-text${jumboCls}`}>
+                                {renderFormattedText(msg.text)}
+                                {msg.edited && (
+                                  <span class="chat-msg-edited">(edited)</span>
+                                )}
+                              </div>
+                            );
+                          })()
                         )}
                         {isAllowedKlipyUrl(msg.gifUrl) && (
                           <div class="chat-entry-gif-wrap">
@@ -3354,9 +3405,24 @@ export default function ChatModal() {
                   />
                   <button
                     type="button"
+                    class={`chat-emoji-toggle-btn${showEmojiPicker ? " active" : ""}`}
+                    title="Pick an emoji"
+                    aria-label="Open emoji picker"
+                    onClick={() => {
+                      setShowGifPicker(false);
+                      setShowEmojiPicker((v) => !v);
+                    }}
+                  >
+                    <i class="fa-regular fa-face-smile"></i>
+                  </button>
+                  <button
+                    type="button"
                     class={`chat-gif-toggle-btn${showGifPicker ? " active" : ""}`}
                     title="Send a GIF via KLIPY"
-                    onClick={() => setShowGifPicker((v) => !v)}
+                    onClick={() => {
+                      setShowEmojiPicker(false);
+                      setShowGifPicker((v) => !v);
+                    }}
                   >
                     GIF
                   </button>
@@ -3370,6 +3436,14 @@ export default function ChatModal() {
                   </button>
                 </form>
               </>
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showEmojiPicker && (
+              <EmojiPicker
+                pickerRef={emojiPickerRef}
+                onSelect={handleInsertEmoji}
+                onClose={() => setShowEmojiPicker(false)}
+              />
             )}
 
             {cloudUser && !isCurrentDmBlocked && showGifPicker && (
