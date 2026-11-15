@@ -1,0 +1,930 @@
+import { useState, useEffect, useRef } from "preact/hooks";
+import {
+  AVATAR_DECORATIONS,
+  AVATAR_EMOJIS,
+  BANNER_STYLES,
+  BIO_STYLES,
+  CARD_BG_SWATCHES,
+  CARD_THEMES,
+  COLOR_SWATCHES,
+  CUSTOM_TAG_PRESETS,
+  ChatRole,
+  NAME_FONTS,
+  NAME_STYLES,
+  NAMEPLATES,
+  PROFILE_EFFECTS,
+  ProfileCustomization,
+  getBannerInlineStyle,
+  getDefaultCustomization,
+  getSafeMediaProxySrc,
+} from "../core/profileCustomization.ts";
+import {
+  ProfileEffectLayer,
+  RoleBadge,
+  UserAvatar,
+  getNameClasses,
+} from "./ProfileVisuals.tsx";
+
+interface ProfileCustomizerModalProps {
+  username: string;
+  role: ChatRole;
+  createdAt?: string | null | undefined;
+  initialCustom: ProfileCustomization;
+  initialBio: string;
+  initialStatusText: string;
+  saving: boolean;
+  onSave: (payload: {
+    bio: string;
+    statusText: string;
+    customization: ProfileCustomization;
+  }) => Promise<void>;
+  onClose: () => void;
+}
+
+interface KlipySearchHit {
+  id: string;
+  title: string;
+  previewUrl: string;
+  url: string;
+}
+
+async function readImageFileAsDataUrl(
+  file: File,
+  maxWidth: number,
+  maxHeight: number,
+  maxGifBytes: number
+): Promise<string> {
+  if (file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif")) {
+    if (file.size > maxGifBytes) {
+      throw new Error(
+        `Animated GIF is ${Math.round(file.size / 1024)}KB (max ${Math.round(maxGifBytes / 1024)}KB). Try picking from KLIPY or pasting a GIF URL!`
+      );
+    }
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Could not read GIF file"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  const rawUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Invalid image file"));
+      el.src = rawUrl;
+    });
+    const ratio = Math.min(1, maxWidth / img.width, maxHeight / img.height);
+    const w = Math.max(1, Math.round(img.width * ratio));
+    const h = Math.max(1, Math.round(img.height * ratio));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas unavailable");
+    ctx.drawImage(img, 0, 0, w, h);
+    const webp = canvas.toDataURL("image/webp", 0.85);
+    return webp.startsWith("data:image/webp")
+      ? webp
+      : canvas.toDataURL("image/jpeg", 0.85);
+  } finally {
+    URL.revokeObjectURL(rawUrl);
+  }
+}
+
+export default function ProfileCustomizerModal({
+  username,
+  role,
+  createdAt,
+  initialCustom,
+  initialBio,
+  initialStatusText,
+  saving,
+  onSave,
+  onClose,
+}: ProfileCustomizerModalProps) {
+  const [tab, setTab] = useState<"identity" | "avatar" | "banner" | "theme">("avatar");
+  const [custom, setCustom] = useState<ProfileCustomization>(initialCustom);
+  const [bio, setBio] = useState(initialBio);
+  const [statusText, setStatusText] = useState(initialStatusText);
+  const [uploadError, setUploadError] = useState("");
+  const [gifPickerFor, setGifPickerFor] = useState<"avatar" | "banner" | null>(null);
+  const [gifQuery, setGifQuery] = useState("");
+  const [gifHits, setGifHits] = useState<KlipySearchHit[]>([]);
+  const [gifLoading, setGifLoading] = useState(false);
+
+  const avatarFileRef = useRef<HTMLInputElement>(null);
+  const bannerFileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!gifPickerFor) return;
+    let cancelled = false;
+    setGifLoading(true);
+    const t = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        page: "1",
+        perPage: "12",
+        customerId: username,
+      });
+      if (gifQuery.trim()) params.set("q", gifQuery.trim());
+      fetch(`/api/chat/gifs?${params.toString()}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled && Array.isArray(data?.items)) {
+            setGifHits(data.items);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setGifLoading(false);
+        });
+    }, gifQuery ? 260 : 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [gifPickerFor, gifQuery, username]);
+
+  const updateField = <K extends keyof ProfileCustomization>(
+    key: K,
+    value: ProfileCustomization[K]
+  ) => {
+    setCustom((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleFileUpload = async (kind: "avatar" | "banner", file?: File | null) => {
+    if (!file) return;
+    setUploadError("");
+    try {
+      const dataUrl =
+        kind === "avatar"
+          ? await readImageFileAsDataUrl(file, 256, 256, 320 * 1024)
+          : await readImageFileAsDataUrl(file, 720, 240, 320 * 1024);
+      if (kind === "avatar") {
+        updateField("avatarUrl", dataUrl);
+      } else {
+        updateField("bannerUrl", dataUrl);
+      }
+    } catch (err) {
+      setUploadError((err as Error).message || "Could not process image");
+    }
+  };
+
+  const displayLabel = custom.displayName.trim() || username;
+  const bannerStyle = getBannerInlineStyle(custom);
+  const bannerClass =
+    !custom.bannerUrl && custom.bannerStyle !== "solid"
+      ? `banner-${custom.bannerStyle}`
+      : "";
+  const nameplateClass =
+    custom.nameplate !== "none" ? `has-nameplate nameplate-${custom.nameplate}` : "";
+  const bioClass = `bio-${custom.bioStyle}`;
+
+  return (
+    <div
+      class="chat-profile-modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div class="chat-customizer-card" onClick={(e) => e.stopPropagation()}>
+        <div class="chat-customizer-head">
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <i class="fa-solid fa-wand-magic-sparkles" style={{ color: "#c084fc" }} />
+            <span style={{ fontWeight: 700, fontSize: "14px", textTransform: "lowercase" }}>
+              customize account profile
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <button
+              type="button"
+              class="chat-gif-more-btn"
+              onClick={() => {
+                setCustom(getDefaultCustomization(username));
+                setBio("");
+                setStatusText("");
+              }}
+            >
+              reset defaults
+            </button>
+            <button
+              type="button"
+              class="chat-header-btn"
+              onClick={onClose}
+              title="Close customizer"
+            >
+              <i class="fa-solid fa-xmark" />
+            </button>
+          </div>
+        </div>
+
+        <div class="chat-customizer-body">
+          {/* LEFT: CONTROLS */}
+          <div class="chat-customizer-controls">
+            <div class="chat-customizer-tabs">
+              {(
+                [
+                  ["identity", "identity"],
+                  ["avatar", "avatar & frame"],
+                  ["banner", "banner & fx"],
+                  ["theme", "name & theme"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  class={`chat-customizer-tab ${tab === id ? "active" : ""}`}
+                  onClick={() => {
+                    setTab(id);
+                    setGifPickerFor(null);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {uploadError && (
+              <div
+                style={{
+                  fontSize: "11px",
+                  color: "#fca5a5",
+                  background: "rgba(239, 68, 68, 0.14)",
+                  border: "1px solid rgba(239, 68, 68, 0.35)",
+                  padding: "6px 10px",
+                  borderRadius: "8px",
+                }}
+              >
+                {uploadError}
+              </div>
+            )}
+
+            {tab === "identity" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
+                    display name
+                  </div>
+                  <input
+                    type="text"
+                    class="chat-mod-input"
+                    placeholder={username}
+                    maxLength={32}
+                    value={custom.displayName}
+                    onInput={(e) =>
+                      updateField("displayName", (e.target as HTMLInputElement).value)
+                    }
+                  />
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                  <div>
+                    <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
+                      pronouns
+                    </div>
+                    <input
+                      type="text"
+                      class="chat-mod-input"
+                      placeholder="they/them, he/him..."
+                      maxLength={24}
+                      value={custom.pronouns}
+                      onInput={(e) =>
+                        updateField("pronouns", (e.target as HTMLInputElement).value)
+                      }
+                    />
+                  </div>
+                  <div>
+                    <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
+                      custom profile tag
+                    </div>
+                    <input
+                      type="text"
+                      class="chat-mod-input"
+                      placeholder="gamer, vip, night owl..."
+                      maxLength={18}
+                      value={custom.customTag}
+                      onInput={(e) =>
+                        updateField("customTag", (e.target as HTMLInputElement).value)
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div class="chat-emoji-grid">
+                  {CUSTOM_TAG_PRESETS.map((preset) => (
+                    <button
+                      key={preset || "none"}
+                      type="button"
+                      class={`chat-style-chip ${custom.customTag === preset ? "active" : ""}`}
+                      style={{ padding: "4px 8px" }}
+                      onClick={() => updateField("customTag", preset)}
+                    >
+                      {preset || "no tag"}
+                    </button>
+                  ))}
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
+                    custom status & presence dot
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <input
+                      type="text"
+                      class="chat-mod-input"
+                      placeholder="chilling on sunshinewaves..."
+                      maxLength={60}
+                      value={statusText}
+                      onInput={(e) => setStatusText((e.target as HTMLInputElement).value)}
+                    />
+                    {(["online", "idle", "dnd"] as const).map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        class={`chat-style-chip ${custom.presenceStatus === st ? "active" : ""}`}
+                        onClick={() => updateField("presenceStatus", st)}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
+                    about me bio
+                  </div>
+                  <textarea
+                    class="chat-mod-input chat-profile-bio-textarea"
+                    placeholder="write a bio for your profile card..."
+                    maxLength={220}
+                    rows={3}
+                    value={bio}
+                    onInput={(e) => setBio((e.target as HTMLTextAreaElement).value)}
+                  />
+                </div>
+              </div>
+            )}
+
+            {tab === "avatar" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    custom avatar picture or animated gif
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "6px" }}>
+                    <input
+                      ref={avatarFileRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        void handleFileUpload("avatar", file);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="chat-gif-more-btn"
+                      onClick={() => avatarFileRef.current?.click()}
+                    >
+                      <i class="fa-solid fa-upload" /> upload image / gif
+                    </button>
+                    <button
+                      type="button"
+                      class="chat-gif-more-btn"
+                      onClick={() =>
+                        setGifPickerFor((p) => (p === "avatar" ? null : "avatar"))
+                      }
+                    >
+                      <i class="fa-solid fa-film" /> pick klipy gif
+                    </button>
+                    {custom.avatarUrl && (
+                      <button
+                        type="button"
+                        class="chat-gif-more-btn"
+                        onClick={() => updateField("avatarUrl", "")}
+                      >
+                        clear picture
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="url"
+                    class="chat-mod-input"
+                    placeholder="or paste https:// image / gif url..."
+                    value={custom.avatarUrl.startsWith("data:") ? "" : custom.avatarUrl}
+                    onInput={(e) =>
+                      updateField("avatarUrl", (e.target as HTMLInputElement).value.trim())
+                    }
+                  />
+                </div>
+
+                {gifPickerFor === "avatar" && (
+                  <div
+                    style={{
+                      background: "var(--bg-surface-3)",
+                      border: "1px solid var(--bg-surface-10)",
+                      borderRadius: "10px",
+                      padding: "8px",
+                    }}
+                  >
+                    <input
+                      type="text"
+                      class="chat-mod-input"
+                      placeholder="search klipy gifs for your avatar..."
+                      value={gifQuery}
+                      onInput={(e) => setGifQuery((e.target as HTMLInputElement).value)}
+                      style={{ marginBottom: "6px" }}
+                    />
+                    {gifLoading ? (
+                      <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                        loading klipy gifs...
+                      </div>
+                    ) : (
+                      <div class="chat-gif-grid" style={{ maxHeight: "150px", overflowY: "auto" }}>
+                        {gifHits.map((g) => (
+                          <button
+                            key={g.id}
+                            type="button"
+                            class="chat-gif-item"
+                            style={{ height: "64px" }}
+                            onClick={() => {
+                              updateField("avatarUrl", g.url);
+                              setGifPickerFor(null);
+                            }}
+                          >
+                            <img src={getSafeMediaProxySrc(g.previewUrl)} alt={g.title} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    animated avatar frame (discord style)
+                  </div>
+                  <div class="chat-customizer-grid">
+                    {AVATAR_DECORATIONS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${
+                          custom.avatarDecoration === opt.id ? "active" : ""
+                        }`}
+                        onClick={() => updateField("avatarDecoration", opt.id)}
+                      >
+                        <span>{opt.label}</span>
+                        {opt.previewColor && (
+                          <span
+                            style={{
+                              width: "8px",
+                              height: "8px",
+                              borderRadius: "50%",
+                              background: opt.previewColor,
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    fallback gradient colors & emoji
+                  </div>
+                  <div class="chat-swatch-row" style={{ marginBottom: "6px" }}>
+                    {COLOR_SWATCHES.map((col) => (
+                      <button
+                        key={col}
+                        type="button"
+                        class={`chat-swatch-dot ${custom.avatarColor === col ? "active" : ""}`}
+                        style={{ backgroundColor: col }}
+                        onClick={() => updateField("avatarColor", col)}
+                      />
+                    ))}
+                    <input
+                      type="color"
+                      value={custom.avatarColor}
+                      onInput={(e) =>
+                        updateField("avatarColor", (e.target as HTMLInputElement).value)
+                      }
+                      title="Custom accent color"
+                      style={{
+                        width: "26px",
+                        height: "24px",
+                        border: "none",
+                        background: "transparent",
+                        cursor: "pointer",
+                      }}
+                    />
+                  </div>
+                  <div class="chat-emoji-grid">
+                    {AVATAR_EMOJIS.map((em) => (
+                      <button
+                        key={em || "letter"}
+                        type="button"
+                        class={`chat-emoji-btn ${custom.avatarEmoji === em ? "active" : ""}`}
+                        onClick={() => updateField("avatarEmoji", em)}
+                      >
+                        {em || username.slice(0, 1).toLowerCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tab === "banner" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    custom banner image or animated gif
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "6px" }}>
+                    <input
+                      ref={bannerFileRef}
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        void handleFileUpload("banner", file);
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="chat-gif-more-btn"
+                      onClick={() => bannerFileRef.current?.click()}
+                    >
+                      <i class="fa-solid fa-upload" /> upload banner / gif
+                    </button>
+                    <button
+                      type="button"
+                      class="chat-gif-more-btn"
+                      onClick={() =>
+                        setGifPickerFor((p) => (p === "banner" ? null : "banner"))
+                      }
+                    >
+                      <i class="fa-solid fa-film" /> pick klipy banner gif
+                    </button>
+                    {custom.bannerUrl && (
+                      <button
+                        type="button"
+                        class="chat-gif-more-btn"
+                        onClick={() => updateField("bannerUrl", "")}
+                      >
+                        use animated preset instead
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="url"
+                    class="chat-mod-input"
+                    placeholder="or paste https:// banner image / gif url..."
+                    value={custom.bannerUrl.startsWith("data:") ? "" : custom.bannerUrl}
+                    onInput={(e) =>
+                      updateField("bannerUrl", (e.target as HTMLInputElement).value.trim())
+                    }
+                  />
+                </div>
+
+                {gifPickerFor === "banner" && (
+                  <div
+                    style={{
+                      background: "var(--bg-surface-3)",
+                      border: "1px solid var(--bg-surface-10)",
+                      borderRadius: "10px",
+                      padding: "8px",
+                    }}
+                  >
+                    <input
+                      type="text"
+                      class="chat-mod-input"
+                      placeholder="search klipy gifs for your banner..."
+                      value={gifQuery}
+                      onInput={(e) => setGifQuery((e.target as HTMLInputElement).value)}
+                      style={{ marginBottom: "6px" }}
+                    />
+                    {gifLoading ? (
+                      <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                        loading klipy gifs...
+                      </div>
+                    ) : (
+                      <div class="chat-gif-grid" style={{ maxHeight: "150px", overflowY: "auto" }}>
+                        {gifHits.map((g) => (
+                          <button
+                            key={g.id}
+                            type="button"
+                            class="chat-gif-item"
+                            style={{ height: "64px" }}
+                            onClick={() => {
+                              updateField("bannerUrl", g.url);
+                              setGifPickerFor(null);
+                            }}
+                          >
+                            <img src={getSafeMediaProxySrc(g.previewUrl)} alt={g.title} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    animated banner presets
+                  </div>
+                  <div class="chat-customizer-grid">
+                    {BANNER_STYLES.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${
+                          !custom.bannerUrl && custom.bannerStyle === opt.id ? "active" : ""
+                        }`}
+                        onClick={() => {
+                          updateField("bannerUrl", "");
+                          updateField("bannerStyle", opt.id);
+                        }}
+                      >
+                        <span>{opt.label}</span>
+                        {opt.animated && <i class="fa-solid fa-sparkles" style={{ fontSize: "9px" }} />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    full-card animated profile effects
+                  </div>
+                  <div class="chat-customizer-grid">
+                    {PROFILE_EFFECTS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${
+                          custom.profileEffect === opt.id ? "active" : ""
+                        }`}
+                        onClick={() => updateField("profileEffect", opt.id)}
+                      >
+                        <span>{opt.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tab === "theme" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    animated username effect
+                  </div>
+                  <div class="chat-customizer-grid">
+                    {NAME_STYLES.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${custom.nameStyle === opt.id ? "active" : ""}`}
+                        onClick={() => updateField("nameStyle", opt.id)}
+                      >
+                        <span class={opt.id !== "default" ? `name-${opt.id}` : ""}>
+                          {opt.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    username font & bio card style
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "6px" }}>
+                    {NAME_FONTS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${custom.nameFont === opt.id ? "active" : ""}`}
+                        onClick={() => updateField("nameFont", opt.id)}
+                      >
+                        <span class={opt.id !== "default" ? `name-font-${opt.id}` : ""}>
+                          {opt.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                    {BIO_STYLES.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${custom.bioStyle === opt.id ? "active" : ""}`}
+                        onClick={() => updateField("bioStyle", opt.id)}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    animated member list nameplate
+                  </div>
+                  <div class="chat-customizer-grid">
+                    {NAMEPLATES.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${custom.nameplate === opt.id ? "active" : ""}`}
+                        onClick={() => updateField("nameplate", opt.id)}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    profile card theme & tint
+                  </div>
+                  <div class="chat-customizer-grid" style={{ marginBottom: "6px" }}>
+                    {CARD_THEMES.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${custom.cardTheme === opt.id ? "active" : ""}`}
+                        onClick={() => {
+                          updateField("cardTheme", opt.id);
+                          updateField("cardBgColor", "");
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div class="chat-swatch-row">
+                    {CARD_BG_SWATCHES.map((col) => (
+                      <button
+                        key={col || "auto"}
+                        type="button"
+                        class={`chat-swatch-dot ${custom.cardBgColor === col ? "active" : ""}`}
+                        style={{
+                          backgroundColor: col || "#27272a",
+                          borderStyle: col ? "solid" : "dashed",
+                        }}
+                        title={col || "Theme default"}
+                        onClick={() => updateField("cardBgColor", col)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              class="chat-auth-login-btn"
+              disabled={saving}
+              style={{ marginTop: "auto", padding: "9px 14px", width: "100%" }}
+              onClick={() => void onSave({ bio, statusText, customization: custom })}
+            >
+              {saving ? "saving profile..." : "save profile & effects"}
+            </button>
+          </div>
+
+          {/* RIGHT: LIVE PREVIEW */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div class="chat-profile-section-title">live preview</div>
+
+            {/* Preview Profile Card */}
+            <div
+              class={`chat-profile-card theme-${custom.cardTheme} ${
+                custom.profileEffect === "lightning-border" ? "effect-lightning-border" : ""
+              }`}
+              style={{
+                maxWidth: "100%",
+                maxHeight: "none",
+                ...(custom.cardBgColor ? { background: custom.cardBgColor } : {}),
+              }}
+            >
+              <ProfileEffectLayer effect={custom.profileEffect} />
+              <div class="chat-profile-scroll">
+                <div class={`chat-profile-banner ${bannerClass}`} style={bannerStyle} />
+                <div class="chat-profile-body">
+                  <div class="chat-profile-top-row">
+                    <UserAvatar
+                      username={username}
+                      custom={custom}
+                      className="chat-profile-avatar-lg"
+                    >
+                      <span class={`chat-profile-status-dot ${custom.presenceStatus}`} />
+                    </UserAvatar>
+                    <div class="chat-profile-badges">
+                      {custom.customTag && (
+                        <span class="chat-role-badge custom-tag">{custom.customTag}</span>
+                      )}
+                      <span class="chat-profile-badge verified">
+                        <i class="fa-solid fa-cloud" /> cloudsync
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="chat-profile-identity">
+                    <div class="chat-profile-name-row">
+                      <h3 class={`chat-profile-username ${getNameClasses(custom)}`}>
+                        {displayLabel}
+                      </h3>
+                      <RoleBadge role={role} />
+                    </div>
+                    <div class="chat-profile-handle-row">
+                      <span>@{username}</span>
+                      {custom.pronouns && <span>· {custom.pronouns}</span>}
+                    </div>
+                    {statusText && (
+                      <div class="chat-profile-custom-status">{statusText}</div>
+                    )}
+                  </div>
+
+                  <div class={`chat-profile-section chat-profile-bio-card ${bioClass}`}>
+                    <div class="chat-profile-bio-text">
+                      {bio || "looking amazing! edit your bio, banner gif, or avatar frame."}
+                    </div>
+                    <div class="chat-profile-joined">
+                      <i class="fa-solid fa-calendar-days" /> joined{" "}
+                      {createdAt ? new Date(createdAt).toLocaleDateString() : "recently"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Mini Chat + Member Preview */}
+            <div
+              style={{
+                background: "var(--bg-surface-3)",
+                border: "1px solid var(--bg-surface-10)",
+                borderRadius: "12px",
+                padding: "8px 10px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+              }}
+            >
+              <div class={`chat-user-item ${nameplateClass}`} style={{ padding: "5px 8px" }}>
+                <div class="chat-user-avatar-wrap">
+                  <UserAvatar
+                    username={username}
+                    custom={custom}
+                    className="chat-user-avatar"
+                  />
+                  <div class={`chat-user-dot ${custom.presenceStatus}`} />
+                </div>
+                <div class="chat-user-meta">
+                  <div class="chat-user-name-row">
+                    <span class={`chat-user-name ${getNameClasses(custom)}`}>
+                      {displayLabel}
+                    </span>
+                    <RoleBadge role={role} />
+                  </div>
+                  <div class="chat-user-status-sub">
+                    {statusText || "member nameplate preview"}
+                  </div>
+                </div>
+              </div>
+
+              <div class="chat-entry" style={{ padding: "2px 4px" }}>
+                <UserAvatar
+                  username={username}
+                  custom={custom}
+                  className="chat-entry-avatar"
+                />
+                <div class="chat-entry-content">
+                  <div class="chat-entry-header">
+                    <span class={`chat-entry-author ${getNameClasses(custom)}`}>
+                      {displayLabel}
+                    </span>
+                    <RoleBadge role={role} />
+                    <span class="chat-entry-time">just now</span>
+                  </div>
+                  <div class="chat-entry-text">new animated profile look in #general ✨</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

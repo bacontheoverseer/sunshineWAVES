@@ -511,6 +511,22 @@ export default function SettingsMenu() {
                 onChange={(v) => handleSetting("theme", v, setTheme)}
               />
             </div>
+            <div class="settings-item">
+              <label>chat profile &amp; animations</label>
+              <p>customize your pfp, gif banner, animated frames, name effects, card overlays &amp; badges.</p>
+              <button
+                type="button"
+                class="legal-pill-btn"
+                onClick={() => {
+                  toggleMenu();
+                  window.setTimeout(() => {
+                    window.dispatchEvent(new CustomEvent("openProfileCustomizer"));
+                  }, 140);
+                }}
+              >
+                <i class="fa-solid fa-wand-magic-sparkles" /> customize profile
+              </button>
+            </div>
           </div>
 
           <div

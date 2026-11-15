@@ -822,10 +822,23 @@ app.get("/api/stuff", (_req, res) => {
 // --- Sunshine Live Client & Chaos Admin Engine ---
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "cookie_admin_chaos_master_key_99";
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "bacon";
+const OWNER_USERNAMES = new Set(
+  (process.env.OWNER_USERNAMES || "bacontheoverseer,bacon")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+);
+const ENV_STAFF_MODS = (process.env.STAFF_MODERATORS || "")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
 const liveClients = new Map();
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
-const userProfiles = new Map(); // usernameLower -> { bio, statusText, updatedAt }
+const userProfiles = new Map(); // usernameLower -> { bio, statusText, customization, updatedAt }
+const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
+const chatTimeouts = new Map(); // usernameLower -> { until, reason, by, updatedAt }
+let chatMetaLoadedFromDb = false;
 
 const CLOUDSYNC_JWT_SECRET =
   process.env.JWT_SECRET || "dev_jwt_secret_cookie_super_safe_key_123";
@@ -899,12 +912,211 @@ function getSharedCloudSyncDb() {
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS app_kv (
+          k TEXT PRIMARY KEY,
+          v TEXT NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
       `);
       cloudSyncDbInitialized = true;
     }
   }
   return sharedCloudSyncDb;
+}
+
+function kvGetJson(key, fallback) {
+  try {
+    const db = getSharedCloudSyncDb();
+    const row = db.query("SELECT v FROM app_kv WHERE k = ?").get(String(key));
+    if (row && typeof row.v === "string") {
+      return JSON.parse(row.v);
+    }
+  } catch {}
+  return fallback;
+}
+
+function kvSetJson(key, value) {
+  try {
+    const db = getSharedCloudSyncDb();
+    db.query("INSERT OR REPLACE INTO app_kv (k, v, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(
+      String(key),
+      JSON.stringify(value)
+    );
+  } catch (e) {
+    console.warn("kvSetJson warning:", e?.message);
+  }
+}
+
+const VALID_AVATAR_DECORATIONS = new Set([
+  "none", "angel-bloom", "cyber-ring", "flame-aura", "prism-spin", "glitch-ring",
+  "sakura-orbit", "frost-pulse", "void-vortex", "gold-royal", "kitty-neon", "dragon-crest",
+]);
+const VALID_BANNER_STYLES = new Set([
+  "solid", "animated-aurora", "animated-cybergrid", "animated-starfield",
+  "animated-plasma", "animated-sunset", "animated-sakura", "animated-void", "animated-gold",
+]);
+const VALID_NAME_STYLES = new Set([
+  "default", "gradient-sunset", "gradient-ocean", "gradient-crimson",
+  "animated-rainbow", "animated-fire", "animated-cyber", "animated-galaxy", "animated-gold",
+]);
+const VALID_NAME_FONTS = new Set(["default", "mono", "serif", "rounded", "wide"]);
+const VALID_NAMEPLATES = new Set([
+  "none", "aurora-mist", "ember-sparks", "cyber-scan", "sakura-breeze",
+  "starlight-shimmer", "nebula-flow", "crimson-velvet",
+]);
+const VALID_PROFILE_EFFECTS = new Set([
+  "none", "starlight-petals", "sakura-fall", "shooting-stars",
+  "confetti-pop", "rain-drops", "fireflies", "lightning-border", "snowflakes",
+]);
+const VALID_CARD_THEMES = new Set([
+  "obsidian", "midnight-glass", "crimson-noir", "emerald-cyber", "sakura-velvet", "royal-gold",
+]);
+const VALID_BIO_STYLES = new Set(["frosted", "minimal", "neon-border", "accent-tint"]);
+const VALID_PRESENCE_STATUS = new Set(["online", "idle", "dnd"]);
+const VALID_AVATAR_EMOJIS = new Set([
+  "", "🍪", "👑", "⚡", "🔥", "🎮", "👾", "💎", "🌟", "🚀", "🦊", "🐱", "🌙", "🎧", "💀", "🌸",
+]);
+
+function sanitizeHexColorServer(val, fallback) {
+  if (typeof val === "string" && /^#[0-9a-f]{6}$/i.test(val.trim())) {
+    return val.trim().toLowerCase();
+  }
+  return fallback;
+}
+
+function sanitizeCustomMediaUrlServer(val) {
+  if (typeof val !== "string") return "";
+  const s = val.trim();
+  if (!s || s.length > 450000) return "";
+  if (/^data:image\/(png|jpeg|jpg|webp|gif|avif);base64,[a-zA-Z0-9+/=]+$/i.test(s)) {
+    return s;
+  }
+  if (s.length > 1000) return "";
+  try {
+    const parsed = new URL(s);
+    return parsed.protocol === "https:" ? s : "";
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeProfileCustomizationServer(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const emoji = typeof src.avatarEmoji === "string" ? src.avatarEmoji.trim() : "";
+  return {
+    displayName: typeof src.displayName === "string" ? src.displayName.trim().slice(0, 32) : "",
+    pronouns: typeof src.pronouns === "string" ? src.pronouns.trim().slice(0, 24) : "",
+    customTag: typeof src.customTag === "string" ? src.customTag.trim().slice(0, 18) : "",
+    avatarUrl: sanitizeCustomMediaUrlServer(src.avatarUrl),
+    bannerUrl: sanitizeCustomMediaUrlServer(src.bannerUrl),
+    avatarColor: sanitizeHexColorServer(src.avatarColor, ""),
+    avatarSecondary: sanitizeHexColorServer(src.avatarSecondary, "#18181b"),
+    cardBgColor: sanitizeHexColorServer(src.cardBgColor, ""),
+    avatarEmoji: VALID_AVATAR_EMOJIS.has(emoji) ? emoji : "",
+    avatarDecoration: VALID_AVATAR_DECORATIONS.has(src.avatarDecoration) ? src.avatarDecoration : "none",
+    bannerStyle: VALID_BANNER_STYLES.has(src.bannerStyle) ? src.bannerStyle : "solid",
+    nameStyle: VALID_NAME_STYLES.has(src.nameStyle) ? src.nameStyle : "default",
+    nameFont: VALID_NAME_FONTS.has(src.nameFont) ? src.nameFont : "default",
+    nameplate: VALID_NAMEPLATES.has(src.nameplate) ? src.nameplate : "none",
+    profileEffect: VALID_PROFILE_EFFECTS.has(src.profileEffect) ? src.profileEffect : "none",
+    cardTheme: VALID_CARD_THEMES.has(src.cardTheme) ? src.cardTheme : "obsidian",
+    bioStyle: VALID_BIO_STYLES.has(src.bioStyle) ? src.bioStyle : "frosted",
+    presenceStatus: VALID_PRESENCE_STATUS.has(src.presenceStatus) ? src.presenceStatus : "online",
+  };
+}
+
+function ensureChatMetaLoaded() {
+  if (chatMetaLoadedFromDb) return;
+  chatMetaLoadedFromDb = true;
+  const savedMods = kvGetJson("staff_moderators_v1", []);
+  if (Array.isArray(savedMods)) {
+    for (const u of savedMods) {
+      const clean = String(u || "").trim().toLowerCase();
+      if (clean && !OWNER_USERNAMES.has(clean)) staffModerators.add(clean);
+    }
+  }
+  const savedProfiles = kvGetJson("user_profiles_v2", {});
+  if (savedProfiles && typeof savedProfiles === "object") {
+    for (const [k, v] of Object.entries(savedProfiles)) {
+      if (k && v && typeof v === "object") {
+        userProfiles.set(k.toLowerCase(), v);
+      }
+    }
+  }
+  const savedTimeouts = kvGetJson("chat_timeouts_v1", {});
+  if (savedTimeouts && typeof savedTimeouts === "object") {
+    const now = Date.now();
+    for (const [k, v] of Object.entries(savedTimeouts)) {
+      if (k && v && typeof v === "object") {
+        if (v.until === -1 || Number(v.until) > now) {
+          chatTimeouts.set(k.toLowerCase(), v);
+        }
+      }
+    }
+  }
+  const savedHistory = kvGetJson("chat_history_v1", []);
+  if (Array.isArray(savedHistory) && typeof chatHistory !== "undefined" && chatHistory.length === 0) {
+    for (const m of savedHistory.slice(-250)) {
+      if (m && typeof m === "object" && m.id && m.author && m.channel) {
+        chatHistory.push(m);
+      }
+    }
+  }
+}
+
+function persistStaffMods() {
+  kvSetJson("staff_moderators_v1", Array.from(staffModerators));
+}
+
+function persistUserProfiles() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of userProfiles.entries()) {
+    out[k] = v;
+    if (++count >= 1000) break;
+  }
+  kvSetJson("user_profiles_v2", out);
+}
+
+function persistChatTimeouts() {
+  const out = {};
+  const now = Date.now();
+  for (const [k, v] of chatTimeouts.entries()) {
+    if (v && (v.until === -1 || Number(v.until) > now)) {
+      out[k] = v;
+    }
+  }
+  kvSetJson("chat_timeouts_v1", out);
+}
+
+function persistChatHistory() {
+  if (typeof chatHistory !== "undefined") {
+    kvSetJson("chat_history_v1", chatHistory.slice(-250));
+  }
+}
+
+function getUserChatRole(username) {
+  ensureChatMetaLoaded();
+  const key = String(username || "").trim().toLowerCase();
+  if (!key) return "member";
+  if (OWNER_USERNAMES.has(key)) return "owner";
+  if (staffModerators.has(key)) return "mod";
+  return "member";
+}
+
+function getActiveTimeout(username) {
+  ensureChatMetaLoaded();
+  const key = String(username || "").trim().toLowerCase();
+  if (!key) return null;
+  const entry = chatTimeouts.get(key);
+  if (!entry) return null;
+  if (entry.until !== -1 && Number(entry.until) <= Date.now()) {
+    chatTimeouts.delete(key);
+    persistChatTimeouts();
+    return null;
+  }
+  return entry;
 }
 
 const sharedCloudSyncDbHandle = {
@@ -1610,6 +1822,7 @@ function touchKnownUser(username, extra = {}) {
 }
 
 function getPresenceSnapshot() {
+  ensureChatMetaLoaded();
   const csMap = getCloudSyncUsersMap();
   const now = Date.now();
 
@@ -1647,6 +1860,8 @@ function getPresenceSnapshot() {
     const csRecord = csMap.get(key);
     const canonicalName = csRecord ? csRecord.username : clean;
     const prof = userProfiles.get(key) || {};
+    const timeoutEntry = getActiveTimeout(key);
+    const role = getUserChatRole(canonicalName);
     const existing = onlineByUsername.get(key);
     // Prefer the session that is actively playing a game or most recently seen
     if (!existing || (c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen) {
@@ -1661,6 +1876,10 @@ function getPresenceSnapshot() {
         lastSeen: c.lastSeen,
         bio: prof.bio || "",
         statusText: prof.statusText || "",
+        customization: prof.customization || null,
+        role,
+        isTimedOut: Boolean(timeoutEntry),
+        timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
         createdAt: csRecord?.createdAt || null,
       });
     }
@@ -1672,8 +1891,10 @@ function getPresenceSnapshot() {
     if (!onlineByUsername.has(key)) {
       const csRecord = csMap.get(key);
       const prof = userProfiles.get(key) || {};
+      const canonicalName = csRecord ? csRecord.username : u.username;
+      const timeoutEntry = getActiveTimeout(key);
       offlineUsers.push({
-        username: csRecord ? csRecord.username : u.username,
+        username: canonicalName,
         online: false,
         game: "",
         isPlayingGame: false,
@@ -1681,6 +1902,10 @@ function getPresenceSnapshot() {
         lastSeen: u.lastSeen || 0,
         bio: prof.bio || "",
         statusText: prof.statusText || "",
+        customization: prof.customization || null,
+        role: getUserChatRole(canonicalName),
+        isTimedOut: Boolean(timeoutEntry),
+        timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
         createdAt: csRecord?.createdAt || null,
       });
     }
@@ -1745,11 +1970,12 @@ setInterval(() => {
         if (now - lastSeen > 24 * 60 * 60 * 1000) knownUsers.delete(uname);
       }
     }
-    if (userProfiles.size > 300) {
+    if (userProfiles.size > 1000) {
       for (const [uname] of userProfiles.entries()) {
         if (!knownUsers.has(uname)) userProfiles.delete(uname);
-        if (userProfiles.size <= 300) break;
+        if (userProfiles.size <= 1000) break;
       }
+      persistUserProfiles();
     }
   }
   if (heartbeatTick % 20 === 0 && sharedCloudSyncDb) {
@@ -2802,6 +3028,87 @@ app.get("/api/chat/gif-proxy", async (req, res) => {
   }
 });
 
+const chatImageProxyCache = new LRUCache({
+  maxSize: 24 * 1024 * 1024,
+  ttl: 1000 * 60 * 30,
+  ttlAutopurge: true,
+  sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
+});
+
+const ALLOWED_IMAGE_PROXY_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+]);
+
+app.get("/api/chat/image-proxy", async (req, res) => {
+  const rawUrl = String(req.query?.url || "").trim();
+  if (!rawUrl || rawUrl.length > 1000) {
+    return res.status(400).send("Invalid image URL");
+  }
+
+  const cached = chatImageProxyCache.get(rawUrl);
+  if (cached) {
+    res.setHeader("Content-Type", cached.contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.send(cached.body);
+  }
+
+  try {
+    let targetUrl = rawUrl;
+    let upstream = null;
+    for (let hops = 0; hops < 4; hops++) {
+      const validated = await validatePublicHttpUrl(targetUrl);
+      if (!validated || validated.protocol !== "https:") {
+        return res.status(403).send("Only public HTTPS image URLs are allowed");
+      }
+      upstream = await fetch(validated.href, {
+        redirect: "manual",
+        headers: {
+          "User-Agent": MOCHI_FALLBACK_UA,
+          Accept: "image/avif,image/webp,image/gif,image/png,image/jpeg,*/*;q=0.5",
+        },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (upstream.status >= 300 && upstream.status < 400) {
+        const loc = upstream.headers.get("location");
+        if (!loc) break;
+        targetUrl = new URL(loc, validated.href).href;
+        continue;
+      }
+      break;
+    }
+
+    if (!upstream || !upstream.ok) {
+      return res.status(502).send("Failed to fetch remote image");
+    }
+
+    const contentType = (upstream.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (!ALLOWED_IMAGE_PROXY_MIMES.has(contentType)) {
+      return res.status(415).send("Unsupported image type");
+    }
+
+    const body = await readLimitedResponseBuffer(upstream, 4 * 1024 * 1024);
+    if (!body || body.length === 0) {
+      return res.status(413).send("Image empty or exceeds 4MB limit");
+    }
+
+    chatImageProxyCache.set(rawUrl, { body, contentType });
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.send(body);
+  } catch {
+    return res.status(502).send("Failed to fetch remote image");
+  }
+});
+
 app.post("/api/chat/moderate", async (req, res) => {
   try {
     const { text } = req.body || {};
@@ -2812,12 +3119,38 @@ app.post("/api/chat/moderate", async (req, res) => {
   }
 });
 
+async function getModActor(req) {
+  ensureChatMetaLoaded();
+  const keyHeader =
+    req.headers["x-admin-key"] ||
+    req.query?.adminKey ||
+    (req.body && req.body.adminSecret) ||
+    "";
+  const hasAdminSecret = Boolean(keyHeader && keyHeader === ADMIN_SECRET);
+  const authUser = await getAuthenticatedCloudSyncUser(req);
+  const usernameLower = authUser ? authUser.username.toLowerCase() : "";
+  const role = hasAdminSecret
+    ? "owner"
+    : authUser
+      ? getUserChatRole(authUser.username)
+      : "member";
+  return {
+    hasAdminSecret,
+    authUser,
+    username: hasAdminSecret && !authUser ? ADMIN_USERNAME : authUser?.username || "",
+    usernameLower,
+    role,
+    isOwner: role === "owner",
+    isMod: role === "owner" || role === "mod",
+  };
+}
+
 app.get("/api/chat/state", async (req, res) => {
+  ensureChatMetaLoaded();
   const [authUser] = await Promise.all([
     getAuthenticatedCloudSyncUser(req),
     getCloudSyncUsersMapAsync().catch(() => null),
   ]);
-  const rawUser = authUser ? authUser.username : (req.query.user || req.query.username || "").toString();
   const verifiedUserKey = authUser ? authUser.username.toLowerCase() : "";
   if (authUser) touchKnownUser(authUser.username);
 
@@ -2835,6 +3168,8 @@ app.get("/api/chat/state", async (req, res) => {
   }
 
   const presence = getPresenceSnapshot();
+  const selfRole = authUser ? getUserChatRole(authUser.username) : "member";
+  const selfTimeout = authUser ? getActiveTimeout(authUser.username) : null;
 
   res.json({
     success: true,
@@ -2843,10 +3178,15 @@ app.get("/api/chat/state", async (req, res) => {
     onlineUsers: presence.onlineUsers,
     offlineUsers: presence.offlineUsers,
     registeredUsers: presence.registeredUsers,
+    staffMods: Array.from(staffModerators),
+    ownerUsers: Array.from(OWNER_USERNAMES),
+    selfRole,
+    selfTimeout,
   });
 });
 
 app.get("/api/chat/user-profile", async (req, res) => {
+  ensureChatMetaLoaded();
   const rawTarget = (req.query.username || req.query.user || "").toString().trim();
   if (!rawTarget) {
     return res.status(400).json({ success: false, exists: false, error: "username is required" });
@@ -2881,6 +3221,7 @@ app.get("/api/chat/user-profile", async (req, res) => {
   const onlineEntry = presence.onlineUsers.find((u) => u.username.toLowerCase() === key);
   const offlineEntry = presence.offlineUsers.find((u) => u.username.toLowerCase() === key);
   const prof = userProfiles.get(key) || {};
+  const timeoutEntry = getActiveTimeout(key);
 
   // Gather per-game leaderboard stats for this user
   let totalSeconds = 0;
@@ -2917,6 +3258,11 @@ app.get("/api/chat/user-profile", async (req, res) => {
       cloudSyncVerified: Boolean(csUser),
       bio: prof.bio || "",
       statusText: prof.statusText || "",
+      customization: prof.customization || null,
+      role: getUserChatRole(canonicalName),
+      isTimedOut: Boolean(timeoutEntry),
+      timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
+      timeoutReason: timeoutEntry ? timeoutEntry.reason || "" : "",
       online: Boolean(onlineEntry),
       game: onlineEntry ? onlineEntry.game || "browsing" : "",
       isPlayingGame: Boolean(onlineEntry?.isPlayingGame),
@@ -2942,12 +3288,13 @@ app.get("/api/chat/user-profile", async (req, res) => {
 });
 
 app.post("/api/chat/user-profile", async (req, res) => {
+  ensureChatMetaLoaded();
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
     if (!authUser) {
       return res.status(401).json({ success: false, error: "Sign in to CloudSync to update your profile" });
     }
-    const { username, bio, statusText } = req.body || {};
+    const { username, bio, statusText, customization } = req.body || {};
     const cleanUser = (username || authUser.username).toString().trim();
     const key = cleanUser.toLowerCase();
     if (authUser.username.toLowerCase() !== key) {
@@ -2961,23 +3308,60 @@ app.post("/api/chat/user-profile", async (req, res) => {
       return res.status(404).json({ success: false, error: "User not found in CloudSync" });
     }
 
-    const cleanBio = (bio || "").toString().trim().slice(0, 220);
-    const cleanStatus = (statusText || "").toString().trim().slice(0, 60);
+    const existing = userProfiles.get(key) || {};
+    const cleanBio =
+      bio !== undefined ? (bio || "").toString().trim().slice(0, 220) : (existing.bio || "");
+    const cleanStatus =
+      statusText !== undefined
+        ? (statusText || "").toString().trim().slice(0, 60)
+        : (existing.statusText || "");
+    const nextCustomization =
+      customization !== undefined
+        ? sanitizeProfileCustomizationServer(customization)
+        : (existing.customization || sanitizeProfileCustomizationServer({}));
 
-    const modCheck = await moderateTextWithOpenAI(`${cleanStatus} ${cleanBio}`);
-    if (modCheck.blocked || modCheck.flagged) {
-      return res.status(400).json({
-        success: false,
-        error: modCheck.reason || "Profile bio/status blocked by moderation",
-      });
+    const textToModerate = [
+      cleanStatus,
+      cleanBio,
+      nextCustomization.displayName,
+      nextCustomization.pronouns,
+      nextCustomization.customTag,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    if (textToModerate) {
+      const modCheck = await moderateTextWithOpenAI(textToModerate);
+      if (modCheck.blocked || modCheck.flagged) {
+        return res.status(400).json({
+          success: false,
+          error: modCheck.reason || "Profile customization text blocked by moderation",
+        });
+      }
     }
 
     const updated = {
       bio: cleanBio,
       statusText: cleanStatus,
+      customization: nextCustomization,
       updatedAt: new Date().toISOString(),
     };
     userProfiles.set(key, updated);
+    persistUserProfiles();
+
+    // Update cached recent messages authored by this user so avatars/names reflect changes
+    for (let i = 0; i < chatHistory.length; i++) {
+      if (String(chatHistory[i]?.author || "").toLowerCase() === key) {
+        chatHistory[i] = {
+          ...chatHistory[i],
+          role: getUserChatRole(authUser.username),
+          customization: nextCustomization,
+          ...(nextCustomization.avatarColor ? { avatarColor: nextCustomization.avatarColor } : {}),
+        };
+      }
+    }
+    persistChatHistory();
+
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     res.json({ success: true, profile: updated });
   } catch (err) {
@@ -2986,6 +3370,7 @@ app.post("/api/chat/user-profile", async (req, res) => {
 });
 
 app.post("/api/chat/send", async (req, res) => {
+  ensureChatMetaLoaded();
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
     const { message } = req.body || {};
@@ -3000,9 +3385,37 @@ app.post("/api/chat/send", async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
+    const authorName = authUser ? authUser.username : String(message.author).trim().slice(0, 40);
+    const authorKey = authorName.toLowerCase();
+
+    const activeTimeout = getActiveTimeout(authorKey);
+    if (activeTimeout) {
+      const remMsg =
+        activeTimeout.until === -1
+          ? "You are muted in chat by staff"
+          : `You are timed out in chat for ${Math.max(1, Math.ceil((Number(activeTimeout.until) - Date.now()) / 60000))}m`;
+      return res.status(403).json({
+        success: false,
+        timedOut: true,
+        until: activeTimeout.until,
+        error: activeTimeout.reason ? `${remMsg}: ${activeTimeout.reason}` : remMsg,
+      });
+    }
+
+    const authorProf = userProfiles.get(authorKey);
+    const authorCustom = authorProf?.customization || null;
+    const authorRole = getUserChatRole(authorName);
+
     const sanitizedMsg = {
       ...message,
-      author: authUser ? authUser.username : String(message.author).trim().slice(0, 40),
+      author: authorName,
+      role: authorRole,
+      ...(authorCustom
+        ? {
+            customization: authorCustom,
+            ...(authorCustom.avatarColor ? { avatarColor: authorCustom.avatarColor } : {}),
+          }
+        : {}),
       text: cleanText,
       ...(hasValidGif
         ? {
@@ -3054,6 +3467,7 @@ app.post("/api/chat/send", async (req, res) => {
 
     chatHistory.push(sanitizedMsg);
     if (chatHistory.length > 500) chatHistory.shift();
+    persistChatHistory();
 
     // Broadcast via SSE to connected clients
     const eventPayload = {
@@ -3077,6 +3491,262 @@ app.post("/api/chat/send", async (req, res) => {
     }
 
     res.json({ success: true, message: sanitizedMsg });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- Staff Moderator Selection & Chat Moderation Endpoints ---
+app.get("/api/chat/staff", async (req, res) => {
+  ensureChatMetaLoaded();
+  const actor = await getModActor(req);
+  const csMap = await getCloudSyncUsersMapAsync().catch(() => new Map());
+  const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
+
+  const timeoutsList = [];
+  if (actor.isMod) {
+    for (const [uname, t] of chatTimeouts.entries()) {
+      if (t && (t.until === -1 || Number(t.until) > Date.now())) {
+        timeoutsList.push({
+          username: csMap.get(uname)?.username || uname,
+          until: t.until,
+          reason: t.reason || "",
+          by: t.by || "",
+        });
+      }
+    }
+  }
+
+  res.json({
+    success: true,
+    owners: Array.from(OWNER_USERNAMES),
+    staffMods: Array.from(staffModerators).map((m) => csMap.get(m)?.username || m),
+    registeredUsers,
+    timeouts: timeoutsList,
+    actorRole: actor.role,
+  });
+});
+
+app.post("/api/chat/staff", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isOwner) {
+      return res.status(403).json({
+        success: false,
+        error: "Only the site owner can appoint or remove staff moderators",
+      });
+    }
+
+    const rawUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const action = req.body?.action === "remove" ? "remove" : "add";
+    if (!rawUsername || rawUsername.length > 40) {
+      return res.status(400).json({ success: false, error: "Valid username required" });
+    }
+
+    const key = rawUsername.toLowerCase();
+    if (OWNER_USERNAMES.has(key)) {
+      return res.status(400).json({ success: false, error: `@${rawUsername} is already an owner` });
+    }
+
+    let csMap = await getCloudSyncUsersMapAsync();
+    if (action === "add") {
+      if (csMap.size > 0 && !csMap.has(key)) {
+        csMap = await getCloudSyncUsersMapAsync(true);
+      }
+      if (csMap.size > 0 && !csMap.has(key) && !knownUsers.has(key)) {
+        return res.status(404).json({
+          success: false,
+          error: `User "@${rawUsername}" not found in CloudSync`,
+        });
+      }
+      staffModerators.add(key);
+    } else {
+      staffModerators.delete(key);
+    }
+
+    persistStaffMods();
+    const nextRole = getUserChatRole(rawUsername);
+    for (let i = 0; i < chatHistory.length; i++) {
+      if (String(chatHistory[i]?.author || "").toLowerCase() === key) {
+        chatHistory[i] = { ...chatHistory[i], role: nextRole };
+      }
+    }
+    persistChatHistory();
+
+    const canonicalMods = Array.from(staffModerators).map((m) => csMap.get(m)?.username || m);
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    broadcastToClients(
+      {
+        type: "chat-event",
+        event: "STAFF_UPDATED",
+        staffMods: canonicalMods,
+        targetUsername: csMap.get(key)?.username || rawUsername,
+        role: nextRole,
+      },
+      "all"
+    );
+
+    res.json({
+      success: true,
+      staffMods: canonicalMods,
+      targetUsername: csMap.get(key)?.username || rawUsername,
+      role: nextRole,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/mod/delete-message", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const actor = await getModActor(req);
+    const messageId = String(req.body?.messageId || "").trim();
+    if (!messageId) {
+      return res.status(400).json({ success: false, error: "messageId required" });
+    }
+
+    const idx = chatHistory.findIndex((m) => m.id === messageId);
+    const targetMsg = idx >= 0 ? chatHistory[idx] : null;
+    const isAuthor =
+      Boolean(targetMsg && actor.usernameLower && targetMsg.author?.toLowerCase() === actor.usernameLower);
+
+    if (!actor.isMod && !isAuthor) {
+      return res.status(403).json({
+        success: false,
+        error: "Only staff moderators or the message author can delete this message",
+      });
+    }
+    if (targetMsg && targetMsg.channel?.startsWith("dm:") && !isAuthor) {
+      return res.status(403).json({ success: false, error: "Cannot delete private DMs" });
+    }
+
+    if (idx >= 0) {
+      chatHistory.splice(idx, 1);
+      persistChatHistory();
+    }
+
+    broadcastToClients(
+      {
+        type: "chat-event",
+        event: "MESSAGE_DELETED",
+        messageId,
+        channel: targetMsg?.channel || "",
+        by: actor.username || "staff",
+      },
+      "all"
+    );
+    res.json({ success: true, messageId });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/mod/clear-channel", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff moderator permissions required" });
+    }
+    const channel = String(req.body?.channel || "").trim();
+    const targetUsername = String(req.body?.targetUsername || "").trim().replace(/^@/, "");
+    const targetLower = targetUsername.toLowerCase();
+
+    if (!channel && !targetLower) {
+      return res.status(400).json({ success: false, error: "channel or targetUsername required" });
+    }
+    if (channel.startsWith("dm:")) {
+      return res.status(403).json({ success: false, error: "Cannot purge DM channels" });
+    }
+
+    let removed = 0;
+    for (let i = chatHistory.length - 1; i >= 0; i--) {
+      const m = chatHistory[i];
+      if (!m || String(m.channel || "").startsWith("dm:")) continue;
+      const matchesChan = !channel || m.channel === channel;
+      const matchesUser = !targetLower || String(m.author || "").toLowerCase() === targetLower;
+      if (matchesChan && matchesUser) {
+        chatHistory.splice(i, 1);
+        removed++;
+      }
+    }
+    if (removed > 0) persistChatHistory();
+
+    broadcastToClients(
+      {
+        type: "chat-event",
+        event: "CHANNEL_CLEARED",
+        channel,
+        targetUsername,
+        by: actor.username || "staff",
+      },
+      "all"
+    );
+    res.json({ success: true, removed });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/mod/timeout", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff moderator permissions required" });
+    }
+    const targetUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const targetKey = targetUsername.toLowerCase();
+    if (!targetKey) {
+      return res.status(400).json({ success: false, error: "username required" });
+    }
+    if (OWNER_USERNAMES.has(targetKey)) {
+      return res.status(403).json({ success: false, error: "Cannot timeout the site owner" });
+    }
+    if (staffModerators.has(targetKey) && !actor.isOwner) {
+      return res.status(403).json({ success: false, error: "Only the owner can timeout another moderator" });
+    }
+
+    const durationMinutes = Number(req.body?.durationMinutes ?? 5);
+    const reason = String(req.body?.reason || "").trim().slice(0, 140);
+
+    let entry = null;
+    if (durationMinutes === 0) {
+      chatTimeouts.delete(targetKey);
+    } else {
+      const until = durationMinutes < 0 ? -1 : Date.now() + Math.min(43200, durationMinutes) * 60 * 1000;
+      entry = {
+        until,
+        reason,
+        by: actor.username || "staff",
+        updatedAt: new Date().toISOString(),
+      };
+      chatTimeouts.set(targetKey, entry);
+    }
+    persistChatTimeouts();
+
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    broadcastToClients(
+      {
+        type: "chat-event",
+        event: "MOD_UPDATE",
+        action: durationMinutes === 0 ? "unmute" : "timeout",
+        username: targetUsername,
+        until: entry ? entry.until : 0,
+        reason,
+        by: actor.username || "staff",
+      },
+      "all"
+    );
+
+    res.json({
+      success: true,
+      username: targetUsername,
+      until: entry ? entry.until : 0,
+      reason,
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

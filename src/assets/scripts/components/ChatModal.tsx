@@ -2,11 +2,30 @@ import { useEffect, useRef, useState, useMemo, useCallback } from "preact/hooks"
 import { moderateChatMessage } from "../core/contentFilter.ts";
 import { getClientId, detectCurrentGameSession } from "../core/liveClient.ts";
 import { formatPlayTime } from "../core/cookieCoins.ts";
+import {
+  ChatRole,
+  ProfileCustomization,
+  getBannerInlineStyle,
+  getDefaultCustomization,
+  loadLocalProfileCustomization,
+  sanitizeCustomization,
+  saveLocalProfileCustomization,
+} from "../core/profileCustomization.ts";
+import ProfileCustomizerModal from "./ProfileCustomizerModal.tsx";
+import StaffManagerModal from "./StaffManagerModal.tsx";
+import {
+  ProfileEffectLayer,
+  RoleBadge,
+  UserAvatar,
+  getNameClasses,
+} from "./ProfileVisuals.tsx";
 
 interface ChatMessage {
   id: string;
   author: string;
   avatarColor: string;
+  role?: ChatRole;
+  customization?: ProfileCustomization | null;
   text: string;
   gifUrl?: string;
   gifTitle?: string;
@@ -52,6 +71,10 @@ interface OnlineUser {
   lastSeen?: number;
   bio?: string;
   statusText?: string;
+  customization?: ProfileCustomization | null;
+  role?: ChatRole;
+  isTimedOut?: boolean;
+  timeoutUntil?: number;
   createdAt?: string | null;
 }
 
@@ -62,6 +85,11 @@ interface UserProfileDetails {
   cloudSyncVerified: boolean;
   bio: string;
   statusText: string;
+  customization?: ProfileCustomization | null;
+  role?: ChatRole;
+  isTimedOut?: boolean;
+  timeoutUntil?: number;
+  timeoutReason?: string;
   online: boolean;
   game: string;
   isPlayingGame: boolean;
@@ -329,13 +357,23 @@ export default function ChatModal() {
   const [serverOfflineUsers, setServerOfflineUsers] = useState<OnlineUser[]>([]);
   const [registeredCloudSyncUsers, setRegisteredCloudSyncUsers] = useState<string[]>([]);
 
-  // User Profile Modal state (view own profile or any other user's profile)
+  // User Profile Modal & Staff/Mod state
   const [viewingProfileUsername, setViewingProfileUsername] = useState<string | null>(null);
   const [profileData, setProfileData] = useState<UserProfileDetails | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [editingBio, setEditingBio] = useState("");
   const [editingStatusText, setEditingStatusText] = useState("");
+  const [editingCustom, setEditingCustom] = useState<ProfileCustomization>(() =>
+    getDefaultCustomization()
+  );
+  const [showCustomizer, setShowCustomizer] = useState(false);
+  const [showStaffModal, setShowStaffModal] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [staffMods, setStaffMods] = useState<string[]>([]);
+  const [ownerUsers, setOwnerUsers] = useState<string[]>([]);
+  const [selfRole, setSelfRole] = useState<ChatRole>("member");
+  const [selfTimeout, setSelfTimeout] = useState<{ until: number; reason?: string } | null>(null);
+  const hydratedLocalCustomForRef = useRef<string | null>(null);
 
   // Voice Chat state
   const [activeVoiceRoom, setActiveVoiceRoom] = useState<string | null>(null);
@@ -420,6 +458,10 @@ export default function ChatModal() {
             if (cloudUser && clean.toLowerCase() === cloudUser.toLowerCase()) {
               setEditingBio(data.profile.bio || "");
               setEditingStatusText(data.profile.statusText || "");
+              const merged = data.profile.customization
+                ? sanitizeCustomization(data.profile.customization, clean)
+                : loadLocalProfileCustomization(clean) || getDefaultCustomization(clean);
+              setEditingCustom(merged);
             }
           }
         }
@@ -432,14 +474,21 @@ export default function ChatModal() {
     [cloudUser]
   );
 
-  const handleSaveMyProfile = useCallback(
-    async (e?: Event) => {
-      if (e) e.preventDefault();
-      if (!cloudUser || savingProfile) return;
+  const saveProfilePayload = useCallback(
+    async (payload: {
+      bio: string;
+      statusText: string;
+      customization?: ProfileCustomization;
+    }): Promise<boolean> => {
+      if (!cloudUser || savingProfile) return false;
       setSavingProfile(true);
       try {
         let token = "";
         try { token = localStorage.getItem("auth_token") || ""; } catch {}
+        const cleanCustom = sanitizeCustomization(
+          payload.customization || editingCustom,
+          cloudUser
+        );
         const res = await fetch("/api/chat/user-profile", {
           method: "POST",
           headers: {
@@ -448,33 +497,101 @@ export default function ChatModal() {
           },
           body: JSON.stringify({
             username: cloudUser,
-            bio: editingBio,
-            statusText: editingStatusText,
+            bio: payload.bio,
+            statusText: payload.statusText,
+            customization: cleanCustom,
           }),
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data?.success) {
           notifyToast(data?.error || "could not update profile", "error");
-          return;
+          return false;
         }
+        const savedCustom = sanitizeCustomization(
+          data.profile?.customization || cleanCustom,
+          cloudUser
+        );
+        saveLocalProfileCustomization(cloudUser, savedCustom);
+        setEditingCustom(savedCustom);
+        setEditingBio(data.profile?.bio ?? payload.bio);
+        setEditingStatusText(data.profile?.statusText ?? payload.statusText);
         setProfileData((prev) =>
           prev
             ? {
                 ...prev,
-                bio: data.profile?.bio ?? editingBio,
-                statusText: data.profile?.statusText ?? editingStatusText,
+                bio: data.profile?.bio ?? payload.bio,
+                statusText: data.profile?.statusText ?? payload.statusText,
+                customization: savedCustom,
               }
             : prev
         );
-        notifyToast("profile updated!", "success");
+        setServerOnlineUsers((prev) =>
+          prev.map((u) =>
+            u.username.toLowerCase() === cloudUser.toLowerCase()
+              ? {
+                  ...u,
+                  bio: data.profile?.bio ?? payload.bio,
+                  statusText: data.profile?.statusText ?? payload.statusText,
+                  customization: savedCustom,
+                }
+              : u
+          )
+        );
+        notifyToast("profile & animations saved!", "success");
+        return true;
       } catch {
         notifyToast("failed to save profile", "error");
+        return false;
       } finally {
         setSavingProfile(false);
       }
     },
-    [cloudUser, editingBio, editingStatusText, savingProfile]
+    [cloudUser, editingCustom, savingProfile]
   );
+
+  const handleSaveMyProfile = useCallback(
+    async (e?: Event) => {
+      if (e) e.preventDefault();
+      await saveProfilePayload({
+        bio: editingBio,
+        statusText: editingStatusText,
+        customization: editingCustom,
+      });
+    },
+    [saveProfilePayload, editingBio, editingStatusText, editingCustom]
+  );
+
+  const handleOpenCustomizer = useCallback(async () => {
+    if (!cloudUser) {
+      document.dispatchEvent(new CustomEvent("toggleAuthModal"));
+      return;
+    }
+    const localSaved = loadLocalProfileCustomization(cloudUser);
+    if (localSaved) {
+      setEditingCustom(localSaved);
+    } else {
+      setEditingCustom(getDefaultCustomization(cloudUser));
+    }
+    setShowCustomizer(true);
+    try {
+      const res = await fetch(
+        `/api/chat/user-profile?username=${encodeURIComponent(cloudUser)}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.profile) {
+          setProfileData(data.profile);
+          setEditingBio(data.profile.bio || "");
+          setEditingStatusText(data.profile.statusText || "");
+          if (data.profile.customization) {
+            setEditingCustom(
+              sanitizeCustomization(data.profile.customization, cloudUser)
+            );
+          }
+        }
+      }
+    } catch {}
+  }, [cloudUser]);
 
   const openDirectMessage = useCallback(
     async (targetUsername: string) => {
@@ -1172,6 +1289,55 @@ export default function ChatModal() {
           if (Array.isArray(data.offlineUsers)) {
             setServerOfflineUsers(data.offlineUsers);
           }
+          if (Array.isArray(data.staffMods)) {
+            setStaffMods(data.staffMods);
+          }
+          if (Array.isArray(data.ownerUsers)) {
+            setOwnerUsers(data.ownerUsers);
+          }
+          if (typeof data.selfRole === "string") {
+            setSelfRole(data.selfRole as ChatRole);
+          } else {
+            setSelfRole("member");
+          }
+          setSelfTimeout(data.selfTimeout || null);
+
+          if (cloudUser && hydratedLocalCustomForRef.current !== cloudUser.toLowerCase()) {
+            hydratedLocalCustomForRef.current = cloudUser.toLowerCase();
+            const myRecord =
+              (Array.isArray(data.onlineUsers) ? data.onlineUsers : []).find(
+                (u: any) => u?.username?.toLowerCase() === cloudUser.toLowerCase()
+              ) ||
+              (Array.isArray(data.offlineUsers) ? data.offlineUsers : []).find(
+                (u: any) => u?.username?.toLowerCase() === cloudUser.toLowerCase()
+              );
+            const localCustom = loadLocalProfileCustomization(cloudUser);
+            if (myRecord?.customization) {
+              const sanitized = sanitizeCustomization(myRecord.customization, cloudUser);
+              setEditingCustom(sanitized);
+              saveLocalProfileCustomization(cloudUser, sanitized);
+            } else if (localCustom) {
+              setEditingCustom(localCustom);
+              if (authToken) {
+                fetch("/api/chat/user-profile", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${authToken}`,
+                  },
+                  body: JSON.stringify({
+                    bio: myRecord?.bio || "",
+                    statusText: myRecord?.statusText || "",
+                    customization: localCustom,
+                  }),
+                }).catch(() => {});
+              }
+            }
+            if (typeof myRecord?.bio === "string") setEditingBio(myRecord.bio);
+            if (typeof myRecord?.statusText === "string") {
+              setEditingStatusText(myRecord.statusText);
+            }
+          }
           if (Array.isArray(data.registeredUsers)) {
             setRegisteredCloudSyncUsers(data.registeredUsers);
             if (data.registeredUsers.length > 0) {
@@ -1205,14 +1371,74 @@ export default function ChatModal() {
     return () => window.clearInterval(pollInterval);
   }, [cloudUser, isOpen, ingestIncomingMessage]);
 
+  const filterMessagesLocally = useCallback(
+    (predicate: (m: ChatMessage) => boolean) => {
+      setMessages((prev) => {
+        const next = prev.filter(predicate);
+        if (next.length === prev.length) return prev;
+        try {
+          localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    },
+    []
+  );
+
   // Modal open / close handlers, SSE custom events & BroadcastChannel
   useEffect(() => {
     const handleToggle = () => setIsOpen((prev) => !prev);
     const handleClose = () => setIsOpen(false);
+    const onOpenCustomizerEvt = () => {
+      setIsOpen(true);
+      handleOpenCustomizer();
+    };
 
     const onSseChat = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.message) ingestIncomingMessage(detail.message);
+      if (!detail) return;
+      if (detail.message) ingestIncomingMessage(detail.message);
+      if (detail.type === "MESSAGE_DELETED" && detail.messageId) {
+        filterMessagesLocally((m) => m.id !== detail.messageId);
+      } else if (detail.type === "CHANNEL_CLEARED" && detail.channel) {
+        const ch = String(detail.channel);
+        const target = detail.targetUsername ? String(detail.targetUsername).toLowerCase() : "";
+        filterMessagesLocally((m) => {
+          if (m.channel !== ch) return true;
+          if (target && m.author.toLowerCase() !== target) return true;
+          return false;
+        });
+      } else if (detail.type === "STAFF_UPDATED") {
+        if (Array.isArray(detail.staffMods)) setStaffMods(detail.staffMods);
+        if (Array.isArray(detail.ownerUsers)) setOwnerUsers(detail.ownerUsers);
+        if (cloudUser) {
+          const lower = cloudUser.toLowerCase();
+          const owners = Array.isArray(detail.ownerUsers) ? detail.ownerUsers : [];
+          const mods = Array.isArray(detail.staffMods) ? detail.staffMods : [];
+          if (owners.some((u: string) => u.toLowerCase() === lower)) {
+            setSelfRole("owner");
+          } else if (mods.some((u: string) => u.toLowerCase() === lower)) {
+            setSelfRole("mod");
+          } else {
+            setSelfRole("member");
+          }
+        }
+      } else if (detail.type === "MOD_UPDATE" && detail.targetUsername) {
+        const targetLower = String(detail.targetUsername).toLowerCase();
+        if (cloudUser && targetLower === cloudUser.toLowerCase()) {
+          setSelfTimeout(detail.timeout || null);
+        }
+        const updateTimeoutFields = (u: OnlineUser): OnlineUser =>
+          u.username.toLowerCase() === targetLower
+            ? {
+                ...u,
+                isTimedOut: Boolean(detail.timeout),
+                timeoutUntil: Number(detail.timeout?.until) || 0,
+              }
+            : u;
+        setServerOnlineUsers((prev) => prev.map(updateTimeoutFields));
+        setServerOfflineUsers((prev) => prev.map(updateTimeoutFields));
+      }
     };
 
     const onSseVoice = (e: Event) => {
@@ -1236,13 +1462,18 @@ export default function ChatModal() {
 
     document.addEventListener("toggleChatModal", handleToggle);
     document.addEventListener("closeChatModal", handleClose);
+    window.addEventListener("openProfileCustomizer", onOpenCustomizerEvt);
     window.addEventListener("sunshine-chat-event", onSseChat);
     window.addEventListener("sunshine-voice-event", onSseVoice);
     window.addEventListener("sunshine-presence-event", onSsePresence);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isOpen) {
-        if (showGifPicker) {
+        if (showStaffModal) {
+          setShowStaffModal(false);
+        } else if (showCustomizer) {
+          setShowCustomizer(false);
+        } else if (showGifPicker) {
           setShowGifPicker(false);
         } else if (viewingProfileUsername) {
           setViewingProfileUsername(null);
@@ -1268,13 +1499,25 @@ export default function ChatModal() {
     return () => {
       document.removeEventListener("toggleChatModal", handleToggle);
       document.removeEventListener("closeChatModal", handleClose);
+      window.removeEventListener("openProfileCustomizer", onOpenCustomizerEvt);
       window.removeEventListener("sunshine-chat-event", onSseChat);
       window.removeEventListener("sunshine-voice-event", onSseVoice);
       window.removeEventListener("sunshine-presence-event", onSsePresence);
       window.removeEventListener("keydown", handleKeyDown);
       broadcastRef.current?.close();
     };
-  }, [isOpen, showGifPicker, viewingProfileUsername, ingestIncomingMessage, handleVoiceEvent]);
+  }, [
+    isOpen,
+    showStaffModal,
+    showCustomizer,
+    showGifPicker,
+    viewingProfileUsername,
+    cloudUser,
+    ingestIncomingMessage,
+    filterMessagesLocally,
+    handleVoiceEvent,
+    handleOpenCustomizer,
+  ]);
 
   const fetchKlipyGifs = useCallback(
     async (query: string, pageNum: number, append: boolean) => {
@@ -1409,6 +1652,8 @@ export default function ChatModal() {
         id: "msg_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7),
         author: cloudUser,
         avatarColor: stringToColor(cloudUser),
+        role: selfRole,
+        customization: editingCustom,
         text,
         ...(validGif
           ? { gifUrl: validGif.url, gifTitle: validGif.title || "GIF" }
@@ -1441,7 +1686,11 @@ export default function ChatModal() {
       })
         .then(async (res) => {
           if (!res.ok) {
+            filterMessagesLocally((m) => m.id !== newMsg.id);
             const errData = await res.json().catch(() => null);
+            if (errData?.timedOut && errData.until !== undefined) {
+              setSelfTimeout({ until: Number(errData.until) });
+            }
             if (errData?.error) {
               notifyToast(errData.error, "error");
             }
@@ -1452,6 +1701,120 @@ export default function ChatModal() {
       setIsSending(false);
     }
   };
+
+  const handleDeleteMessage = useCallback(
+    async (msg: ChatMessage) => {
+      if (!cloudUser) return;
+      let token = "";
+      try { token = localStorage.getItem("auth_token") || ""; } catch {}
+      if (!token) return;
+      try {
+        const res = await fetch("/api/chat/mod/delete-message", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            messageId: msg.id,
+            channel: msg.channel,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not delete message", "error");
+          return;
+        }
+        filterMessagesLocally((m) => m.id !== msg.id);
+        notifyToast("message deleted", "success");
+      } catch {
+        notifyToast("failed to delete message", "error");
+      }
+    },
+    [cloudUser, filterMessagesLocally]
+  );
+
+  const handleTimeoutUser = useCallback(
+    async (targetUsername: string, durationMinutes: number) => {
+      if (!cloudUser || !targetUsername) return;
+      let token = "";
+      try { token = localStorage.getItem("auth_token") || ""; } catch {}
+      if (!token) return;
+      try {
+        const res = await fetch("/api/chat/mod/timeout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            username: targetUsername,
+            durationMinutes,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not update timeout", "error");
+          return;
+        }
+        if (profileData && profileData.username.toLowerCase() === targetUsername.toLowerCase()) {
+          setProfileData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  isTimedOut: durationMinutes > 0,
+                  timeoutUntil: data.timeout?.until || 0,
+                }
+              : prev
+          );
+        }
+        notifyToast(
+          durationMinutes > 0
+            ? `muted @${targetUsername} (${durationMinutes >= 525600 ? "permanent" : `${durationMinutes}m`})`
+            : `unmuted @${targetUsername}`,
+          "success"
+        );
+      } catch {
+        notifyToast("moderation request failed", "error");
+      }
+    },
+    [cloudUser, profileData]
+  );
+
+  const handlePurgeUserMessages = useCallback(
+    async (targetUsername: string) => {
+      if (!cloudUser || !targetUsername) return;
+      let token = "";
+      try { token = localStorage.getItem("auth_token") || ""; } catch {}
+      if (!token) return;
+      try {
+        const res = await fetch("/api/chat/mod/clear-channel", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            channel: activeChannel,
+            targetUsername,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not purge messages", "error");
+          return;
+        }
+        const lower = targetUsername.toLowerCase();
+        filterMessagesLocally(
+          (m) => !(m.channel === activeChannel && m.author.toLowerCase() === lower)
+        );
+        notifyToast(`cleared @${targetUsername}'s messages in #${activeChannel}`, "success");
+      } catch {
+        notifyToast("failed to purge messages", "error");
+      }
+    },
+    [cloudUser, activeChannel, filterMessagesLocally]
+  );
 
   const handleSendMessage = async (e?: Event) => {
     if (e) e.preventDefault();
@@ -1500,8 +1863,12 @@ export default function ChatModal() {
         game: myGameSession.game,
         isPlayingGame: myGameSession.isPlayingGame,
         gameStartedAt: myGameSession.gameStartedAt,
-        bio: myServerRecord?.bio || "",
-        statusText: myServerRecord?.statusText || "",
+        bio: myServerRecord?.bio ?? editingBio,
+        statusText: myServerRecord?.statusText ?? editingStatusText,
+        customization: editingCustom || myServerRecord?.customization || null,
+        role: (myServerRecord?.role as ChatRole) || selfRole,
+        isTimedOut: Boolean(selfTimeout) || Boolean(myServerRecord?.isTimedOut),
+        timeoutUntil: selfTimeout?.until || Number(myServerRecord?.timeoutUntil) || 0,
         createdAt: myServerRecord?.createdAt || null,
       });
     }
@@ -1521,12 +1888,25 @@ export default function ChatModal() {
           gameStartedAt: Number(su.gameStartedAt) || 0,
           bio: su.bio || "",
           statusText: su.statusText || "",
+          customization: su.customization || null,
+          role: (su.role as ChatRole) || "member",
+          isTimedOut: Boolean(su.isTimedOut),
+          timeoutUntil: Number(su.timeoutUntil) || 0,
           createdAt: su.createdAt || null,
         });
       }
     }
     return Array.from(map.values());
-  }, [cloudUser, serverOnlineUsers, myGameSession]);
+  }, [
+    cloudUser,
+    serverOnlineUsers,
+    myGameSession,
+    editingBio,
+    editingStatusText,
+    editingCustom,
+    selfRole,
+    selfTimeout,
+  ]);
 
   // Offline users: registered CloudSync users who are not currently online
   const offlineUsers = useMemo(() => {
@@ -1546,9 +1926,13 @@ export default function ChatModal() {
           username: off.username,
           color: off.color || stringToColor(off.username),
           status: "offline",
-          lastSeen: off.lastSeen,
+          ...(typeof off.lastSeen === "number" ? { lastSeen: off.lastSeen } : {}),
           bio: off.bio || "",
           statusText: off.statusText || "",
+          customization: off.customization || null,
+          role: (off.role as ChatRole) || "member",
+          isTimedOut: Boolean(off.isTimedOut),
+          timeoutUntil: Number(off.timeoutUntil) || 0,
           createdAt: off.createdAt || null,
         });
       }
@@ -1570,6 +1954,18 @@ export default function ChatModal() {
 
     return Array.from(map.values());
   }, [onlineUsers, serverOfflineUsers, dmPeers, registeredCloudSyncUsers]);
+
+  // Fast lookup map of all known users' latest customization & roles
+  const userMetaMap = useMemo(() => {
+    const map = new Map<string, OnlineUser>();
+    for (const u of offlineUsers) {
+      map.set(u.username.toLowerCase(), u);
+    }
+    for (const u of onlineUsers) {
+      map.set(u.username.toLowerCase(), u);
+    }
+    return map;
+  }, [onlineUsers, offlineUsers]);
 
   // Active channel metadata
   const activeChannelDef = useMemo(() => {
@@ -1757,17 +2153,23 @@ export default function ChatModal() {
                         <div class="chat-voice-sidebar-members">
                           {members.map((m) => {
                             const isSpeaking = !!speakingMap[m.clientId];
+                            const vMeta = userMetaMap.get(m.username.toLowerCase());
                             return (
                               <div key={m.clientId} class="chat-voice-sidebar-member">
-                                <div
-                                  class={`chat-voice-sidebar-avatar ${
+                                <UserAvatar
+                                  username={m.username}
+                                  custom={vMeta?.customization}
+                                  fallbackColor={m.avatarColor}
+                                  className={`chat-voice-sidebar-avatar ${
                                     isSpeaking ? "speaking" : ""
                                   }`}
-                                  style={{ backgroundColor: m.avatarColor }}
+                                />
+                                <span
+                                  class={getNameClasses(vMeta?.customization)}
+                                  style={{ flex: 1 }}
                                 >
-                                  {m.username.slice(0, 1).toLowerCase()}
-                                </div>
-                                <span style={{ flex: 1 }}>{m.username}</span>
+                                  {vMeta?.customization?.displayName || m.username}
+                                </span>
                                 {m.deafened && (
                                   <i
                                     class="fa-solid fa-volume-xmark"
@@ -1948,29 +2350,27 @@ export default function ChatModal() {
             {cloudUser ? (
               <>
                 <div class="chat-user-avatar-wrap">
-                  <div
-                    class="chat-user-avatar"
-                    style={{
-                      backgroundColor: stringToColor(cloudUser),
-                      width: "32px",
-                      height: "32px",
-                      fontSize: "13px",
-                      fontWeight: "600",
-                      borderRadius: "50%",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {cloudUser.slice(0, 1).toLowerCase()}
-                  </div>
-                  <div class="chat-user-dot"></div>
+                  <UserAvatar
+                    username={cloudUser}
+                    custom={editingCustom}
+                    fallbackColor={stringToColor(cloudUser)}
+                    className="chat-user-avatar"
+                  />
+                  <div class={`chat-user-dot ${editingCustom.presenceStatus || "online"}`}></div>
                 </div>
                 <div class="chat-sidebar-user-info">
-                  <span class="chat-sidebar-username">{cloudUser}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "4px", minWidth: 0 }}>
+                    <span class={`chat-sidebar-username ${getNameClasses(editingCustom)}`}>
+                      {editingCustom.displayName || cloudUser}
+                    </span>
+                    <RoleBadge role={selfRole} />
+                  </div>
                   <span class="chat-sidebar-status">
-                    <span style={{ fontSize: "8px" }}>●</span> online
+                    <span style={{ fontSize: "8px" }}>●</span>{" "}
+                    {editingStatusText ||
+                      (editingCustom.presenceStatus === "dnd"
+                        ? "do not disturb"
+                        : editingCustom.presenceStatus || "online")}
                   </span>
                   {myGameSession.isPlayingGame && myGameSession.game && (
                     <div class="chat-profile-game-status" title={`Playing ${myGameSession.game}`}>
@@ -1982,6 +2382,18 @@ export default function ChatModal() {
                     </div>
                   )}
                 </div>
+                <button
+                  type="button"
+                  class="chat-user-mini-btn"
+                  title="Customize profile & animations"
+                  style={{ opacity: 0.9 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleOpenCustomizer();
+                  }}
+                >
+                  <i class="fa-solid fa-wand-magic-sparkles"></i>
+                </button>
                 <button
                   type="button"
                   class="chat-user-mini-btn"
@@ -2108,6 +2520,30 @@ export default function ChatModal() {
                 </button>
               )}
 
+              {cloudUser && (selfRole === "owner" || selfRole === "mod") && (
+                <button
+                  type="button"
+                  class="chat-header-btn"
+                  title="Manage staff moderators & timeouts"
+                  onClick={() => setShowStaffModal(true)}
+                >
+                  <i class="fa-solid fa-shield-halved"></i>
+                  <span>staff</span>
+                </button>
+              )}
+
+              {cloudUser && (
+                <button
+                  type="button"
+                  class="chat-header-btn"
+                  title="Customize profile, banner, avatar frame & card effects"
+                  onClick={() => void handleOpenCustomizer()}
+                >
+                  <i class="fa-solid fa-wand-magic-sparkles"></i>
+                  <span>customize</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 class="chat-window-close"
@@ -2193,25 +2629,29 @@ export default function ChatModal() {
                     const isSpeaking = !!speakingMap[p.clientId];
                     const isMe = p.clientId === getClientId();
                     const vol = userVolumes[p.username.toLowerCase()] ?? 1;
+                    const vMeta = userMetaMap.get(p.username.toLowerCase());
                     return (
                       <div
                         key={p.clientId}
                         class={`chat-voice-card ${isSpeaking ? "speaking" : ""}`}
                       >
-                        <div
-                          class="chat-voice-card-avatar"
-                          style={{ backgroundColor: p.avatarColor, cursor: "pointer" }}
+                        <UserAvatar
+                          username={p.username}
+                          custom={vMeta?.customization}
+                          fallbackColor={p.avatarColor}
+                          className="chat-voice-card-avatar"
                           title={`View @${p.username}'s profile`}
                           onClick={() => openUserProfile(p.username)}
-                        >
-                          {p.username.slice(0, 1).toLowerCase()}
-                        </div>
+                        />
                         <div
                           class="chat-voice-card-name"
                           style={{ cursor: "pointer" }}
                           onClick={() => openUserProfile(p.username)}
                         >
-                          <span>{p.username}</span>
+                          <span class={getNameClasses(vMeta?.customization)}>
+                            {vMeta?.customization?.displayName || p.username}
+                          </span>
+                          <RoleBadge role={vMeta?.role} />
                           {isMe && <span class="chat-you-pill">you</span>}
                         </div>
                         <div class="chat-voice-card-badges">
@@ -2277,27 +2717,41 @@ export default function ChatModal() {
               channelMessages.map((msg) => {
                 const isSelf =
                   cloudUser && msg.author.toLowerCase() === cloudUser.toLowerCase();
+                const authorMeta = userMetaMap.get(msg.author.toLowerCase());
+                const msgCustom = authorMeta?.customization || msg.customization || null;
+                const authorRole = authorMeta?.role || msg.role || "member";
+                const canDeleteMsg = Boolean(
+                  cloudUser &&
+                    (isSelf ||
+                      (!activeChannel.startsWith("dm:") &&
+                        (selfRole === "owner" || selfRole === "mod")))
+                );
+                const displayName = msgCustom?.displayName?.trim() || msg.author;
                 return (
                   <div key={msg.id} class="chat-entry">
-                    <div
-                      class="chat-entry-avatar"
-                      style={{
-                        backgroundColor: msg.avatarColor || stringToColor(msg.author),
-                      }}
+                    <UserAvatar
+                      username={msg.author}
+                      custom={msgCustom}
+                      fallbackColor={msg.avatarColor || stringToColor(msg.author)}
+                      className="chat-entry-avatar"
                       title={`View @${msg.author}'s profile`}
                       onClick={() => openUserProfile(msg.author)}
-                    >
-                      {msg.author.slice(0, 1).toLowerCase()}
-                    </div>
+                    />
                     <div class="chat-entry-content">
                       <div class="chat-entry-header">
                         <span
-                          class={`chat-entry-author ${isSelf ? "is-self" : ""}`}
+                          class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
+                            msgCustom
+                          )}`}
                           title={`View @${msg.author}'s profile`}
                           onClick={() => openUserProfile(msg.author)}
                         >
-                          {msg.author}
+                          {displayName}
                         </span>
+                        <RoleBadge role={authorRole} />
+                        {msgCustom?.customTag && (
+                          <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
+                        )}
                         <span class="chat-entry-time">{msg.timestamp}</span>
                       </div>
                       {msg.text && (
@@ -2360,6 +2814,16 @@ export default function ChatModal() {
                           </button>
                         </>
                       )}
+                      {canDeleteMsg && (
+                        <button
+                          type="button"
+                          class="chat-entry-action-btn danger"
+                          title="Delete message"
+                          onClick={() => void handleDeleteMessage(msg)}
+                        >
+                          <i class="fa-solid fa-trash-can"></i>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -2397,6 +2861,19 @@ export default function ChatModal() {
                 >
                   unblock user
                 </button>
+              </div>
+            ) : selfTimeout && (selfTimeout.until === -1 || selfTimeout.until > nowMs) ? (
+              <div class="chat-auth-locked">
+                <div class="chat-auth-locked-text" style={{ color: "#fca5a5" }}>
+                  <i class="fa-solid fa-comment-slash"></i>
+                  <span>
+                    you are timed out in chat (
+                    {selfTimeout.until === -1 || selfTimeout.until - nowMs > 365 * 86400_000
+                      ? "permanent"
+                      : `${Math.max(1, Math.ceil((selfTimeout.until - nowMs) / 60000))}m remaining`}
+                    ).
+                  </span>
+                </div>
               </div>
             ) : (
               <form class="chat-input-pill" onSubmit={handleSendMessage}>
@@ -2538,23 +3015,28 @@ export default function ChatModal() {
               onlineUsers.map((u) => {
                 const blocked = isUserBlocked(u.username);
                 const playingActive = Boolean(u.isPlayingGame && u.game && u.game !== "browsing");
+                const uCustom = u.customization || null;
+                const npClass =
+                  uCustom?.nameplate && uCustom.nameplate !== "none"
+                    ? `has-nameplate nameplate-${uCustom.nameplate}`
+                    : "";
+                const dotStatus = uCustom?.presenceStatus || "online";
+                const displayName = uCustom?.displayName?.trim() || u.username;
                 return (
-                  <div key={`online_${u.username}`} class="chat-user-item">
+                  <div key={`online_${u.username}`} class={`chat-user-item ${npClass}`}>
                     <div
                       class="chat-user-avatar-wrap"
                       title={`View @${u.username}'s profile`}
                       onClick={() => openUserProfile(u.username)}
                     >
-                      <div
-                        class="chat-user-avatar"
-                        style={{
-                          backgroundColor: u.color,
-                          opacity: blocked ? 0.45 : 1,
-                        }}
-                      >
-                        {u.username.slice(0, 1).toLowerCase()}
-                      </div>
-                      <div class="chat-user-dot"></div>
+                      <UserAvatar
+                        username={u.username}
+                        custom={uCustom}
+                        fallbackColor={u.color}
+                        className="chat-user-avatar"
+                        opacity={blocked ? 0.45 : 1}
+                      />
+                      <div class={`chat-user-dot ${dotStatus}`}></div>
                     </div>
                     <div
                       class="chat-user-meta"
@@ -2563,15 +3045,19 @@ export default function ChatModal() {
                     >
                       <div class="chat-user-name-row">
                         <span
-                          class="chat-user-name"
+                          class={`chat-user-name ${getNameClasses(uCustom)}`}
                           style={
                             blocked
                               ? { textDecoration: "line-through", opacity: 0.6 }
                               : undefined
                           }
                         >
-                          {u.username}
+                          {displayName}
                         </span>
+                        <RoleBadge role={u.role} />
+                        {u.isTimedOut && (
+                          <span class="chat-role-badge muted-pill">muted</span>
+                        )}
                         {u.isSelf && <span class="chat-you-pill">you</span>}
                       </div>
                       {playingActive ? (
@@ -2642,22 +3128,26 @@ export default function ChatModal() {
               ) : (
                 offlineUsers.map((u) => {
                   const blocked = isUserBlocked(u.username);
+                  const uCustom = u.customization || null;
+                  const npClass =
+                    uCustom?.nameplate && uCustom.nameplate !== "none"
+                      ? `has-nameplate nameplate-${uCustom.nameplate}`
+                      : "";
+                  const displayName = uCustom?.displayName?.trim() || u.username;
                   return (
-                    <div key={`offline_${u.username}`} class="chat-user-item offline">
+                    <div key={`offline_${u.username}`} class={`chat-user-item offline ${npClass}`}>
                       <div
                         class="chat-user-avatar-wrap"
                         title={`View @${u.username}'s profile`}
                         onClick={() => openUserProfile(u.username)}
                       >
-                        <div
-                          class="chat-user-avatar"
-                          style={{
-                            backgroundColor: u.color,
-                            opacity: blocked ? 0.35 : 0.55,
-                          }}
-                        >
-                          {u.username.slice(0, 1).toLowerCase()}
-                        </div>
+                        <UserAvatar
+                          username={u.username}
+                          custom={uCustom}
+                          fallbackColor={u.color}
+                          className="chat-user-avatar"
+                          opacity={blocked ? 0.35 : 0.65}
+                        />
                         <div class="chat-user-dot offline"></div>
                       </div>
                       <div
@@ -2667,14 +3157,15 @@ export default function ChatModal() {
                       >
                         <div class="chat-user-name-row">
                           <span
-                            class="chat-user-name"
+                            class={`chat-user-name ${getNameClasses(uCustom)}`}
                             style={{
-                              opacity: blocked ? 0.45 : 0.7,
+                              opacity: blocked ? 0.45 : 0.78,
                               textDecoration: blocked ? "line-through" : undefined,
                             }}
                           >
-                            {u.username}
+                            {displayName}
                           </span>
+                          <RoleBadge role={u.role} />
                         </div>
                         <div class="chat-user-status-sub offline">
                           {u.statusText ? u.statusText : "offline"}
@@ -2765,6 +3256,7 @@ export default function ChatModal() {
               const isViewingSelf = Boolean(
                 cloudUser && targetName.toLowerCase() === cloudUser.toLowerCase()
               );
+              const metaMatch = userMetaMap.get(targetName.toLowerCase());
               const onlineMatch = onlineUsers.find(
                 (u) => u.username.toLowerCase() === targetName.toLowerCase()
               );
@@ -2784,223 +3276,403 @@ export default function ChatModal() {
               const avatarCol = stringToColor(targetName);
               const blocked = isUserBlocked(targetName);
 
+              const custom = isViewingSelf
+                ? editingCustom
+                : sanitizeCustomization(
+                    profileData?.customization || metaMatch?.customization,
+                    targetName
+                  );
+              const targetRole: ChatRole =
+                (isViewingSelf ? selfRole : profileData?.role || metaMatch?.role) ||
+                (ownerUsers.some((o) => o.toLowerCase() === targetName.toLowerCase())
+                  ? "owner"
+                  : staffMods.some((m) => m.toLowerCase() === targetName.toLowerCase())
+                  ? "mod"
+                  : "member");
+              const targetTimedOut = Boolean(
+                profileData?.isTimedOut ||
+                  metaMatch?.isTimedOut ||
+                  (isViewingSelf &&
+                    selfTimeout &&
+                    (selfTimeout.until === -1 || selfTimeout.until > nowMs))
+              );
+              const bannerStyle = getBannerInlineStyle(custom);
+              const bannerClass =
+                !custom.bannerUrl && custom.bannerStyle !== "solid"
+                  ? `banner-${custom.bannerStyle}`
+                  : "";
+              const displayLabel = custom.displayName?.trim() || targetName;
+              const dotClass = isOnlineNow ? custom.presenceStatus || "online" : "offline";
+              const canModTarget = Boolean(
+                !isViewingSelf &&
+                  (selfRole === "owner" || selfRole === "mod") &&
+                  targetRole !== "owner" &&
+                  (selfRole === "owner" || targetRole !== "mod")
+              );
+
               return (
-                <div class="chat-profile-card">
-                  <div
-                    class="chat-profile-banner"
-                    style={{
-                      background: `linear-gradient(135deg, ${avatarCol}, #18181b)`,
-                    }}
-                  >
-                    <button
-                      type="button"
-                      class="chat-profile-close-btn"
-                      title="Close profile"
-                      onClick={() => setViewingProfileUsername(null)}
-                    >
-                      <i class="fa-solid fa-xmark"></i>
-                    </button>
-                  </div>
+                <div
+                  class={`chat-profile-card theme-${custom.cardTheme} ${
+                    custom.profileEffect === "lightning-border" ? "effect-lightning-border" : ""
+                  }`}
+                  style={custom.cardBgColor ? { background: custom.cardBgColor } : undefined}
+                >
+                  <ProfileEffectLayer effect={custom.profileEffect} />
 
-                  <div class="chat-profile-body">
-                    <div class="chat-profile-top-row">
-                      <div class="chat-profile-avatar-lg" style={{ backgroundColor: avatarCol }}>
-                        {targetName.slice(0, 1).toLowerCase()}
-                        <span
-                          class={`chat-profile-status-dot ${isOnlineNow ? "online" : "offline"}`}
-                        ></span>
-                      </div>
-
-                      <div class="chat-profile-badges">
-                        {(profileData?.cloudSyncVerified ?? true) && (
-                          <span class="chat-profile-badge verified">
-                            <i class="fa-solid fa-cloud"></i> cloudsync verified
-                          </span>
-                        )}
-                        {isViewingSelf && (
-                          <span class="chat-profile-badge self">you</span>
-                        )}
-                        <span
-                          class={`chat-profile-badge ${isOnlineNow ? "online" : "offline"}`}
-                        >
-                          {isOnlineNow ? "● online" : "○ offline"}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div class="chat-profile-identity">
-                      <h3 class="chat-profile-username">@{targetName}</h3>
-                      {profileData?.statusText && !isViewingSelf && (
-                        <div class="chat-profile-custom-status">{profileData.statusText}</div>
-                      )}
-                      {profileData?.createdAt && (
-                        <div class="chat-profile-joined">
-                          <i class="fa-solid fa-calendar-days"></i> member since{" "}
-                          {new Date(profileData.createdAt).toLocaleDateString()}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Live Game Activity Section */}
-                    {activeGameName && activeGameName !== "browsing" && (
-                      <div class="chat-profile-activity-box">
-                        <div class="chat-profile-activity-label">
-                          <i class="fa-solid fa-gamepad"></i> currently playing
-                        </div>
-                        <div class="chat-profile-activity-main">
-                          <span class="chat-profile-activity-game">{activeGameName}</span>
-                          <span class="chat-profile-activity-time">
-                            {formatElapsedDuration(activeGameStart, nowMs)} elapsed
-                          </span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Bio / About Section (Editable for Own Profile) */}
-                    {isViewingSelf ? (
-                      <form class="chat-profile-edit-form" onSubmit={handleSaveMyProfile}>
-                        <div class="chat-profile-section-title">your status & bio</div>
-                        <input
-                          type="text"
-                          class="chat-mod-input"
-                          placeholder="custom status (e.g. grinding slope)..."
-                          maxLength={60}
-                          value={editingStatusText}
-                          onInput={(e) =>
-                            setEditingStatusText((e.target as HTMLInputElement).value)
-                          }
-                        />
-                        <textarea
-                          class="chat-mod-input chat-profile-bio-textarea"
-                          placeholder="write a short bio for your profile..."
-                          maxLength={220}
-                          rows={2}
-                          value={editingBio}
-                          onInput={(e) =>
-                            setEditingBio((e.target as HTMLTextAreaElement).value)
-                          }
-                        />
+                  <div class="chat-profile-scroll">
+                    <div class={`chat-profile-banner ${bannerClass}`} style={bannerStyle}>
+                      {isViewingSelf && (
                         <button
-                          type="submit"
-                          class="chat-auth-login-btn"
-                          disabled={savingProfile}
-                          style={{ alignSelf: "flex-end", padding: "6px 14px" }}
+                          type="button"
+                          class="chat-profile-close-btn"
+                          style={{ right: "44px", width: "auto", padding: "0 10px", gap: "5px" }}
+                          title="Customize pfp, gif banner, animated frames & effects"
+                          onClick={() => {
+                            setViewingProfileUsername(null);
+                            void handleOpenCustomizer();
+                          }}
                         >
-                          {savingProfile ? "saving..." : "save profile"}
+                          <i class="fa-solid fa-wand-magic-sparkles"></i>
+                          <span style={{ fontSize: "11px", fontWeight: 600 }}>customize</span>
                         </button>
-                      </form>
-                    ) : (
-                      <div class="chat-profile-section">
-                        <div class="chat-profile-section-title">about me</div>
-                        <div class="chat-profile-bio-text">
-                          {profileData?.bio || "no bio set yet."}
+                      )}
+                      <button
+                        type="button"
+                        class="chat-profile-close-btn"
+                        title="Close profile"
+                        onClick={() => setViewingProfileUsername(null)}
+                      >
+                        <i class="fa-solid fa-xmark"></i>
+                      </button>
+                    </div>
+
+                    <div class="chat-profile-body">
+                      <div class="chat-profile-top-row">
+                        <UserAvatar
+                          username={targetName}
+                          custom={custom}
+                          fallbackColor={avatarCol}
+                          className="chat-profile-avatar-lg"
+                        >
+                          <span class={`chat-profile-status-dot ${dotClass}`}></span>
+                        </UserAvatar>
+
+                        <div class="chat-profile-badges">
+                          {custom.customTag && (
+                            <span class="chat-role-badge custom-tag">{custom.customTag}</span>
+                          )}
+                          {(profileData?.cloudSyncVerified ?? true) && (
+                            <span class="chat-profile-badge verified">
+                              <i class="fa-solid fa-cloud"></i> cloudsync
+                            </span>
+                          )}
+                          {targetTimedOut && (
+                            <span class="chat-role-badge muted-pill">
+                              <i class="fa-solid fa-comment-slash"></i> timed out
+                            </span>
+                          )}
+                          {isViewingSelf && (
+                            <span class="chat-profile-badge self">you</span>
+                          )}
+                          <span
+                            class={`chat-profile-badge ${isOnlineNow ? "online" : "offline"}`}
+                          >
+                            {isOnlineNow
+                              ? dotClass === "dnd"
+                                ? "● dnd"
+                                : dotClass === "idle"
+                                ? "● idle"
+                                : "● online"
+                              : "○ offline"}
+                          </span>
                         </div>
                       </div>
-                    )}
 
-                    {/* Game & Leaderboard Stats */}
-                    <div class="chat-profile-section">
-                      <div class="chat-profile-section-title">game & studio stats</div>
-                      {profileLoading && !profileData ? (
-                        <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
-                          loading profile stats...
+                      <div class="chat-profile-identity">
+                        <div class="chat-profile-name-row">
+                          <h3 class={`chat-profile-username ${getNameClasses(custom)}`}>
+                            {displayLabel}
+                          </h3>
+                          <RoleBadge role={targetRole} />
                         </div>
+                        <div class="chat-profile-handle-row">
+                          <span>@{targetName}</span>
+                          {custom.pronouns && <span>· {custom.pronouns}</span>}
+                        </div>
+                        {profileData?.statusText && !isViewingSelf && (
+                          <div class="chat-profile-custom-status">{profileData.statusText}</div>
+                        )}
+                      </div>
+
+                      {/* Live Game Activity Section */}
+                      {activeGameName && activeGameName !== "browsing" && (
+                        <div class="chat-profile-activity-box">
+                          <div class="chat-profile-activity-label">
+                            <i class="fa-solid fa-gamepad"></i> currently playing
+                          </div>
+                          <div class="chat-profile-activity-main">
+                            <span class="chat-profile-activity-game">{activeGameName}</span>
+                            <span class="chat-profile-activity-time">
+                              {formatElapsedDuration(activeGameStart, nowMs)} elapsed
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Bio / About Section (Editable for Own Profile + Joined Date) */}
+                      {isViewingSelf ? (
+                        <form class="chat-profile-edit-form" onSubmit={handleSaveMyProfile}>
+                          <div class="chat-profile-section-title">your status & bio</div>
+                          <input
+                            type="text"
+                            class="chat-mod-input"
+                            placeholder="custom status (e.g. grinding slope)..."
+                            maxLength={60}
+                            value={editingStatusText}
+                            onInput={(e) =>
+                              setEditingStatusText((e.target as HTMLInputElement).value)
+                            }
+                          />
+                          <textarea
+                            class="chat-mod-input chat-profile-bio-textarea"
+                            placeholder="write a short bio for your profile..."
+                            maxLength={220}
+                            rows={2}
+                            value={editingBio}
+                            onInput={(e) =>
+                              setEditingBio((e.target as HTMLTextAreaElement).value)
+                            }
+                          />
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              class="chat-profile-pill-btn"
+                              onClick={() => {
+                                setViewingProfileUsername(null);
+                                void handleOpenCustomizer();
+                              }}
+                            >
+                              <i class="fa-solid fa-wand-magic-sparkles"></i> edit look &amp; effects
+                            </button>
+                            <button
+                              type="submit"
+                              class="chat-auth-login-btn"
+                              disabled={savingProfile}
+                              style={{ padding: "6px 14px" }}
+                            >
+                              {savingProfile ? "saving..." : "save profile"}
+                            </button>
+                          </div>
+                        </form>
                       ) : (
+                        <div class={`chat-profile-section chat-profile-bio-card bio-${custom.bioStyle}`}>
+                          <div class="chat-profile-bio-text">
+                            {profileData?.bio || "no bio set yet."}
+                          </div>
+                          {profileData?.createdAt && (
+                            <div class="chat-profile-joined">
+                              <i class="fa-solid fa-calendar-days"></i> member since{" "}
+                              {new Date(profileData.createdAt).toLocaleDateString()}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Game & Leaderboard Stats */}
+                      <div class="chat-profile-section">
+                        <div class="chat-profile-section-title">game & studio stats</div>
+                        {profileLoading && !profileData ? (
+                          <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                            loading profile stats...
+                          </div>
+                        ) : (
+                          <>
+                            <div class="chat-profile-stats-grid">
+                              <div class="chat-profile-stat-pill">
+                                <span class="chat-profile-stat-val">
+                                  {formatPlayTime(profileData?.stats?.totalSeconds || 0)}
+                                </span>
+                                <span class="chat-profile-stat-lbl">total time played</span>
+                              </div>
+                              <div class="chat-profile-stat-pill">
+                                <span class="chat-profile-stat-val">
+                                  {profileData?.stats?.totalPlays || 0}
+                                </span>
+                                <span class="chat-profile-stat-lbl">total game sessions</span>
+                              </div>
+                              <div class="chat-profile-stat-pill">
+                                <span class="chat-profile-stat-val">
+                                  {profileData?.publishedGamesCount || 0}
+                                </span>
+                                <span class="chat-profile-stat-lbl">published games</span>
+                              </div>
+                            </div>
+
+                            {profileData?.studio && (
+                              <div class="chat-profile-studio-row">
+                                <i
+                                  class={`fa-solid ${profileData.studio.icon || "fa-rocket"}`}
+                                  style={{ color: profileData.studio.color || "#60a5fa" }}
+                                ></i>
+                                <div>
+                                  <div style={{ fontWeight: 600, fontSize: "12px" }}>
+                                    {profileData.studio.name}
+                                  </div>
+                                  <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                                    {profileData.studio.tagline}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {profileData?.stats?.topGames &&
+                              profileData.stats.topGames.length > 0 && (
+                                <div class="chat-profile-top-games">
+                                  {profileData.stats.topGames.slice(0, 3).map((g) => (
+                                    <div key={g.game} class="chat-profile-top-game-row">
+                                      <span class="chat-profile-top-game-name">{g.game}</span>
+                                      <span class="chat-profile-top-game-time">
+                                        {formatPlayTime(g.seconds)}
+                                        {g.highScore > 0 ? ` · score ${g.highScore}` : ""}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                          </>
+                        )}
+                      </div>
+
+                      {/* Actions for other users (mention / message / block + call) */}
+                      {!isViewingSelf && (
                         <>
-                          <div class="chat-profile-stats-grid">
-                            <div class="chat-profile-stat-pill">
-                              <span class="chat-profile-stat-val">
-                                {formatPlayTime(profileData?.stats?.totalSeconds || 0)}
-                              </span>
-                              <span class="chat-profile-stat-lbl">total time played</span>
-                            </div>
-                            <div class="chat-profile-stat-pill">
-                              <span class="chat-profile-stat-val">
-                                {profileData?.stats?.totalPlays || 0}
-                              </span>
-                              <span class="chat-profile-stat-lbl">total game sessions</span>
-                            </div>
-                            <div class="chat-profile-stat-pill">
-                              <span class="chat-profile-stat-val">
-                                {profileData?.publishedGamesCount || 0}
-                              </span>
-                              <span class="chat-profile-stat-lbl">published games</span>
-                            </div>
+                          <div class="chat-profile-actions-grid">
+                            <button
+                              type="button"
+                              class="chat-profile-pill-btn"
+                              onClick={() => {
+                                setInputText((prev) =>
+                                  prev.includes(`@${targetName}`)
+                                    ? prev
+                                    : `@${targetName} ${prev}`
+                                );
+                                setViewingProfileUsername(null);
+                              }}
+                            >
+                              mention
+                            </button>
+                            <button
+                              type="button"
+                              class="chat-profile-pill-btn primary"
+                              onClick={() => openDirectMessage(targetName)}
+                            >
+                              message
+                            </button>
+                            <button
+                              type="button"
+                              class={`chat-profile-pill-btn ${blocked ? "danger" : ""}`}
+                              onClick={() => toggleBlockUser(targetName)}
+                            >
+                              {blocked ? "unblock" : "block"}
+                            </button>
                           </div>
 
-                          {profileData?.studio && (
-                            <div class="chat-profile-studio-row">
-                              <i
-                                class={`fa-solid ${profileData.studio.icon || "fa-rocket"}`}
-                                style={{ color: profileData.studio.color || "#60a5fa" }}
-                              ></i>
-                              <div>
-                                <div style={{ fontWeight: 600, fontSize: "12px" }}>
-                                  {profileData.studio.name}
-                                </div>
-                                <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
-                                  {profileData.studio.tagline}
-                                </div>
+                          <button
+                            type="button"
+                            class="chat-header-btn voice-active"
+                            style={{ width: "100%", justifyContent: "center" }}
+                            onClick={() => {
+                              const dmChan = makeDmChannelId(cloudUser || "guest", targetName);
+                              setActiveChannel(dmChan);
+                              setViewingProfileUsername(null);
+                              joinVoiceRoom(`voice:${dmChan}`);
+                            }}
+                          >
+                            <i class="fa-solid fa-phone-volume"></i> voice call @{targetName}
+                          </button>
+
+                          {canModTarget && (
+                            <div class="chat-profile-section" style={{ borderColor: "rgba(45, 212, 191, 0.28)" }}>
+                              <div class="chat-profile-section-title" style={{ color: "#5eead4" }}>
+                                <i class="fa-solid fa-shield-halved"></i> staff moderation
+                              </div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                                {targetTimedOut ? (
+                                  <button
+                                    type="button"
+                                    class="chat-profile-pill-btn"
+                                    onClick={() => void handleTimeoutUser(targetName, 0)}
+                                  >
+                                    unmute
+                                  </button>
+                                ) : (
+                                  <>
+                                    {[
+                                      [1, "1m"],
+                                      [5, "5m"],
+                                      [15, "15m"],
+                                      [60, "1h"],
+                                      [525600, "perm"],
+                                    ].map(([mins, label]) => (
+                                      <button
+                                        key={String(mins)}
+                                        type="button"
+                                        class="chat-profile-pill-btn danger"
+                                        onClick={() =>
+                                          void handleTimeoutUser(targetName, Number(mins))
+                                        }
+                                      >
+                                        mute {label}
+                                      </button>
+                                    ))}
+                                  </>
+                                )}
+                                {!activeChannel.startsWith("dm:") && (
+                                  <button
+                                    type="button"
+                                    class="chat-profile-pill-btn danger"
+                                    onClick={() => void handlePurgeUserMessages(targetName)}
+                                  >
+                                    purge #{activeChannel}
+                                  </button>
+                                )}
                               </div>
                             </div>
                           )}
-
-                          {profileData?.stats?.topGames &&
-                            profileData.stats.topGames.length > 0 && (
-                              <div class="chat-profile-top-games">
-                                {profileData.stats.topGames.slice(0, 3).map((g) => (
-                                  <div key={g.game} class="chat-profile-top-game-row">
-                                    <span class="chat-profile-top-game-name">{g.game}</span>
-                                    <span class="chat-profile-top-game-time">
-                                      {formatPlayTime(g.seconds)}
-                                      {g.highScore > 0 ? ` · score ${g.highScore}` : ""}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
                         </>
                       )}
                     </div>
-
-                    {/* Actions for other users */}
-                    {!isViewingSelf && (
-                      <div class="chat-profile-actions-row">
-                        <button
-                          type="button"
-                          class="chat-auth-login-btn"
-                          style={{ flex: 1 }}
-                          onClick={() => openDirectMessage(targetName)}
-                        >
-                          <i class="fa-solid fa-paper-plane"></i> direct message
-                        </button>
-                        <button
-                          type="button"
-                          class="chat-header-btn voice-active"
-                          onClick={() => {
-                            const dmChan = makeDmChannelId(cloudUser || "guest", targetName);
-                            setActiveChannel(dmChan);
-                            setViewingProfileUsername(null);
-                            joinVoiceRoom(`voice:${dmChan}`);
-                          }}
-                        >
-                          <i class="fa-solid fa-phone-volume"></i> call
-                        </button>
-                        <button
-                          type="button"
-                          class={`chat-header-btn ${blocked ? "danger" : ""}`}
-                          onClick={() => toggleBlockUser(targetName)}
-                        >
-                          <i class="fa-solid fa-ban"></i>{" "}
-                          {blocked ? "unblock" : "block"}
-                        </button>
-                      </div>
-                    )}
                   </div>
                 </div>
               );
             })()}
           </div>
+        )}
+
+        {/* ── DEEP PROFILE & ANIMATIONS CUSTOMIZER MODAL ── */}
+        {showCustomizer && cloudUser && (
+          <ProfileCustomizerModal
+            username={cloudUser}
+            role={selfRole}
+            createdAt={profileData?.createdAt || userMetaMap.get(cloudUser.toLowerCase())?.createdAt}
+            initialCustom={editingCustom}
+            initialBio={editingBio}
+            initialStatusText={editingStatusText}
+            saving={savingProfile}
+            onSave={async (payload) => {
+              const ok = await saveProfilePayload(payload);
+              if (ok) setShowCustomizer(false);
+            }}
+            onClose={() => setShowCustomizer(false)}
+          />
+        )}
+
+        {/* ── STAFF & MODERATOR MANAGEMENT MODAL ── */}
+        {showStaffModal && (
+          <StaffManagerModal
+            onClose={() => setShowStaffModal(false)}
+            notify={(type, msg) => notifyToast(msg, type === "error" ? "error" : "success")}
+          />
         )}
       </div>
     </div>
