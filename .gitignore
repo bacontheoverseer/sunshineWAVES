@@ -15,3 +15,4 @@ cache
 .DS_Store
 *.log
 data/kofi-subscriptions.json
+data/lemonsqueezy-subscriptions.json

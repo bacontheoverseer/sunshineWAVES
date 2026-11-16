@@ -25,6 +25,7 @@ const HomepageDecorations = lazy(
 export default function App() {
   return (
     <>
+      <div class="site-bg-layer" aria-hidden="true" />
       <TopBar />
       <Sidebar />
       <div class="content-area">

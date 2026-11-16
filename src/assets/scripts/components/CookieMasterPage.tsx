@@ -17,8 +17,11 @@ import {
 
 interface MasterConfig {
   configured: boolean;
+  provider: string;
   checkoutUrl: string;
+  billingUrl: string;
   hasWebhookVerification: boolean;
+  hasApiKey: boolean;
   priceMonthly: number;
   dailyCoins: number;
   tierName: string;
@@ -26,14 +29,48 @@ interface MasterConfig {
 
 const DEFAULT_CONFIG: MasterConfig = {
   configured: false,
+  provider: "lemonsqueezy",
   checkoutUrl: "",
+  billingUrl: "",
   hasWebhookVerification: false,
+  hasApiKey: false,
   priceMonthly: 2,
   dailyCoins: COOKIE_MASTER_DAILY_COINS,
   tierName: "Cookie Master",
 };
 
 const REVERIFY_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const LEMON_JS_SRC = "https://app.lemonsqueezy.com/js/lemon.js";
+
+let lemonJsPromise: Promise<boolean> | null = null;
+
+function ensureLemonJsLoaded(): Promise<boolean> {
+  const w = window as any;
+  if (w.LemonSqueezy?.Url?.Open) return Promise.resolve(true);
+  if (lemonJsPromise) return lemonJsPromise;
+  lemonJsPromise = new Promise((resolve) => {
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${LEMON_JS_SRC}"]`);
+    if (existing) {
+      w.createLemonSqueezy?.();
+      resolve(Boolean(w.LemonSqueezy?.Url?.Open));
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = LEMON_JS_SRC;
+    script.defer = true;
+    script.onload = () => {
+      try {
+        w.createLemonSqueezy?.();
+        resolve(Boolean(w.LemonSqueezy?.Url?.Open));
+      } catch {
+        resolve(false);
+      }
+    };
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  });
+  return lemonJsPromise;
+}
 
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
@@ -167,7 +204,7 @@ export default function CookieMasterPage() {
     };
   }, [show, hide, toggle, refreshState]);
 
-  // Fetch Ko-fi config when Cookie Master opens
+  // Fetch Lemon Squeezy config when Cookie Master opens & warm up Lemon.js overlay
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
@@ -177,8 +214,11 @@ export default function CookieMasterPage() {
         if (cancelled || !data) return;
         setConfig({
           configured: Boolean(data.configured),
+          provider: typeof data.provider === "string" ? data.provider : "lemonsqueezy",
           checkoutUrl: typeof data.checkoutUrl === "string" ? data.checkoutUrl : "",
+          billingUrl: typeof data.billingUrl === "string" ? data.billingUrl : "",
           hasWebhookVerification: Boolean(data.hasWebhookVerification),
+          hasApiKey: Boolean(data.hasApiKey),
           priceMonthly: Number(data.priceMonthly) || 2,
           dailyCoins: Number(data.dailyCoins) || COOKIE_MASTER_DAILY_COINS,
           tierName: typeof data.tierName === "string" ? data.tierName : "Cookie Master",
@@ -188,6 +228,50 @@ export default function CookieMasterPage() {
       .catch(() => {
         if (!cancelled) setConfigLoaded(true);
       });
+
+    void ensureLemonJsLoaded().then((ready) => {
+      if (cancelled || !ready) return;
+      try {
+        (window as any).LemonSqueezy?.Setup?.({
+          eventHandler: (evt: { event?: string; data?: any }) => {
+            if (evt?.event === "Checkout.Success") {
+              const orderEmail = String(
+                evt?.data?.order?.data?.attributes?.user_email || ""
+              ).trim();
+              notifyToast("payment completed! activating cookie master...", "info");
+              const pollActivate = async (attempt = 0): Promise<void> => {
+                const res = await fetch("/api/cookie-master/verify", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ emailOrCode: orderEmail }),
+                }).catch(() => null);
+                const payload = res ? await res.json().catch(() => null) : null;
+                if (res?.ok && payload?.active) {
+                  const prev = getCookieMasterState();
+                  setCookieMasterState({
+                    active: true,
+                    licenseKey: String(payload.licenseKey || payload.subscriptionId || "lemonsqueezy"),
+                    subscriptionId: typeof payload.subscriptionId === "string" ? payload.subscriptionId : undefined,
+                    status: typeof payload.status === "string" ? payload.status : "active",
+                    email: typeof payload.email === "string" ? payload.email : orderEmail || prev?.email,
+                    verifiedAt: Date.now(),
+                    expiresAt: Number(payload.expiresAt) || 0,
+                    cancelledAt: typeof payload.cancelledAt === "string" ? payload.cancelledAt : null,
+                    lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
+                  });
+                  notifyToast("cookie master unlocked! enjoy ad-free mode & daily coins", "success");
+                  return;
+                }
+                if (attempt < 5) {
+                  window.setTimeout(() => void pollActivate(attempt + 1), 1600);
+                }
+              };
+              window.setTimeout(() => void pollActivate(0), 900);
+            }
+          },
+        });
+      } catch {}
+    });
 
     return () => {
       cancelled = true;
@@ -210,20 +294,21 @@ export default function CookieMasterPage() {
     };
   }, [visible, hide]);
 
-  // Auto-check active Ko-fi membership (for signed-in CloudSync users or renewal refresh)
+  // Auto-check active Lemon Squeezy membership (for signed-in CloudSync users or renewal refresh)
   useEffect(() => {
     if (!visible || !configLoaded || autoCheckedRef.current) return;
     const current = getCookieMasterState();
     const activeUser = getActiveUser();
     const shouldCheckSignedIn = activeUser !== "guest" && !current?.active;
     const shouldRefreshActive =
-      Boolean(current?.active && current?.licenseKey) &&
+      Boolean(current?.active && (current?.subscriptionId || current?.licenseKey)) &&
       Date.now() - (current?.verifiedAt || 0) >= REVERIFY_INTERVAL_MS;
 
     if (!shouldCheckSignedIn && !shouldRefreshActive) return;
 
     autoCheckedRef.current = true;
-    const txParam = current?.licenseKey ? `?tx=${encodeURIComponent(current.licenseKey)}` : "";
+    const refId = current?.subscriptionId || current?.licenseKey || "";
+    const txParam = refId ? `?tx=${encodeURIComponent(refId)}` : "";
     fetch(`/api/cookie-master/status${txParam}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -231,12 +316,20 @@ export default function CookieMasterPage() {
         if (data.active) {
           setCookieMasterState({
             active: true,
-            licenseKey: String(data.transactionId || current?.licenseKey || ""),
+            licenseKey: String(data.licenseKey || data.subscriptionId || current?.licenseKey || ""),
+            subscriptionId:
+              typeof data.subscriptionId === "string"
+                ? data.subscriptionId
+                : current?.subscriptionId,
+            status: typeof data.status === "string" ? data.status : current?.status,
             email: typeof data.email === "string" ? data.email : current?.email,
             verifiedAt: Date.now(),
             expiresAt: Number(data.expiresAt) || current?.expiresAt || 0,
+            cancelledAt: typeof data.cancelledAt === "string" ? data.cancelledAt : null,
             lastDailyClaimAt: current?.lastDailyClaimAt || 0,
           });
+        } else if (shouldRefreshActive && refId) {
+          setCookieMasterState(null);
         }
       })
       .catch(() => {});
@@ -246,7 +339,7 @@ export default function CookieMasterPage() {
     const trimmed = emailOrCode.trim();
     const signedInUser = getActiveUser();
     if (!trimmed && signedInUser === "guest") {
-      notifyToast("enter your ko-fi email or transaction id first", "error");
+      notifyToast("enter your lemon squeezy email, license key, or subscription id first", "error");
       return;
     }
 
@@ -260,7 +353,7 @@ export default function CookieMasterPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.success || !data?.active) {
         notifyToast(
-          data?.error || "could not find an active ko-fi cookie master membership yet",
+          data?.error || "could not find an active lemon squeezy cookie master membership yet",
           "error"
         );
         return;
@@ -269,10 +362,14 @@ export default function CookieMasterPage() {
       const prev = getCookieMasterState();
       setCookieMasterState({
         active: true,
-        licenseKey: String(data.transactionId || trimmed || prev?.licenseKey || "kofi"),
+        licenseKey: String(data.licenseKey || data.subscriptionId || trimmed || prev?.licenseKey || "lemonsqueezy"),
+        subscriptionId:
+          typeof data.subscriptionId === "string" ? data.subscriptionId : prev?.subscriptionId,
+        status: typeof data.status === "string" ? data.status : "active",
         email: typeof data.email === "string" ? data.email : prev?.email,
         verifiedAt: Date.now(),
         expiresAt: Number(data.expiresAt) || 0,
+        cancelledAt: typeof data.cancelledAt === "string" ? data.cancelledAt : null,
         lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
       });
       setLookupInput("");
@@ -292,27 +389,75 @@ export default function CookieMasterPage() {
     void verifyMembership(lookupInput);
   };
 
-  const handleOpenKofiCheckout = (e: MouseEvent) => {
+  const buildCheckoutUrl = (embed = false): string => {
+    if (!config.checkoutUrl) return "";
+    try {
+      const u = new URL(config.checkoutUrl);
+      if (embed) u.searchParams.set("embed", "1");
+      const activeUser = getActiveUser();
+      if (activeUser && activeUser !== "guest") {
+        u.searchParams.set("checkout[custom][username]", activeUser);
+      }
+      return u.toString();
+    } catch {
+      return config.checkoutUrl;
+    }
+  };
+
+  const handleOpenLemonCheckout = (e: MouseEvent) => {
     if (!config.configured || !config.checkoutUrl) {
       e.preventDefault();
       notifyToast(
-        "Set KOFI_CHECKOUT_URL (or KOFI_USERNAME) and KOFI_VERIFICATION_TOKEN on the server to open Ko-fi checkout.",
+        "Set LEMONSQUEEZY_CHECKOUT_URL and LEMONSQUEEZY_WEBHOOK_SECRET on the server to open Lemon Squeezy checkout.",
         "info"
       );
       return;
     }
-    const width = 520;
-    const height = 740;
+
+    const ls = (window as any).LemonSqueezy;
+    if (ls?.Url?.Open) {
+      e.preventDefault();
+      ls.Url.Open(buildCheckoutUrl(true));
+      return;
+    }
+
+    const width = 540;
+    const height = 760;
     const left = Math.max(0, Math.round((window.screen.width - width) / 2));
     const top = Math.max(0, Math.round((window.screen.height - height) / 2));
     const popup = window.open(
-      config.checkoutUrl,
-      "kofiCookieMasterCheckout",
+      buildCheckoutUrl(false),
+      "lemonCookieMasterCheckout",
       `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
     );
     if (popup) {
       e.preventDefault();
       popup.focus();
+    }
+  };
+
+  const handleOpenBillingPortal = async () => {
+    try {
+      const res = await fetch("/api/cookie-master/portal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subscriptionId: masterState?.subscriptionId || masterState?.licenseKey || "",
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      const url = data?.portalUrl || config.billingUrl;
+      if (!url) {
+        notifyToast("billing portal url not configured yet — check your lemon squeezy receipt email", "info");
+        return;
+      }
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      if (config.billingUrl) {
+        window.open(config.billingUrl, "_blank", "noopener,noreferrer");
+      } else {
+        notifyToast("could not open lemon squeezy portal right now", "error");
+      }
     }
   };
 
@@ -401,7 +546,7 @@ export default function CookieMasterPage() {
         </div>
       </div>
 
-      {/* Product Hero Card (Native Operation Cookie Product Page + Ko-fi Checkout) */}
+      {/* Product Hero Card (Native Operation Cookie Product Page + Lemon Squeezy Checkout) */}
       <div
         class="studio-panel"
         style={{
@@ -470,10 +615,12 @@ export default function CookieMasterPage() {
                 maxWidth: "560px",
               }}
             >
-              upgrade your account with one monthly membership powered by ko-fi checkout. include
-              your username
-              {activeUsername !== "guest" ? ` (@${activeUsername})` : ""} in the ko-fi message box
-              (or verify with your ko-fi email / transaction id below) to unlock cookie master.
+              upgrade your account with one monthly membership powered by lemon squeezy.
+              {activeUsername !== "guest"
+                ? ` your cloudsync account (@${activeUsername}) is linked automatically during checkout,`
+                : ""}{" "}
+              or verify anytime below using your lemon squeezy email, license key, or subscription
+              id.
             </p>
           </div>
 
@@ -513,33 +660,49 @@ export default function CookieMasterPage() {
               <span class="app-proxy-badge">cancel anytime</span>
             </div>
 
-            <a
-              href={config.checkoutUrl || "#"}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={handleOpenKofiCheckout}
-              class="apps-custom-btn"
-              style={{
-                justifyContent: "center",
-                padding: "12px 16px",
-                fontSize: "13.5px",
-                fontWeight: 600,
-                textDecoration: "none",
-                textAlign: "center",
-                opacity: configLoaded && !config.configured ? 0.8 : 1,
-              }}
-            >
-              <i class="fa-solid fa-crown"></i>
-              <span>
-                {!configLoaded
-                  ? "loading checkout..."
-                  : config.configured
-                    ? isActiveMaster
-                      ? "manage on ko-fi"
-                      : `buy cookie master — $${config.priceMonthly}/mo`
-                    : "ko-fi checkout not configured"}
-              </span>
-            </a>
+            {isActiveMaster ? (
+              <button
+                type="button"
+                onClick={() => void handleOpenBillingPortal()}
+                class="apps-custom-btn"
+                style={{
+                  justifyContent: "center",
+                  padding: "12px 16px",
+                  fontSize: "13.5px",
+                  fontWeight: 600,
+                  textAlign: "center",
+                }}
+              >
+                <i class="fa-solid fa-crown"></i>
+                <span>manage subscription</span>
+              </button>
+            ) : (
+              <a
+                href={buildCheckoutUrl(false) || "#"}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={handleOpenLemonCheckout}
+                class="apps-custom-btn"
+                style={{
+                  justifyContent: "center",
+                  padding: "12px 16px",
+                  fontSize: "13.5px",
+                  fontWeight: 600,
+                  textDecoration: "none",
+                  textAlign: "center",
+                  opacity: configLoaded && !config.configured ? 0.8 : 1,
+                }}
+              >
+                <i class="fa-solid fa-crown"></i>
+                <span>
+                  {!configLoaded
+                    ? "loading checkout..."
+                    : config.configured
+                      ? `buy cookie master — $${config.priceMonthly}/mo`
+                      : "lemon squeezy checkout not configured"}
+                </span>
+              </a>
+            )}
 
             <div
               style={{
@@ -549,7 +712,7 @@ export default function CookieMasterPage() {
                 textTransform: "lowercase",
               }}
             >
-              checkout via ko-fi · synced with cloudsync
+              checkout via lemon squeezy · synced with cloudsync
             </div>
 
             <div
@@ -616,8 +779,8 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              browse the homepage, play games, and switch themes with zero ads while your cookie
-              master membership is active.
+              Browse operation cookie&apos;s homepage, use community chat, and switch custom UI
+              themes with zero banner ads while your membership is active.
             </p>
           </article>
 
@@ -634,8 +797,9 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              claim {dailyCoinsAmount.toLocaleString()} free cookie coins every 24 hours to trigger
-              targeted trolls or stack extra rewards in cookie shop.
+              Claim {dailyCoinsAmount.toLocaleString()} bonus Cookie Coins every 24 hours to send
+              playful screen effects to friends, unlock custom chat themes, or stack rewards in the
+              Cookie Shop.
             </p>
           </article>
 
@@ -652,8 +816,8 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              early access to upcoming cookie master member drops, exclusive custom badges, and new
-              features as they roll out.
+              Unlock the cookie crown badge in chat, get even more custom profile styling, plus
+              automatic access to new member drops as they roll out.
             </p>
           </article>
         </div>
@@ -700,10 +864,15 @@ export default function CookieMasterPage() {
                   textTransform: "lowercase",
                 }}
               >
-                ko-fi pass: {maskReference(masterState?.licenseKey || masterState?.email || "")}
+                lemon squeezy pass:{" "}
+                {maskReference(
+                  masterState?.subscriptionId || masterState?.licenseKey || masterState?.email || "",
+                )}
                 {masterState?.email ? ` · ${maskReference(masterState.email)}` : ""}
                 {masterState?.expiresAt && masterState.expiresAt > 0
-                  ? ` · renews / active until ${new Date(masterState.expiresAt).toLocaleDateString()}`
+                  ? masterState?.status === "cancelled"
+                    ? ` · cancelled (active until ${new Date(masterState.expiresAt).toLocaleDateString()})`
+                    : ` · renews / active until ${new Date(masterState.expiresAt).toLocaleDateString()}`
                   : ""}
               </div>
             </div>
@@ -731,7 +900,11 @@ export default function CookieMasterPage() {
                 type="button"
                 class="studio-tab-btn"
                 disabled={verifying}
-                onClick={() => void verifyMembership(masterState?.licenseKey || masterState?.email || "")}
+                onClick={() =>
+                  void verifyMembership(
+                    masterState?.subscriptionId || masterState?.licenseKey || masterState?.email || "",
+                  )
+                }
               >
                 <i class="fa-solid fa-rotate"></i>
                 <span>{verifying ? "checking..." : "refresh status"}</span>
@@ -780,28 +953,27 @@ export default function CookieMasterPage() {
                   flex: "1 1 320px",
                 }}
               >
-                ko-fi processes recurring billing directly, so to stop future charges open ko-fi
-                billing settings → subscriptions → three dots → don&apos;t renew (or paypal automatic
-                payments). your cookie master perks remain active until your current month expires.
+                lemon squeezy processes recurring billing directly. open your lemon squeezy
+                customer billing portal anytime to cancel auto-renewal or update your payment
+                method—your cookie master perks remain active until your current month expires.
               </div>
-              <a
-                href="https://ko-fi.com/settings"
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                type="button"
+                onClick={() => void handleOpenBillingPortal()}
                 class="studio-tab-btn"
-                style={{ textDecoration: "none", color: "var(--text-primary)" }}
+                style={{ color: "var(--text-primary)" }}
               >
                 <i class="fa-solid fa-arrow-up-right-from-square"></i>
-                <span>open ko-fi billing settings</span>
-              </a>
+                <span>open billing portal</span>
+              </button>
             </div>
           )}
         </div>
       ) : (
         <div class="apps-custom-launcher" style={{ padding: "16px 18px" }}>
           <div class="apps-custom-launcher-label">
-            <i class="fa-solid fa-mug-hot"></i>
-            <span>already subscribed on ko-fi? verify with your email or transaction id</span>
+            <i class="fa-solid fa-key"></i>
+            <span>already subscribed via lemon squeezy? verify with your email, license key, or subscription id</span>
           </div>
 
           <form
@@ -812,7 +984,7 @@ export default function CookieMasterPage() {
             <input
               type="text"
               class="apps-custom-input"
-              placeholder="ko-fi email or transaction id"
+              placeholder="email, license key, or subscription id"
               value={lookupInput}
               onInput={(e) => setLookupInput((e.target as HTMLInputElement).value)}
               disabled={verifying}

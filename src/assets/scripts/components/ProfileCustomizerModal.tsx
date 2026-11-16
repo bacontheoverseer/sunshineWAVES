@@ -129,6 +129,15 @@ export default function ProfileCustomizerModal({
 
   const avatarFileRef = useRef<HTMLInputElement>(null);
   const bannerFileRef = useRef<HTMLInputElement>(null);
+  const hasEditedRef = useRef(false);
+
+  // Hydrate draft if parent finishes loading the saved server profile after mount
+  useEffect(() => {
+    if (hasEditedRef.current) return;
+    setCustom(initialCustom);
+    setBio(initialBio);
+    setStatusText(initialStatusText);
+  }, [initialCustom, initialBio, initialStatusText]);
 
   useEffect(() => {
     if (!gifPickerFor) return;
@@ -163,10 +172,12 @@ export default function ProfileCustomizerModal({
     key: K,
     value: ProfileCustomization[K]
   ) => {
+    hasEditedRef.current = true;
     setCustom((prev) => ({ ...prev, [key]: value }));
   };
 
   const patchCustom = (patch: Partial<ProfileCustomization>) => {
+    hasEditedRef.current = true;
     setCustom((prev) => ({ ...prev, ...patch }));
   };
 
@@ -234,6 +245,7 @@ export default function ProfileCustomizerModal({
               type="button"
               class="chat-gif-more-btn"
               onClick={() => {
+                hasEditedRef.current = true;
                 setCustom(getDefaultCustomization(username));
                 setBio("");
                 setStatusText("");
@@ -403,7 +415,10 @@ export default function ProfileCustomizerModal({
                       placeholder="chilling on sunshinewaves..."
                       maxLength={60}
                       value={statusText}
-                      onInput={(e) => setStatusText((e.target as HTMLInputElement).value)}
+                      onInput={(e) => {
+                        hasEditedRef.current = true;
+                        setStatusText((e.target as HTMLInputElement).value);
+                      }}
                     />
                     {(["online", "idle", "dnd"] as const).map((st) => (
                       <button
@@ -428,7 +443,10 @@ export default function ProfileCustomizerModal({
                     maxLength={220}
                     rows={3}
                     value={bio}
-                    onInput={(e) => setBio((e.target as HTMLTextAreaElement).value)}
+                    onInput={(e) => {
+                      hasEditedRef.current = true;
+                      setBio((e.target as HTMLTextAreaElement).value);
+                    }}
                   />
                 </div>
               </div>

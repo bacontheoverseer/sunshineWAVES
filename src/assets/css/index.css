@@ -1809,3 +1809,90 @@ body:has(#auth-gate-backdrop) .sunshine-ad-node {
     text-align: center;
     opacity: 0.8;
 }
+
+/* ─────────────────────────────────────────────────────────────
+   Dark Mode Wallpaper Grading & Surface Refinement
+   ───────────────────────────────────────────────────────────── */
+.site-bg-layer {
+    display: none;
+}
+
+html.dark-mode {
+    background-color: var(--bg-body, #050507);
+}
+
+html.dark-mode body {
+    background-color: transparent;
+    background-image: none;
+}
+
+html.dark-mode body.games-view,
+html.dark-mode body.apps-view,
+html.dark-mode body.studio-view,
+html.dark-mode body.shop-view,
+html.dark-mode body.master-view,
+html.dark-mode body.browser-view {
+    background-color: var(--bg-body, #050507);
+    background-image: none;
+}
+
+html.dark-mode .site-bg-layer {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    overflow: hidden;
+    background-color: #161311;
+}
+
+html.dark-mode body.games-view .site-bg-layer,
+html.dark-mode body.apps-view .site-bg-layer,
+html.dark-mode body.studio-view .site-bg-layer,
+html.dark-mode body.shop-view .site-bg-layer,
+html.dark-mode body.master-view .site-bg-layer,
+html.dark-mode body.browser-view .site-bg-layer {
+    display: none;
+}
+
+html.dark-mode .site-bg-layer::before {
+    content: "";
+    position: absolute;
+    inset: -6px;
+    background-image: url(/background.jpg);
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    /* Apply gentle contrast before darkening so tiles, cookie dough & chips stay distinct instead of crushing to pure black */
+    filter: contrast(1.16) saturate(0.86) brightness(0.26);
+    transform: translateZ(0);
+}
+
+html.dark-mode .site-bg-layer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(ellipse 92% 84% at 50% 48%, rgba(8, 7, 9, 0.02) 32%, rgba(6, 5, 8, 0.28) 100%),
+        color-mix(in srgb, var(--bg-body, #050507) 14%, transparent);
+    pointer-events: none;
+}
+
+html.dark-mode .main-container {
+    background: color-mix(in srgb, var(--bg-surface-2, #161820) 72%, rgba(20, 24, 34, 0.34));
+    border-color: color-mix(in srgb, var(--border-light, rgba(255, 255, 255, 0.16)) 85%, rgba(255, 255, 255, 0.14));
+    box-shadow: 0 24px 72px rgba(0, 0, 0, 0.62), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+html.low-power-device.dark-mode .main-container {
+    background: color-mix(in srgb, var(--bg-surface-2, #161820) 90%, transparent);
+}
+
+html.dark-mode .title img {
+    filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.55));
+}
+
+html.dark-mode .footer {
+    color: var(--text-dimmed, rgba(255, 255, 255, 0.62));
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.75);
+}

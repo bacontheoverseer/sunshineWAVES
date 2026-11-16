@@ -128,6 +128,9 @@ export default function SettingsMenu() {
   const [betaHomepageDecorations, setBetaHomepageDecorations] = useState(
     () => localStorage.getItem("betaHomepageDecorations") === "true",
   );
+  const [darkMode, setDarkMode] = useState(
+    () => localStorage.getItem("darkMode") === "true",
+  );
   const [versionInfo, setVersionInfo] = useState("");
 
   useEffect(() => {
@@ -246,28 +249,30 @@ export default function SettingsMenu() {
     window.showToast?.("success", "settings saved");
   };
 
+  const runThemeTransition = (apply: () => void) => {
+    if (!document.startViewTransition) {
+      apply();
+      return;
+    }
+    document.documentElement.classList.add("theme-transitioning");
+    const transition = document.startViewTransition(() => {
+      apply();
+    });
+    transition.finished.then(() => {
+      document.documentElement.classList.remove("theme-transitioning");
+    });
+  };
+
   const handleSetting = (key: string, value: string, setter: (v: string) => void) => {
     setter(value);
     save(key, value);
 
     if (key === "theme") {
-      const applyTheme = () => {
+      runThemeTransition(() => {
         if (value === "default")
           document.documentElement.removeAttribute("data-theme");
         else document.documentElement.setAttribute("data-theme", value);
-      };
-
-      if (!document.startViewTransition) {
-        applyTheme();
-      } else {
-        document.documentElement.classList.add("theme-transitioning");
-        const transition = document.startViewTransition(() => {
-          applyTheme();
-        });
-        transition.finished.then(() => {
-          document.documentElement.classList.remove("theme-transitioning");
-        });
-      }
+      });
     } else if (key === "gameSource") {
       document.dispatchEvent(
         new CustomEvent("gameSourceUpdated", { detail: value }),
@@ -312,6 +317,10 @@ export default function SettingsMenu() {
       document.dispatchEvent(
         new CustomEvent("betaHomepageDecorationsUpdated", { detail: value }),
       );
+    } else if (key === "darkMode") {
+      runThemeTransition(() => {
+        document.documentElement.classList.toggle("dark-mode", value);
+      });
     }
   };
 
@@ -520,6 +529,15 @@ export default function SettingsMenu() {
                 onOpen={setOpenSelector}
                 onClose={() => setOpenSelector(null)}
                 onChange={(v) => handleSetting("theme", v, setTheme)}
+              />
+            </div>
+            <div class="settings-item">
+              <label>dark mode</label>
+              <p>darken the homepage wallpaper and surfaces cleanly for low-light browsing.</p>
+              <Toggle
+                id="dark-mode-toggle"
+                checked={darkMode}
+                onChange={(v) => handleToggle("darkMode", v, setDarkMode)}
               />
             </div>
             <div class="settings-item">

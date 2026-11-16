@@ -782,7 +782,20 @@ app.use(
 );
 
 app.use("/api/", apiLimiter);
-app.use("/api/", express.json({ limit: "8mb" }));
+app.use(
+  "/api/",
+  express.json({
+    limit: "8mb",
+    verify: (req, _res, buf) => {
+      if (
+        req.originalUrl?.startsWith("/api/cookie-master/webhook") ||
+        req.originalUrl?.startsWith("/api/lemonsqueezy/webhook")
+      ) {
+        req.rawBody = buf;
+      }
+    },
+  }),
+);
 app.use("/api/", express.urlencoded({ extended: true, limit: "1mb" }));
 
 app.use((req, res, next) => {
@@ -5044,45 +5057,90 @@ app.post("/api/shop/troll", async (req, res) => {
   }
 });
 
-// --- Cookie Master ($2/mo Subscription) & Ko-fi Checkout / Webhook Integration ---
-const KOFI_USERNAME = (process.env.KOFI_USERNAME || "").trim().replace(/^@+/, "");
-const KOFI_CHECKOUT_URL = (
-  process.env.KOFI_CHECKOUT_URL ||
-  process.env.KOFI_PRODUCT_URL ||
-  (KOFI_USERNAME ? `https://ko-fi.com/${encodeURIComponent(KOFI_USERNAME)}/tiers` : "")
+// --- Cookie Master ($2/mo Subscription) & Lemon Squeezy Checkout / Webhook Integration ---
+const LEMONSQUEEZY_CHECKOUT_URL = (
+  process.env.LEMONSQUEEZY_CHECKOUT_URL ||
+  process.env.LEMONSQUEEZY_PRODUCT_URL ||
+  ""
 ).trim();
-const KOFI_VERIFICATION_TOKEN = (process.env.KOFI_VERIFICATION_TOKEN || "").trim();
-const KOFI_TIER_NAME = (process.env.KOFI_TIER_NAME || "").trim();
-const KOFI_SUB_DURATION_MS = 33 * 24 * 60 * 60 * 1000; // 31 days + 2 day renewal grace
-const KOFI_SUBS_FILE = path.join(__dirname, "data", "kofi-subscriptions.json");
+const LEMONSQUEEZY_STORE_SLUG = (process.env.LEMONSQUEEZY_STORE_SLUG || "").trim();
+const LEMONSQUEEZY_WEBHOOK_SECRET = (process.env.LEMONSQUEEZY_WEBHOOK_SECRET || "").trim();
+const LEMONSQUEEZY_API_KEY = (process.env.LEMONSQUEEZY_API_KEY || "").trim();
+const LEMONSQUEEZY_PRODUCT_ID = (process.env.LEMONSQUEEZY_PRODUCT_ID || "").trim();
+const LEMONSQUEEZY_VARIANT_ID = (process.env.LEMONSQUEEZY_VARIANT_ID || "").trim();
+const LEMONSQUEEZY_TIER_NAME = (process.env.LEMONSQUEEZY_TIER_NAME || "").trim();
+const LEMONSQUEEZY_SUB_DURATION_MS = 33 * 24 * 60 * 60 * 1000; // 31 days + 2 day renewal grace
+const LEMONSQUEEZY_RENEWAL_GRACE_MS = 2 * 24 * 60 * 60 * 1000;
+const LEMONSQUEEZY_SUBS_FILE = path.resolve(
+  process.env.COOKIE_MASTER_SUBS_PATH || path.join(__dirname, "data", "lemonsqueezy-subscriptions.json"),
+);
+const LEMONSQUEEZY_KV_KEY = "lemonsqueezy_subscriptions_v1";
 
-let kofiSubscriptionsCache = null;
-
-function loadKofiSubscriptions() {
-  if (Array.isArray(kofiSubscriptionsCache)) return kofiSubscriptionsCache;
-  try {
-    if (fs.existsSync(KOFI_SUBS_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(KOFI_SUBS_FILE, "utf-8"));
-      if (Array.isArray(parsed)) {
-        kofiSubscriptionsCache = parsed;
-        return kofiSubscriptionsCache;
-      }
-    }
-  } catch (e) {
-    console.warn("Ko-fi subscriptions load warning:", e.message);
+function deriveLemonBillingUrl() {
+  const explicit = (process.env.LEMONSQUEEZY_BILLING_URL || "").trim();
+  if (explicit) return explicit;
+  if (LEMONSQUEEZY_STORE_SLUG) {
+    return `https://${encodeURIComponent(LEMONSQUEEZY_STORE_SLUG)}.lemonsqueezy.com/billing`;
   }
-  kofiSubscriptionsCache = [];
-  return kofiSubscriptionsCache;
+  if (LEMONSQUEEZY_CHECKOUT_URL) {
+    try {
+      const parsed = new URL(LEMONSQUEEZY_CHECKOUT_URL);
+      if (parsed.protocol === "https:") {
+        return `${parsed.origin}/billing`;
+      }
+    } catch {}
+  }
+  return "";
 }
 
-function saveKofiSubscriptions(list) {
-  kofiSubscriptionsCache = list;
+const LEMONSQUEEZY_BILLING_URL = deriveLemonBillingUrl();
+const LEMON_INACTIVE_STATUSES = new Set(["expired", "unpaid", "refunded", "paused"]);
+
+let lemonSubscriptionsCache = null;
+let supabaseHasLemonTable = null;
+
+function loadLemonSubscriptions() {
+  if (Array.isArray(lemonSubscriptionsCache)) return lemonSubscriptionsCache;
+  const byId = new Map();
+  const mergeList = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      if (!item || typeof item !== "object") continue;
+      const id = String(item.subscriptionId || item.transactionId || "").trim();
+      if (!id) continue;
+      byId.set(id.toLowerCase(), { ...byId.get(id.toLowerCase()), ...item, subscriptionId: id });
+    }
+  };
   try {
-    const dir = path.dirname(KOFI_SUBS_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(KOFI_SUBS_FILE, JSON.stringify(list, null, 2), "utf-8");
+    const kvArr = kvGetJson(LEMONSQUEEZY_KV_KEY, null);
+    mergeList(kvArr);
   } catch (e) {
-    console.warn("Ko-fi subscriptions save warning:", e.message);
+    console.warn("Lemon Squeezy KV load warning:", e?.message);
+  }
+  try {
+    if (fs.existsSync(LEMONSQUEEZY_SUBS_FILE)) {
+      mergeList(JSON.parse(fs.readFileSync(LEMONSQUEEZY_SUBS_FILE, "utf-8")));
+    }
+  } catch (e) {
+    console.warn("Lemon Squeezy subscriptions load warning:", e?.message);
+  }
+  lemonSubscriptionsCache = Array.from(byId.values());
+  return lemonSubscriptionsCache;
+}
+
+function saveLemonSubscriptions(list) {
+  lemonSubscriptionsCache = list;
+  try {
+    kvSetJson(LEMONSQUEEZY_KV_KEY, list);
+  } catch (e) {
+    console.warn("Lemon Squeezy KV save warning:", e?.message);
+  }
+  try {
+    const dir = path.dirname(LEMONSQUEEZY_SUBS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(LEMONSQUEEZY_SUBS_FILE, JSON.stringify(list, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("Lemon Squeezy subscriptions file save warning:", e?.message);
   }
 }
 
@@ -5095,214 +5153,606 @@ function extractPossibleUsername(text) {
   return singleWord?.[1] ? singleWord[1].toLowerCase() : "";
 }
 
-async function persistKofiSubscriptionRecord(record) {
-  const list = loadKofiSubscriptions();
-  const idx = list.findIndex(
-    (r) => String(r.transactionId || "").toLowerCase() === record.transactionId.toLowerCase(),
-  );
-  if (idx >= 0) {
-    list[idx] = { ...list[idx], ...record };
-  } else {
-    list.push(record);
-  }
-  saveKofiSubscriptions(list);
-
-  if (USE_SUPABASE_CLOUDSYNC) {
-    try {
-      const { ok, status, text } = await supabaseRest("kofi_subscriptions?on_conflict=transaction_id", {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({
-          transaction_id: record.transactionId,
-          email_lower: record.emailLower,
-          from_name_lower: record.fromNameLower,
-          message_username_lower: record.messageUsernameLower,
-          claimed_username_lower: record.claimedUsernameLower || "",
-          tier_name: record.tierName,
-          amount: Number(record.amount) || 2,
-          verified_at: new Date(record.verifiedAt).toISOString(),
-          expires_at: new Date(record.expiresAt).toISOString(),
-        }),
-      });
-      if (!ok) {
-        console.warn(`Supabase kofi_subscriptions upsert failed (${status}): ${text}`);
-      }
-    } catch (e) {
-      console.warn("Supabase kofi_subscriptions upsert error:", e.message);
-    }
-  }
+function isLemonRecordActive(r, now = Date.now()) {
+  if (!r || typeof r !== "object") return false;
+  const status = String(r.status || "active").trim().toLowerCase();
+  if (LEMON_INACTIVE_STATUSES.has(status)) return false;
+  const exp = typeof r.expiresAt === "number" ? r.expiresAt : Date.parse(r.expires_at || "") || 0;
+  return exp > now;
 }
 
-async function findActiveKofiSubscription({ query = "", username = "" }) {
+function computeLemonExpiresAt(attrs, now = Date.now()) {
+  const status = String(attrs?.status || "active").trim().toLowerCase();
+  if (LEMON_INACTIVE_STATUSES.has(status)) {
+    return now;
+  }
+  const endsTs = attrs?.ends_at ? Date.parse(attrs.ends_at) : 0;
+  if (status === "cancelled") {
+    return Number.isFinite(endsTs) && endsTs > 0 ? endsTs : now + LEMONSQUEEZY_SUB_DURATION_MS;
+  }
+  const renewsTs = attrs?.renews_at ? Date.parse(attrs.renews_at) : 0;
+  const trialEndsTs = attrs?.trial_ends_at ? Date.parse(attrs.trial_ends_at) : 0;
+  const target = Math.max(
+    Number.isFinite(renewsTs) ? renewsTs + LEMONSQUEEZY_RENEWAL_GRACE_MS : 0,
+    Number.isFinite(trialEndsTs) ? trialEndsTs + LEMONSQUEEZY_RENEWAL_GRACE_MS : 0,
+    Number.isFinite(endsTs) ? endsTs : 0,
+  );
+  return target > now ? target : now + LEMONSQUEEZY_SUB_DURATION_MS;
+}
+
+function matchesLemonProductFilters(attrs = {}, meta = {}) {
+  const variantId = String(attrs?.variant_id ?? attrs?.first_order_item?.variant_id ?? meta?.variant_id ?? "").trim();
+  const productId = String(attrs?.product_id ?? attrs?.first_order_item?.product_id ?? meta?.product_id ?? "").trim();
+  if (LEMONSQUEEZY_VARIANT_ID && variantId && variantId !== LEMONSQUEEZY_VARIANT_ID) {
+    return false;
+  }
+  if (LEMONSQUEEZY_PRODUCT_ID && productId && productId !== LEMONSQUEEZY_PRODUCT_ID) {
+    return false;
+  }
+  return true;
+}
+
+async function persistLemonSubscriptionRecord(record) {
+  const list = loadLemonSubscriptions();
+  const subKey = String(record.subscriptionId || "").toLowerCase();
+  const ordKey = String(record.orderId || "").toLowerCase();
+  const idx = list.findIndex((r) => {
+    const existingSub = String(r.subscriptionId || "").toLowerCase();
+    const existingOrd = String(r.orderId || "").toLowerCase();
+    if (subKey && existingSub === subKey) return true;
+    if (ordKey && existingOrd === ordKey && existingSub.startsWith("ord_")) return true;
+    return false;
+  });
+  const existing = idx >= 0 ? list[idx] : {};
+  const merged = {
+    ...existing,
+    ...record,
+    orderId: record.orderId || existing.orderId || "",
+    customerId: record.customerId || existing.customerId || "",
+    licenseKey: record.licenseKey || existing.licenseKey || "",
+    emailLower: record.emailLower || existing.emailLower || "",
+    userNameLower: record.userNameLower || existing.userNameLower || "",
+    customUsernameLower: record.customUsernameLower || existing.customUsernameLower || "",
+    claimedUsernameLower: record.claimedUsernameLower || existing.claimedUsernameLower || "",
+    customerPortalUrl: record.customerPortalUrl || existing.customerPortalUrl || "",
+    variantId: record.variantId || existing.variantId || "",
+    productId: record.productId || existing.productId || "",
+    cancelledAt:
+      record.cancelledAt !== undefined ? record.cancelledAt : existing.cancelledAt ?? null,
+  };
+  if (idx >= 0) {
+    list[idx] = merged;
+  } else {
+    list.push(merged);
+  }
+  saveLemonSubscriptions(list);
+
+  if (USE_SUPABASE_CLOUDSYNC && supabaseHasLemonTable !== false) {
+    try {
+      const { ok, status, text, json } = await supabaseRest(
+        "lemonsqueezy_subscriptions?on_conflict=subscription_id",
+        {
+          method: "POST",
+          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify({
+            subscription_id: merged.subscriptionId,
+            order_id: merged.orderId || "",
+            customer_id: merged.customerId || "",
+            license_key: merged.licenseKey || "",
+            email_lower: merged.emailLower || "",
+            user_name_lower: merged.userNameLower || "",
+            custom_username_lower: merged.customUsernameLower || "",
+            claimed_username_lower: merged.claimedUsernameLower || "",
+            variant_id: merged.variantId || "",
+            product_id: merged.productId || "",
+            tier_name: merged.tierName || "Cookie Master",
+            status: merged.status || "active",
+            customer_portal_url: merged.customerPortalUrl || "",
+            amount: Number(merged.amount) || 2,
+            verified_at: new Date(merged.verifiedAt || Date.now()).toISOString(),
+            expires_at: new Date(merged.expiresAt || Date.now()).toISOString(),
+            cancelled_at: merged.cancelledAt ? new Date(merged.cancelledAt).toISOString() : null,
+          }),
+        },
+      );
+      if (ok) {
+        supabaseHasLemonTable = true;
+      } else if (status === 404 || json?.code === "PGRST205") {
+        supabaseHasLemonTable = false;
+      } else {
+        console.warn(`Supabase lemonsqueezy_subscriptions upsert failed (${status}): ${text}`);
+      }
+    } catch (e) {
+      console.warn("Supabase lemonsqueezy_subscriptions upsert error:", e?.message);
+    }
+  }
+  return merged;
+}
+
+async function findActiveLemonSubscription({ query = "", username = "" }) {
   const qLower = String(query || "").trim().toLowerCase();
   const userLower = String(username || "").trim().toLowerCase();
   const now = Date.now();
 
   const matchesRecord = (r) => {
-    const exp = typeof r.expiresAt === "number" ? r.expiresAt : Date.parse(r.expires_at || "") || 0;
-    if (exp <= now) return false;
-    const tx = String(r.transactionId || r.transaction_id || "").toLowerCase();
+    if (!isLemonRecordActive(r, now)) return false;
+    const subId = String(r.subscriptionId || r.subscription_id || "").toLowerCase();
+    const ordId = String(r.orderId || r.order_id || "").toLowerCase();
+    const licKey = String(r.licenseKey || r.license_key || "").toLowerCase();
     const em = String(r.emailLower || r.email_lower || "").toLowerCase();
-    const msgUser = String(r.messageUsernameLower || r.message_username_lower || "").toLowerCase();
-    const fromUser = String(r.fromNameLower || r.from_name_lower || "").toLowerCase();
+    const customUser = String(r.customUsernameLower || r.custom_username_lower || "").toLowerCase();
+    const nameUser = String(r.userNameLower || r.user_name_lower || "").toLowerCase();
     const claimedUser = String(r.claimedUsernameLower || r.claimed_username_lower || "").toLowerCase();
 
-    if (qLower && (tx === qLower || em === qLower)) return true;
+    if (
+      qLower &&
+      (subId === qLower || ordId === qLower || licKey === qLower || em === qLower)
+    ) {
+      return true;
+    }
     if (
       userLower &&
-      (claimedUser === userLower || msgUser === userLower || fromUser === userLower)
+      (claimedUser === userLower || customUser === userLower || nameUser === userLower)
     ) {
       return true;
     }
     return false;
   };
 
-  if (USE_SUPABASE_CLOUDSYNC && (qLower || userLower)) {
+  if (USE_SUPABASE_CLOUDSYNC && supabaseHasLemonTable !== false && (qLower || userLower)) {
     try {
       const quotePgVal = (v) => `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
       const filters = [];
       if (qLower) {
         const enc = encodeURIComponent(quotePgVal(qLower));
-        filters.push(`transaction_id.ilike.${enc}`, `email_lower.eq.${enc}`);
+        filters.push(
+          `subscription_id.ilike.${enc}`,
+          `order_id.ilike.${enc}`,
+          `license_key.ilike.${enc}`,
+          `email_lower.eq.${enc}`,
+        );
       }
       if (userLower) {
         const encU = encodeURIComponent(quotePgVal(userLower));
         filters.push(
           `claimed_username_lower.eq.${encU}`,
-          `message_username_lower.eq.${encU}`,
-          `from_name_lower.eq.${encU}`,
+          `custom_username_lower.eq.${encU}`,
+          `user_name_lower.eq.${encU}`,
         );
       }
-      const { ok, json } = await supabaseRest(
-        `kofi_subscriptions?or=(${filters.join(",")})&order=expires_at.desc&limit=5`,
+      const { ok, status, json } = await supabaseRest(
+        `lemonsqueezy_subscriptions?or=(${filters.join(",")})&order=expires_at.desc&limit=8`,
       );
       if (ok && Array.isArray(json)) {
+        supabaseHasLemonTable = true;
         const match = json.find(matchesRecord);
         if (match) {
           return {
-            transactionId: String(match.transaction_id),
+            subscriptionId: String(match.subscription_id),
+            orderId: String(match.order_id || ""),
+            customerId: String(match.customer_id || ""),
+            licenseKey: String(match.license_key || ""),
             emailLower: String(match.email_lower || ""),
-            fromNameLower: String(match.from_name_lower || ""),
-            messageUsernameLower: String(match.message_username_lower || ""),
+            userNameLower: String(match.user_name_lower || ""),
+            customUsernameLower: String(match.custom_username_lower || ""),
             claimedUsernameLower: String(match.claimed_username_lower || ""),
+            variantId: String(match.variant_id || ""),
+            productId: String(match.product_id || ""),
             tierName: String(match.tier_name || "Cookie Master"),
+            status: String(match.status || "active"),
+            customerPortalUrl: String(match.customer_portal_url || ""),
             amount: Number(match.amount) || 2,
             verifiedAt: Date.parse(match.verified_at) || now,
-            expiresAt: Date.parse(match.expires_at) || now + KOFI_SUB_DURATION_MS,
+            expiresAt: Date.parse(match.expires_at) || now + LEMONSQUEEZY_SUB_DURATION_MS,
+            cancelledAt: match.cancelled_at ? Date.parse(match.cancelled_at) || null : null,
           };
         }
+      } else if (status === 404 || json?.code === "PGRST205") {
+        supabaseHasLemonTable = false;
       }
     } catch {}
   }
 
-  const localMatches = loadKofiSubscriptions()
+  const localMatches = loadLemonSubscriptions()
     .filter(matchesRecord)
     .sort((a, b) => (b.expiresAt || 0) - (a.expiresAt || 0));
   return localMatches[0] || null;
 }
 
+async function fetchLemonApi(apiPath) {
+  if (!LEMONSQUEEZY_API_KEY) return null;
+  try {
+    const res = await fetch(`https://api.lemonsqueezy.com/v1${apiPath}`, {
+      headers: {
+        Accept: "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
+        Authorization: `Bearer ${LEMONSQUEEZY_API_KEY}`,
+      },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function validateLemonLicenseRemote(licenseKey, claimUsername = "") {
+  const cleanKey = String(licenseKey || "").trim();
+  if (!cleanKey) return null;
+  try {
+    const res = await fetch("https://api.lemonsqueezy.com/v1/licenses/validate", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ license_key: cleanKey }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.valid) return null;
+    const lk = data.license_key || {};
+    const meta = data.meta || {};
+    if (String(lk.status || "").toLowerCase() !== "active") return null;
+    if (!matchesLemonProductFilters({}, meta)) return null;
+
+    const now = Date.now();
+    const expTs = lk.expires_at ? Date.parse(lk.expires_at) : 0;
+    const expiresAt = Number.isFinite(expTs) && expTs > now ? expTs : now + LEMONSQUEEZY_SUB_DURATION_MS;
+    const subId = meta.subscription_id
+      ? String(meta.subscription_id)
+      : `lic_${String(lk.id || cleanKey)}`;
+    const claimedLower = claimUsername ? claimUsername.trim().toLowerCase() : "";
+    return await persistLemonSubscriptionRecord({
+      subscriptionId: subId,
+      orderId: meta.order_id ? String(meta.order_id) : "",
+      customerId: meta.customer_id ? String(meta.customer_id) : "",
+      licenseKey: String(lk.key || cleanKey),
+      emailLower: String(meta.customer_email || "").trim().toLowerCase(),
+      userNameLower: String(meta.customer_name || "").trim().toLowerCase(),
+      customUsernameLower: claimedLower,
+      claimedUsernameLower: claimedLower,
+      variantId: meta.variant_id ? String(meta.variant_id) : "",
+      productId: meta.product_id ? String(meta.product_id) : "",
+      tierName: String(meta.variant_name || LEMONSQUEEZY_TIER_NAME || "Cookie Master"),
+      status: "active",
+      amount: 2,
+      verifiedAt: now,
+      expiresAt,
+      cancelledAt: null,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function upsertLemonSubscriptionFromApiObj(subObj, extra = {}) {
+  if (!subObj || typeof subObj !== "object") return null;
+  const attrs = subObj.attributes || {};
+  if (!matchesLemonProductFilters(attrs)) return null;
+  const now = Date.now();
+  const expiresAt = computeLemonExpiresAt(attrs, now);
+  const subId = String(subObj.id || extra.subscriptionId || "").trim();
+  if (!subId) return null;
+  const status = String(attrs.status || "active").trim().toLowerCase();
+  const customUser = extractPossibleUsername(extra.customUsername || "");
+  const claimedLower = extra.claimedUsername ? String(extra.claimedUsername).trim().toLowerCase() : "";
+  const record = await persistLemonSubscriptionRecord({
+    subscriptionId: subId,
+    orderId: attrs.order_id ? String(attrs.order_id) : extra.orderId || "",
+    customerId: attrs.customer_id ? String(attrs.customer_id) : extra.customerId || "",
+    licenseKey: extra.licenseKey || "",
+    emailLower: String(attrs.user_email || "").trim().toLowerCase(),
+    userNameLower: String(attrs.user_name || "").trim().toLowerCase(),
+    customUsernameLower: customUser || claimedLower,
+    claimedUsernameLower: claimedLower || customUser,
+    variantId: attrs.variant_id ? String(attrs.variant_id) : "",
+    productId: attrs.product_id ? String(attrs.product_id) : "",
+    tierName: String(attrs.variant_name || attrs.product_name || LEMONSQUEEZY_TIER_NAME || "Cookie Master"),
+    status,
+    customerPortalUrl: String(attrs?.urls?.customer_portal || ""),
+    amount: Number(extra.amount) || 2,
+    verifiedAt: now,
+    expiresAt,
+    cancelledAt:
+      status === "cancelled" && attrs.cancelled
+        ? now
+        : status === "cancelled" && attrs.updated_at
+          ? Date.parse(attrs.updated_at) || now
+          : null,
+  });
+  return isLemonRecordActive(record, now) ? record : null;
+}
+
+async function lookupLemonSubscriptionRemote({ query = "", claimUsername = "" }) {
+  const clean = String(query || "").trim();
+  if (!clean) return null;
+
+  // Try Lemon Squeezy public License API if the input looks like a key / UUID / non-email token
+  if (!clean.includes("@") && !/^\d+$/.test(clean) && clean.length >= 12) {
+    const licMatch = await validateLemonLicenseRemote(clean, claimUsername);
+    if (licMatch) return licMatch;
+  }
+
+  if (!LEMONSQUEEZY_API_KEY) return null;
+
+  if (clean.includes("@")) {
+    const json = await fetchLemonApi(
+      `/subscriptions?filter[user_email]=${encodeURIComponent(clean.toLowerCase())}`,
+    );
+    const rows = Array.isArray(json?.data) ? json.data : [];
+    for (const row of rows) {
+      const saved = await upsertLemonSubscriptionFromApiObj(row, {
+        claimedUsername: claimUsername,
+      });
+      if (saved) return saved;
+    }
+    return null;
+  }
+
+  if (/^\d+$/.test(clean)) {
+    const json = await fetchLemonApi(`/subscriptions/${encodeURIComponent(clean)}`);
+    if (json?.data) {
+      return await upsertLemonSubscriptionFromApiObj(json.data, {
+        claimedUsername: claimUsername,
+      });
+    }
+  }
+
+  return null;
+}
+
+function isValidLemonSignature(req) {
+  if (!LEMONSQUEEZY_WEBHOOK_SECRET) return false;
+  const sigHeader = String(req.get("X-Signature") || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sigHeader)) return false;
+  const rawBuf = Buffer.isBuffer(req.rawBody)
+    ? req.rawBody
+    : Buffer.from(typeof req.body === "string" ? req.body : JSON.stringify(req.body || {}), "utf8");
+  const expectedDigest = crypto
+    .createHmac("sha256", LEMONSQUEEZY_WEBHOOK_SECRET)
+    .update(rawBuf)
+    .digest();
+  const incomingDigest = Buffer.from(sigHeader, "hex");
+  return (
+    expectedDigest.length === incomingDigest.length &&
+    crypto.timingSafeEqual(expectedDigest, incomingDigest)
+  );
+}
+
 app.get("/api/cookie-master/config", (_req, res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
   res.json({
-    configured: Boolean(KOFI_CHECKOUT_URL),
-    checkoutUrl: KOFI_CHECKOUT_URL,
-    hasWebhookVerification: Boolean(KOFI_VERIFICATION_TOKEN),
+    configured: Boolean(LEMONSQUEEZY_CHECKOUT_URL),
+    provider: "lemonsqueezy",
+    checkoutUrl: LEMONSQUEEZY_CHECKOUT_URL,
+    billingUrl: LEMONSQUEEZY_BILLING_URL,
+    hasWebhookVerification: Boolean(LEMONSQUEEZY_WEBHOOK_SECRET),
+    hasApiKey: Boolean(LEMONSQUEEZY_API_KEY),
     priceMonthly: 2,
     dailyCoins: 1000,
-    tierName: KOFI_TIER_NAME || "Cookie Master",
+    tierName: LEMONSQUEEZY_TIER_NAME || "Cookie Master",
   });
 });
 
-async function handleKofiWebhook(req, res) {
+async function handleLemonSqueezyWebhook(req, res) {
   try {
-    const rawData = req.body?.data;
+    if (!LEMONSQUEEZY_WEBHOOK_SECRET) {
+      return res.status(503).send("LEMONSQUEEZY_WEBHOOK_SECRET not configured");
+    }
+    if (!isValidLemonSignature(req)) {
+      return res.status(401).send("Unauthorized: Invalid Lemon Squeezy X-Signature");
+    }
+
     const payload =
-      typeof rawData === "string"
-        ? JSON.parse(rawData)
-        : rawData && typeof rawData === "object"
-          ? rawData
-          : req.body;
-
-    if (!payload || typeof payload !== "object") {
-      return res.status(400).send("Invalid Ko-fi webhook payload");
+      req.body && typeof req.body === "object"
+        ? req.body
+        : Buffer.isBuffer(req.rawBody)
+          ? JSON.parse(req.rawBody.toString("utf8"))
+          : null;
+    if (!payload || typeof payload !== "object" || !payload.data) {
+      return res.status(400).send("Invalid Lemon Squeezy webhook payload");
     }
 
-    if (!KOFI_VERIFICATION_TOKEN) {
-      return res.status(503).send("KOFI_VERIFICATION_TOKEN not configured");
+    const meta = payload.meta || {};
+    const data = payload.data || {};
+    const attrs = data.attributes || {};
+    const eventName = String(meta.event_name || req.get("X-Event-Name") || "").trim();
+    const customData = meta.custom_data && typeof meta.custom_data === "object" ? meta.custom_data : {};
+    const customUsernameLower = extractPossibleUsername(
+      customData.username || customData.user || customData.cloudsync_username || "",
+    );
+
+    if (!matchesLemonProductFilters(attrs, meta)) {
+      return res.status(200).send("Ignored non-Cookie-Master product/variant");
     }
 
-    if (payload.verification_token !== KOFI_VERIFICATION_TOKEN) {
-      return res.status(401).send("Unauthorized: Invalid Ko-fi verification token");
-    }
-
-    const type = String(payload.type || "");
-    const isSub = payload.is_subscription_payment === true || type === "Subscription";
-    const amountNum = Number(payload.amount || 0);
-    const tierName = String(payload.tier_name || "").trim();
-
-    if (!isSub || amountNum < 1.75) {
-      return res.status(200).send("Ignored non-subscription or lower-tier payment");
-    }
-
-    if (
-      KOFI_TIER_NAME &&
-      tierName &&
-      tierName.toLowerCase() !== KOFI_TIER_NAME.toLowerCase()
-    ) {
-      return res.status(200).send("Ignored different Ko-fi tier");
-    }
-
-    const transactionId = String(payload.kofi_transaction_id || payload.message_id || "").trim();
-    if (!transactionId) {
-      return res.status(400).send("Missing Ko-fi transaction id");
-    }
-
-    const emailLower = String(payload.email || "").trim().toLowerCase();
-    const fromNameLower = String(payload.from_name || "").trim().toLowerCase();
-    const messageUsernameLower = extractPossibleUsername(payload.message);
     const now = Date.now();
 
-    await persistKofiSubscriptionRecord({
-      transactionId,
-      emailLower,
-      fromNameLower,
-      messageUsernameLower,
-      claimedUsernameLower: messageUsernameLower || "",
-      tierName: tierName || "Cookie Master",
-      amount: amountNum,
-      verifiedAt: now,
-      expiresAt: now + KOFI_SUB_DURATION_MS,
-    });
+    if (eventName.startsWith("subscription_") && eventName !== "subscription_payment_success" && eventName !== "subscription_payment_failed") {
+      const subId = String(data.id || "").trim();
+      if (!subId) return res.status(400).send("Missing subscription id");
+      const status =
+        eventName === "subscription_expired"
+          ? "expired"
+          : String(attrs.status || "active").trim().toLowerCase();
+      const expiresAt = computeLemonExpiresAt({ ...attrs, status }, now);
+      await persistLemonSubscriptionRecord({
+        subscriptionId: subId,
+        orderId: attrs.order_id ? String(attrs.order_id) : "",
+        customerId: attrs.customer_id ? String(attrs.customer_id) : "",
+        emailLower: String(attrs.user_email || "").trim().toLowerCase(),
+        userNameLower: String(attrs.user_name || "").trim().toLowerCase(),
+        customUsernameLower,
+        claimedUsernameLower: customUsernameLower,
+        variantId: attrs.variant_id ? String(attrs.variant_id) : "",
+        productId: attrs.product_id ? String(attrs.product_id) : "",
+        tierName: String(attrs.variant_name || attrs.product_name || LEMONSQUEEZY_TIER_NAME || "Cookie Master"),
+        status,
+        customerPortalUrl: String(attrs?.urls?.customer_portal || ""),
+        amount: 2,
+        verifiedAt: now,
+        expiresAt,
+        cancelledAt: status === "cancelled" ? now : null,
+      });
+      return res.status(200).send(`Recorded Lemon Squeezy ${eventName}`);
+    }
 
-    return res.status(200).send("Ko-fi Cookie Master subscription recorded");
+    if (eventName === "subscription_payment_success" || eventName === "subscription_payment_failed") {
+      const subId = String(attrs.subscription_id || data.id || "").trim();
+      if (!subId) return res.status(400).send("Missing invoice subscription id");
+      const isSuccess = eventName === "subscription_payment_success" && attrs.refunded !== true;
+      const existing = loadLemonSubscriptions().find(
+        (r) => String(r.subscriptionId || "") === subId,
+      );
+      const amountCents = Number(attrs.total || 0);
+      await persistLemonSubscriptionRecord({
+        subscriptionId: subId,
+        orderId: existing?.orderId || "",
+        customerId: attrs.customer_id ? String(attrs.customer_id) : existing?.customerId || "",
+        licenseKey: existing?.licenseKey || "",
+        emailLower: String(attrs.user_email || existing?.emailLower || "").trim().toLowerCase(),
+        userNameLower: String(attrs.user_name || existing?.userNameLower || "").trim().toLowerCase(),
+        customUsernameLower: customUsernameLower || existing?.customUsernameLower || "",
+        claimedUsernameLower: existing?.claimedUsernameLower || customUsernameLower || "",
+        variantId: existing?.variantId || LEMONSQUEEZY_VARIANT_ID || "",
+        productId: existing?.productId || LEMONSQUEEZY_PRODUCT_ID || "",
+        tierName: existing?.tierName || LEMONSQUEEZY_TIER_NAME || "Cookie Master",
+        status: isSuccess ? "active" : "past_due",
+        customerPortalUrl: existing?.customerPortalUrl || "",
+        amount: amountCents > 0 ? Number((amountCents / 100).toFixed(2)) : 2,
+        verifiedAt: now,
+        expiresAt: isSuccess
+          ? now + LEMONSQUEEZY_SUB_DURATION_MS
+          : Math.max(existing?.expiresAt || 0, now + LEMONSQUEEZY_RENEWAL_GRACE_MS),
+        cancelledAt: null,
+      });
+      return res.status(200).send(`Recorded Lemon Squeezy ${eventName}`);
+    }
+
+    if (eventName === "order_created") {
+      const orderId = String(data.id || "").trim();
+      const firstItem = attrs.first_order_item || {};
+      const status = String(attrs.status || "").toLowerCase();
+      if (orderId && (status === "paid" || status === "pending") && !attrs.refunded) {
+        const alreadyHasSub = loadLemonSubscriptions().some(
+          (r) => String(r.orderId || "") === orderId && !String(r.subscriptionId || "").startsWith("ord_"),
+        );
+        if (!alreadyHasSub) {
+          const totalCents = Number(attrs.total || 0);
+          await persistLemonSubscriptionRecord({
+            subscriptionId: `ord_${orderId}`,
+            orderId,
+            customerId: attrs.customer_id ? String(attrs.customer_id) : "",
+            emailLower: String(attrs.user_email || "").trim().toLowerCase(),
+            userNameLower: String(attrs.user_name || "").trim().toLowerCase(),
+            customUsernameLower,
+            claimedUsernameLower: customUsernameLower,
+            variantId: firstItem.variant_id ? String(firstItem.variant_id) : "",
+            productId: firstItem.product_id ? String(firstItem.product_id) : "",
+            tierName: String(firstItem.variant_name || firstItem.product_name || LEMONSQUEEZY_TIER_NAME || "Cookie Master"),
+            status: "active",
+            amount: totalCents > 0 ? Number((totalCents / 100).toFixed(2)) : 2,
+            verifiedAt: now,
+            expiresAt: now + LEMONSQUEEZY_SUB_DURATION_MS,
+          });
+        }
+      }
+      return res.status(200).send("Recorded Lemon Squeezy order_created");
+    }
+
+    if (eventName === "order_refunded") {
+      const orderId = String(data.id || "").trim();
+      const list = loadLemonSubscriptions();
+      for (const rec of list) {
+        if (String(rec.orderId || "") === orderId || String(rec.subscriptionId || "") === `ord_${orderId}`) {
+          await persistLemonSubscriptionRecord({
+            ...rec,
+            status: "refunded",
+            expiresAt: now,
+          });
+        }
+      }
+      return res.status(200).send("Processed Lemon Squeezy order_refunded");
+    }
+
+    if (eventName === "license_key_created" || eventName === "license_key_updated") {
+      const orderId = attrs.order_id ? String(attrs.order_id) : "";
+      const licKey = String(attrs.key || "").trim();
+      const licStatus = String(attrs.status || "active").toLowerCase();
+      if (licKey) {
+        const list = loadLemonSubscriptions();
+        const linked = list.find((r) => orderId && String(r.orderId || "") === orderId);
+        if (linked) {
+          await persistLemonSubscriptionRecord({
+            ...linked,
+            licenseKey: licKey,
+            ...(licStatus === "disabled" || licStatus === "expired"
+              ? { status: "expired", expiresAt: now }
+              : {}),
+          });
+        } else if (licStatus === "active") {
+          await persistLemonSubscriptionRecord({
+            subscriptionId: orderId ? `ord_${orderId}` : `lic_${String(data.id || licKey)}`,
+            orderId,
+            customerId: attrs.customer_id ? String(attrs.customer_id) : "",
+            licenseKey: licKey,
+            emailLower: String(attrs.user_email || "").trim().toLowerCase(),
+            userNameLower: String(attrs.user_name || "").trim().toLowerCase(),
+            customUsernameLower,
+            claimedUsernameLower: customUsernameLower,
+            variantId: attrs.variant_id ? String(attrs.variant_id) : "",
+            productId: attrs.product_id ? String(attrs.product_id) : "",
+            tierName: LEMONSQUEEZY_TIER_NAME || "Cookie Master",
+            status: "active",
+            amount: 2,
+            verifiedAt: now,
+            expiresAt: attrs.expires_at ? Date.parse(attrs.expires_at) || now + LEMONSQUEEZY_SUB_DURATION_MS : now + LEMONSQUEEZY_SUB_DURATION_MS,
+          });
+        }
+      }
+      return res.status(200).send(`Processed Lemon Squeezy ${eventName}`);
+    }
+
+    return res.status(200).send(`Ignored Lemon Squeezy event: ${eventName || "unknown"}`);
   } catch (err) {
-    console.error("Ko-fi webhook error:", err);
+    console.error("Lemon Squeezy webhook error:", err);
     return res.status(500).send("Webhook processing error");
   }
 }
 
-app.post("/api/kofi/webhook", handleKofiWebhook);
-app.post("/api/cookie-master/webhook", handleKofiWebhook);
+app.post("/api/lemonsqueezy/webhook", handleLemonSqueezyWebhook);
+app.post("/api/cookie-master/webhook", handleLemonSqueezyWebhook);
 
 app.get("/api/cookie-master/status", async (req, res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
     const tx = String(req.query?.tx || "").trim();
-    const match = await findActiveKofiSubscription({
+    let match = await findActiveLemonSubscription({
       query: tx,
       username: authUser?.username || "",
     });
+    if (!match && tx) {
+      match = await lookupLemonSubscriptionRemote({
+        query: tx,
+        claimUsername: authUser?.username || "",
+      });
+    }
     if (!match) {
       return res.json({ success: true, active: false });
     }
     return res.json({
       success: true,
       active: true,
-      transactionId: match.transactionId,
+      subscriptionId: match.subscriptionId,
+      transactionId: match.subscriptionId,
+      licenseKey: match.licenseKey || match.subscriptionId,
       email: match.emailLower || "",
       tierName: match.tierName || "Cookie Master",
+      status: match.status || "active",
       expiresAt: match.expiresAt,
+      cancelledAt: match.cancelledAt ? new Date(match.cancelledAt).toISOString() : null,
+      canManageBilling: Boolean(match.customerPortalUrl || LEMONSQUEEZY_BILLING_URL || (LEMONSQUEEZY_API_KEY && !String(match.subscriptionId).startsWith("ord_") && !String(match.subscriptionId).startsWith("lic_"))),
     });
   } catch (err) {
     return res.status(500).json({ success: false, active: false, error: err?.message });
@@ -5312,39 +5762,46 @@ app.get("/api/cookie-master/status", async (req, res) => {
 app.post("/api/cookie-master/verify", async (req, res) => {
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
-    const query = String(req.body?.emailOrCode || req.body?.licenseKey || "").trim();
+    const query = String(
+      req.body?.emailOrCode || req.body?.licenseKey || req.body?.subscriptionId || "",
+    ).trim();
     if (!query && !authUser?.username) {
       return res.status(400).json({
         success: false,
         active: false,
-        error: "Enter your Ko-fi email or transaction ID (or sign in to CloudSync).",
+        error: "Enter your Lemon Squeezy email, license key, or subscription ID (or sign in to CloudSync).",
       });
     }
 
-    if (!KOFI_VERIFICATION_TOKEN) {
-      return res.status(503).json({
-        success: false,
-        active: false,
-        error: "Server is missing KOFI_VERIFICATION_TOKEN.",
-      });
-    }
-
-    const match = await findActiveKofiSubscription({
+    let match = await findActiveLemonSubscription({
       query,
       username: authUser?.username || "",
     });
+    if (!match && query) {
+      match = await lookupLemonSubscriptionRemote({
+        query,
+        claimUsername: authUser?.username || "",
+      });
+    }
 
     if (!match) {
+      if (!LEMONSQUEEZY_WEBHOOK_SECRET && !LEMONSQUEEZY_API_KEY) {
+        return res.status(503).json({
+          success: false,
+          active: false,
+          error: "Server is missing LEMONSQUEEZY_WEBHOOK_SECRET / LEMONSQUEEZY_API_KEY.",
+        });
+      }
       return res.status(404).json({
         success: false,
         active: false,
         error:
-          "No active Ko-fi Cookie Master membership found yet. Make sure your monthly $2 membership finished and wait a moment for Ko-fi webhook confirmation.",
+          "No active Lemon Squeezy Cookie Master membership found yet. Finish checkout and wait a moment for webhook confirmation, or try your license key.",
       });
     }
 
-    if (authUser?.username && match.transactionId) {
-      await persistKofiSubscriptionRecord({
+    if (authUser?.username && match.subscriptionId) {
+      await persistLemonSubscriptionRecord({
         ...match,
         claimedUsernameLower: authUser.username.toLowerCase(),
       }).catch(() => {});
@@ -5353,16 +5810,69 @@ app.post("/api/cookie-master/verify", async (req, res) => {
     return res.json({
       success: true,
       active: true,
-      transactionId: match.transactionId,
+      subscriptionId: match.subscriptionId,
+      transactionId: match.subscriptionId,
+      licenseKey: match.licenseKey || match.subscriptionId,
       email: match.emailLower || "",
       tierName: match.tierName || "Cookie Master",
+      status: match.status || "active",
       expiresAt: match.expiresAt,
+      cancelledAt: match.cancelledAt ? new Date(match.cancelledAt).toISOString() : null,
     });
   } catch (err) {
     return res.status(500).json({
       success: false,
       active: false,
-      error: err?.message || "Failed to verify Ko-fi membership.",
+      error: err?.message || "Failed to verify Lemon Squeezy membership.",
+    });
+  }
+});
+
+app.post("/api/cookie-master/portal", async (req, res) => {
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const subHint = String(req.body?.subscriptionId || req.body?.tx || "").trim();
+    const match = await findActiveLemonSubscription({
+      query: subHint,
+      username: authUser?.username || "",
+    });
+
+    const callerOwnsRecord =
+      Boolean(match) &&
+      (!match.claimedUsernameLower ||
+        (authUser?.username && authUser.username.toLowerCase() === match.claimedUsernameLower));
+
+    let portalUrl = LEMONSQUEEZY_BILLING_URL;
+    if (callerOwnsRecord && match) {
+      if (
+        LEMONSQUEEZY_API_KEY &&
+        match.subscriptionId &&
+        !String(match.subscriptionId).startsWith("ord_") &&
+        !String(match.subscriptionId).startsWith("lic_")
+      ) {
+        const subJson = await fetchLemonApi(`/subscriptions/${encodeURIComponent(match.subscriptionId)}`);
+        const freshUrl = String(subJson?.data?.attributes?.urls?.customer_portal || "").trim();
+        if (freshUrl.startsWith("https://")) {
+          portalUrl = freshUrl;
+          await persistLemonSubscriptionRecord({ ...match, customerPortalUrl: freshUrl }).catch(() => {});
+        }
+      } else if (match.customerPortalUrl && String(match.customerPortalUrl).startsWith("https://")) {
+        portalUrl = match.customerPortalUrl;
+      }
+    }
+
+    if (!portalUrl) {
+      return res.status(404).json({
+        success: false,
+        error: "Lemon Squeezy Customer Portal is not configured yet (set LEMONSQUEEZY_BILLING_URL or LEMONSQUEEZY_API_KEY).",
+      });
+    }
+
+    return res.json({ success: true, portalUrl });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Failed to get Lemon Squeezy billing portal link.",
     });
   }
 });

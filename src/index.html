@@ -50,6 +50,10 @@
       body {
         background: var(--bg-body);
       }
+      html.dark-mode,
+      html.dark-mode body {
+        background: var(--bg-body, #050507);
+      }
       .meow, #connection-status {
         display: none;
       }
@@ -67,6 +71,9 @@
       (function () {
         var t = localStorage.getItem("theme") || "sunshine";
         document.documentElement.setAttribute("data-theme", t);
+        if (localStorage.getItem("darkMode") === "true") {
+          document.documentElement.classList.add("dark-mode");
+        }
       })();
       var _revealed = false;
       var _title = "Operation Cookie";

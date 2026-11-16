@@ -822,6 +822,10 @@ function _initSettings(): void {
   } else {
     document.documentElement.removeAttribute("data-theme");
   }
+  document.documentElement.classList.toggle(
+    "dark-mode",
+    localStorage.getItem("darkMode") === "true",
+  );
 
   window.addEventListener("load", () => runInitialCloak(initialLinkCloaking));
 

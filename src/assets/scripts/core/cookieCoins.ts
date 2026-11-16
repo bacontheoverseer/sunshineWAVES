@@ -34,6 +34,8 @@ const DAILY_CLAIM_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export interface CookieMasterState {
   active: boolean;
   licenseKey: string;
+  subscriptionId?: string;
+  status?: string;
   email?: string;
   verifiedAt: number;
   expiresAt?: number;
@@ -50,6 +52,8 @@ export function getCookieMasterState(): CookieMasterState | null {
     return {
       active: parsed.active === true,
       licenseKey: typeof parsed.licenseKey === "string" ? parsed.licenseKey : "",
+      subscriptionId: typeof parsed.subscriptionId === "string" ? parsed.subscriptionId : undefined,
+      status: typeof parsed.status === "string" ? parsed.status : undefined,
       email: typeof parsed.email === "string" ? parsed.email : undefined,
       verifiedAt: Number(parsed.verifiedAt) || 0,
       expiresAt: Number(parsed.expiresAt) || 0,
