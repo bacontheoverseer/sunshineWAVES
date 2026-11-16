@@ -40,37 +40,8 @@ const DEFAULT_CONFIG: MasterConfig = {
 };
 
 const REVERIFY_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const LEMON_JS_SRC = "https://app.lemonsqueezy.com/js/lemon.js";
-
-let lemonJsPromise: Promise<boolean> | null = null;
-
-function ensureLemonJsLoaded(): Promise<boolean> {
-  const w = window as any;
-  if (w.LemonSqueezy?.Url?.Open) return Promise.resolve(true);
-  if (lemonJsPromise) return lemonJsPromise;
-  lemonJsPromise = new Promise((resolve) => {
-    const existing = document.querySelector<HTMLScriptElement>(`script[src="${LEMON_JS_SRC}"]`);
-    if (existing) {
-      w.createLemonSqueezy?.();
-      resolve(Boolean(w.LemonSqueezy?.Url?.Open));
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = LEMON_JS_SRC;
-    script.defer = true;
-    script.onload = () => {
-      try {
-        w.createLemonSqueezy?.();
-        resolve(Boolean(w.LemonSqueezy?.Url?.Open));
-      } catch {
-        resolve(false);
-      }
-    };
-    script.onerror = () => resolve(false);
-    document.head.appendChild(script);
-  });
-  return lemonJsPromise;
-}
+const CHECKOUT_POLL_INTERVAL_MS = 3000;
+const CHECKOUT_POLL_MAX_ATTEMPTS = 60;
 
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
@@ -103,12 +74,14 @@ export default function CookieMasterPage() {
   const [verifying, setVerifying] = useState(false);
   const [claiming, setClaiming] = useState(false);
   const [showCancelPanel, setShowCancelPanel] = useState(false);
+  const [awaitingCheckout, setAwaitingCheckout] = useState(false);
   const [claimRemainingMs, setClaimRemainingMs] = useState<number>(() =>
     getNextDailyClaimRemainingMs()
   );
 
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoCheckedRef = useRef(false);
+  const checkoutPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refreshState = useCallback(() => {
     syncAdFreeDomClass();
@@ -204,7 +177,7 @@ export default function CookieMasterPage() {
     };
   }, [show, hide, toggle, refreshState]);
 
-  // Fetch Lemon Squeezy config when Cookie Master opens & warm up Lemon.js overlay
+  // Fetch Lemon Squeezy config when Cookie Master opens
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
@@ -229,54 +202,70 @@ export default function CookieMasterPage() {
         if (!cancelled) setConfigLoaded(true);
       });
 
-    void ensureLemonJsLoaded().then((ready) => {
-      if (cancelled || !ready) return;
-      try {
-        (window as any).LemonSqueezy?.Setup?.({
-          eventHandler: (evt: { event?: string; data?: any }) => {
-            if (evt?.event === "Checkout.Success") {
-              const orderEmail = String(
-                evt?.data?.order?.data?.attributes?.user_email || ""
-              ).trim();
-              notifyToast("payment completed! activating cookie master...", "info");
-              const pollActivate = async (attempt = 0): Promise<void> => {
-                const res = await fetch("/api/cookie-master/verify", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ emailOrCode: orderEmail }),
-                }).catch(() => null);
-                const payload = res ? await res.json().catch(() => null) : null;
-                if (res?.ok && payload?.active) {
-                  const prev = getCookieMasterState();
-                  setCookieMasterState({
-                    active: true,
-                    licenseKey: String(payload.licenseKey || payload.subscriptionId || "lemonsqueezy"),
-                    subscriptionId: typeof payload.subscriptionId === "string" ? payload.subscriptionId : undefined,
-                    status: typeof payload.status === "string" ? payload.status : "active",
-                    email: typeof payload.email === "string" ? payload.email : orderEmail || prev?.email,
-                    verifiedAt: Date.now(),
-                    expiresAt: Number(payload.expiresAt) || 0,
-                    cancelledAt: typeof payload.cancelledAt === "string" ? payload.cancelledAt : null,
-                    lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
-                  });
-                  notifyToast("cookie master unlocked! enjoy ad-free mode & daily coins", "success");
-                  return;
-                }
-                if (attempt < 5) {
-                  window.setTimeout(() => void pollActivate(attempt + 1), 1600);
-                }
-              };
-              window.setTimeout(() => void pollActivate(0), 900);
-            }
-          },
-        });
-      } catch {}
-    });
-
     return () => {
       cancelled = true;
     };
   }, [visible]);
+
+  // Poll membership activation automatically while user completes Lemon Squeezy checkout in new tab
+  useEffect(() => {
+    if (!awaitingCheckout) return;
+    let cancelled = false;
+    let attempts = 0;
+
+    const checkStatusNow = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      try {
+        const res = await fetch("/api/cookie-master/status", { cache: "no-store" });
+        const payload = res.ok ? await res.json().catch(() => null) : null;
+        if (cancelled) return;
+        if (payload?.active) {
+          const prev = getCookieMasterState();
+          setCookieMasterState({
+            active: true,
+            licenseKey: String(payload.licenseKey || payload.subscriptionId || "lemonsqueezy"),
+            subscriptionId:
+              typeof payload.subscriptionId === "string" ? payload.subscriptionId : undefined,
+            status: typeof payload.status === "string" ? payload.status : "active",
+            email: typeof payload.email === "string" ? payload.email : prev?.email,
+            verifiedAt: Date.now(),
+            expiresAt: Number(payload.expiresAt) || 0,
+            cancelledAt: typeof payload.cancelledAt === "string" ? payload.cancelledAt : null,
+            lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
+          });
+          setAwaitingCheckout(false);
+          notifyToast("cookie master unlocked! enjoy ad-free mode & daily coins", "success");
+          return;
+        }
+      } catch {}
+      if (attempts >= CHECKOUT_POLL_MAX_ATTEMPTS && checkoutPollTimerRef.current) {
+        clearInterval(checkoutPollTimerRef.current);
+        checkoutPollTimerRef.current = null;
+        setAwaitingCheckout(false);
+      }
+    };
+
+    const onReturnFocus = () => {
+      if (document.visibilityState === "visible") {
+        void checkStatusNow();
+      }
+    };
+
+    checkoutPollTimerRef.current = setInterval(() => void checkStatusNow(), CHECKOUT_POLL_INTERVAL_MS);
+    window.addEventListener("focus", onReturnFocus);
+    document.addEventListener("visibilitychange", onReturnFocus);
+
+    return () => {
+      cancelled = true;
+      if (checkoutPollTimerRef.current) {
+        clearInterval(checkoutPollTimerRef.current);
+        checkoutPollTimerRef.current = null;
+      }
+      window.removeEventListener("focus", onReturnFocus);
+      document.removeEventListener("visibilitychange", onReturnFocus);
+    };
+  }, [awaitingCheckout]);
 
   // Escape closes page and refresh daily claim countdown
   useEffect(() => {
@@ -389,11 +378,12 @@ export default function CookieMasterPage() {
     void verifyMembership(lookupInput);
   };
 
-  const buildCheckoutUrl = (embed = false): string => {
+  const buildCheckoutUrl = (): string => {
     if (!config.checkoutUrl) return "";
     try {
       const u = new URL(config.checkoutUrl);
-      if (embed) u.searchParams.set("embed", "1");
+      // Hosted new-tab checkout avoids Chromium blocking non-COEP embed iframes
+      u.searchParams.delete("embed");
       const activeUser = getActiveUser();
       if (activeUser && activeUser !== "guest") {
         u.searchParams.set("checkout[custom][username]", activeUser);
@@ -414,26 +404,8 @@ export default function CookieMasterPage() {
       return;
     }
 
-    const ls = (window as any).LemonSqueezy;
-    if (ls?.Url?.Open) {
-      e.preventDefault();
-      ls.Url.Open(buildCheckoutUrl(true));
-      return;
-    }
-
-    const width = 540;
-    const height = 760;
-    const left = Math.max(0, Math.round((window.screen.width - width) / 2));
-    const top = Math.max(0, Math.round((window.screen.height - height) / 2));
-    const popup = window.open(
-      buildCheckoutUrl(false),
-      "lemonCookieMasterCheckout",
-      `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
-    );
-    if (popup) {
-      e.preventDefault();
-      popup.focus();
-    }
+    // Let native <a target="_blank" rel="noopener noreferrer"> open cleanly without iframe/COEP blocks
+    setAwaitingCheckout(true);
   };
 
   const handleOpenBillingPortal = async () => {
@@ -678,7 +650,7 @@ export default function CookieMasterPage() {
               </button>
             ) : (
               <a
-                href={buildCheckoutUrl(false) || "#"}
+                href={buildCheckoutUrl() || "#"}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={handleOpenLemonCheckout}

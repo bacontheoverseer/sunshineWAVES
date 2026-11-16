@@ -5058,11 +5058,22 @@ app.post("/api/shop/troll", async (req, res) => {
 });
 
 // --- Cookie Master ($2/mo Subscription) & Lemon Squeezy Checkout / Webhook Integration ---
-const LEMONSQUEEZY_CHECKOUT_URL = (
-  process.env.LEMONSQUEEZY_CHECKOUT_URL ||
-  process.env.LEMONSQUEEZY_PRODUCT_URL ||
-  ""
-).trim();
+const LEMONSQUEEZY_CHECKOUT_URL = (() => {
+  const raw = (
+    process.env.LEMONSQUEEZY_CHECKOUT_URL ||
+    process.env.LEMONSQUEEZY_PRODUCT_URL ||
+    ""
+  ).trim();
+  if (!raw) return "";
+  try {
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw.replace(/^\/+/, "")}`;
+    const parsed = new URL(withScheme);
+    parsed.searchParams.delete("embed");
+    return parsed.toString();
+  } catch {
+    return raw;
+  }
+})();
 const LEMONSQUEEZY_STORE_SLUG = (process.env.LEMONSQUEEZY_STORE_SLUG || "").trim();
 const LEMONSQUEEZY_WEBHOOK_SECRET = (process.env.LEMONSQUEEZY_WEBHOOK_SECRET || "").trim();
 const LEMONSQUEEZY_API_KEY = (process.env.LEMONSQUEEZY_API_KEY || "").trim();
