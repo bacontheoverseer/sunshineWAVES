@@ -22,6 +22,7 @@ interface MasterConfig {
   billingUrl: string;
   hasWebhookVerification: boolean;
   hasApiKey: boolean;
+  testMode: boolean;
   priceMonthly: number;
   dailyCoins: number;
   tierName: string;
@@ -34,6 +35,7 @@ const DEFAULT_CONFIG: MasterConfig = {
   billingUrl: "",
   hasWebhookVerification: false,
   hasApiKey: false,
+  testMode: true,
   priceMonthly: 2,
   dailyCoins: COOKIE_MASTER_DAILY_COINS,
   tierName: "Cookie Master",
@@ -192,6 +194,7 @@ export default function CookieMasterPage() {
           billingUrl: typeof data.billingUrl === "string" ? data.billingUrl : "",
           hasWebhookVerification: Boolean(data.hasWebhookVerification),
           hasApiKey: Boolean(data.hasApiKey),
+          testMode: data.testMode !== false,
           priceMonthly: Number(data.priceMonthly) || 2,
           dailyCoins: Number(data.dailyCoins) || COOKIE_MASTER_DAILY_COINS,
           tierName: typeof data.tierName === "string" ? data.tierName : "Cookie Master",
@@ -517,6 +520,32 @@ export default function CookieMasterPage() {
           </button>
         </div>
       </div>
+
+      {config.testMode && (
+        <div
+          id="cookie-master-test-banner"
+          role="alert"
+          class="studio-panel"
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: "12px",
+            padding: "13px 16px",
+            borderRadius: "12px",
+            background:
+              "linear-gradient(90deg, rgba(36, 25, 8, 0.96) 0%, rgba(24, 19, 10, 0.96) 100%)",
+            border: "1px solid rgba(245, 158, 11, 0.55)",
+            color: "#fef3c7",
+            fontSize: "13px",
+            fontWeight: 700,
+            letterSpacing: "0.02em",
+            lineHeight: 1.4,
+          }}
+        >
+          <i class="fa-solid fa-triangle-exclamation" style={{ color: "#fbbf24", fontSize: "16px", flexShrink: 0 }}></i>
+          <span>TEST MODE - PLEASE DO NOT MAKE PAYMENTS. THEY WILL NOT GO THROUGH</span>
+        </div>
+      )}
 
       {/* Product Hero Card (Native Operation Cookie Product Page + Lemon Squeezy Checkout) */}
       <div

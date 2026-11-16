@@ -5080,6 +5080,8 @@ const LEMONSQUEEZY_API_KEY = (process.env.LEMONSQUEEZY_API_KEY || "").trim();
 const LEMONSQUEEZY_PRODUCT_ID = (process.env.LEMONSQUEEZY_PRODUCT_ID || "").trim();
 const LEMONSQUEEZY_VARIANT_ID = (process.env.LEMONSQUEEZY_VARIANT_ID || "").trim();
 const LEMONSQUEEZY_TIER_NAME = (process.env.LEMONSQUEEZY_TIER_NAME || "").trim();
+const LEMONSQUEEZY_TEST_MODE =
+  String(process.env.LEMONSQUEEZY_TEST_MODE || "").trim().toLowerCase() !== "false";
 const LEMONSQUEEZY_SUB_DURATION_MS = 33 * 24 * 60 * 60 * 1000; // 31 days + 2 day renewal grace
 const LEMONSQUEEZY_RENEWAL_GRACE_MS = 2 * 24 * 60 * 60 * 1000;
 const LEMONSQUEEZY_SUBS_FILE = path.resolve(
@@ -5539,6 +5541,7 @@ app.get("/api/cookie-master/config", (_req, res) => {
     billingUrl: LEMONSQUEEZY_BILLING_URL,
     hasWebhookVerification: Boolean(LEMONSQUEEZY_WEBHOOK_SECRET),
     hasApiKey: Boolean(LEMONSQUEEZY_API_KEY),
+    testMode: LEMONSQUEEZY_TEST_MODE,
     priceMonthly: 2,
     dailyCoins: 1000,
     tierName: LEMONSQUEEZY_TIER_NAME || "Cookie Master",
