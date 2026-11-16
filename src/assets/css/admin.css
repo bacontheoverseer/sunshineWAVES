@@ -590,6 +590,7 @@ html.cookie-chaos-blur {
 
 .admin-subtabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 12px;
 }
@@ -619,7 +620,7 @@ html.cookie-chaos-blur {
 /* Soundboard Grid & Cards */
 .admin-list-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -629,7 +630,10 @@ html.cookie-chaos-blur {
   padding: 11px 13px;
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
   gap: 8px;
+  min-width: 0;
+  overflow: hidden;
   transition: background-color 0.1s ease;
 }
 

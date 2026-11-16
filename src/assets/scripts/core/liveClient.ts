@@ -2,6 +2,7 @@
  * Sunshine Live Client & Chaos Receiver
  * Connects to Sunshine SSE channel for live status and remote administration / sound effects / trolls.
  */
+import { applyExtendedChaosEffect, clearExtendedChaosEffects } from "./visualTrolls";
 
 // Global AudioContext for synthesized effects
 let audioCtx: AudioContext | null = null;
@@ -1071,11 +1072,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
     }
 
     default:
+      applyExtendedChaosEffect(effect, data, playXpError);
       break;
   }
 }
 
 export function clearChaosEffects(): void {
+  clearExtendedChaosEffects();
   // Remove CSS classes
   document.body.classList.remove("cookie-chaos-earthquake");
   document.body.style.transform = "";

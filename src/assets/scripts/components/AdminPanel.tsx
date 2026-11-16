@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import { playAudioUrl, clearChaosEffects, normalizeSoundUrl } from "../core/liveClient";
+import { ADMIN_VISUAL_TROLLS, type TrollCategory } from "../core/visualTrolls";
 import { StaffManagerContent } from "./StaffManagerModal";
 import OxiumAdminTab from "./OxiumAdminTab";
 
@@ -39,21 +40,6 @@ const DEFAULT_PRESET_SOUNDS: SoundItem[] = [
   { id: "rickroll", name: "rickroll", url: "/assets/sounds/rickroll.mp3", source: "preset" },
   { id: "screamer", name: "loud screamer", url: "/assets/sounds/screamer.mp3", source: "preset" },
   { id: "snore-mimimi", name: "snore mimimi", url: "/assets/sounds/snore-mimimi.mp3", source: "preset" },
-];
-
-const PRANK_LIST = [
-  { id: "earthquake", icon: "fa-house-crack", title: "earthquake", desc: "violently shakes the viewport for 5 seconds." },
-  { id: "screen-flip", icon: "fa-rotate", title: "180° screen flip", desc: "turns the browser viewport upside down." },
-  { id: "eyelash", icon: "fa-feather", title: "monitor eyelash", desc: "places a realistic curved hair on their screen." },
-  { id: "dead-pixel", icon: "fa-circle-dot", title: "dead pixel", desc: "places a bright red hot pixel on their display." },
-  { id: "fake-battery", icon: "fa-battery-empty", title: "low battery alert", desc: "shows a critical 3% low battery warning." },
-  { id: "admin-monitor", icon: "fa-eye", title: "admin monitor banner", desc: "displays a live session recording banner." },
-  { id: "panic-doc", icon: "fa-file-lines", title: "google doc disguise", desc: "covers the screen with a fake history essay." },
-  { id: "ghost-cursor", icon: "fa-arrow-pointer", title: "ghost cursor", desc: "spawns an erratic possessed mouse pointer." },
-  { id: "flash-title", icon: "fa-bell", title: "flashing tab title", desc: "flashes warning alerts in the browser tab." },
-  { id: "invert-colors", icon: "fa-circle-half-stroke", title: "invert colors", desc: "inverts all colors across the page." },
-  { id: "matrix-rain", icon: "fa-terminal", title: "matrix rain", desc: "overlays falling green digital code rain." },
-  { id: "blur", icon: "fa-droplet", title: "screen blur", desc: "applies a heavy blur filter to the page." },
 ];
 
 const TTS_PRESETS = [
@@ -125,10 +111,12 @@ export default function AdminPanel() {
   const [customUrlName, setCustomUrlName] = useState("");
   const [resolvingUrl, setResolvingUrl] = useState(false);
 
-  // TTS State
+  // TTS & Visual Troll Filter State
   const [ttsText, setTtsText] = useState(TTS_PRESETS[0]);
   const [ttsPitch, setTtsPitch] = useState(1.0);
   const [ttsRate, setTtsRate] = useState(1.0);
+  const [trollCategory, setTrollCategory] = useState<"all" | "exclusives" | TrollCategory>("all");
+  const [trollQuery, setTrollQuery] = useState("");
 
   useEffect(() => {
     try {
@@ -937,35 +925,115 @@ export default function AdminPanel() {
               )}
 
               {/* TAB 3: VISUAL TROLLS */}
-              {activeTab === "pranks" && (
-                <div class="admin-section">
-                  <label>visual trolls</label>
-                  <p>trigger visual effects and screen pranks on the target user.</p>
-
-                  <div class="admin-list-grid">
-                    {PRANK_LIST.map((prank) => (
-                      <div key={prank.id} class="admin-item-card">
-                        <div>
-                          <div class="admin-item-title">
-                            <i class={`fa-solid ${prank.icon}`} style={{ marginRight: "6px", color: "var(--color-icon-muted)" }} />
-                            {prank.title}
-                          </div>
-                          <div class="admin-item-sub" style={{ marginTop: "3px" }}>
-                            {prank.desc}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          class="admin-btn-primary"
-                          onClick={() => triggerRemote("effect", { effect: prank.id, from: adminUsername })}
-                        >
-                          <i class="fa-solid fa-bolt" /> trigger
-                        </button>
+              {activeTab === "pranks" && (() => {
+                const q = trollQuery.trim().toLowerCase();
+                const filteredTrolls = ADMIN_VISUAL_TROLLS.filter((p) => {
+                  if (trollCategory === "exclusives" && !p.exclusive) return false;
+                  if (trollCategory !== "all" && trollCategory !== "exclusives" && p.category !== trollCategory) {
+                    return false;
+                  }
+                  if (q && !p.title.toLowerCase().includes(q) && !p.desc.toLowerCase().includes(q)) {
+                    return false;
+                  }
+                  return true;
+                });
+                const fireRandomTroll = () => {
+                  const pool = filteredTrolls.length > 0 ? filteredTrolls : ADMIN_VISUAL_TROLLS;
+                  const pick = pool[Math.floor(Math.random() * pool.length)];
+                  if (pick) triggerRemote("effect", { effect: pick.id, from: adminUsername });
+                };
+                return (
+                  <div class="admin-section">
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap", marginBottom: "6px" }}>
+                      <div>
+                        <label>visual trolls ({filteredTrolls.length})</label>
+                        <p style={{ marginBottom: "4px" }}>trigger visual effects and admin-exclusive pranks on the target user.</p>
                       </div>
-                    ))}
+                      <button
+                        type="button"
+                        class="admin-btn-secondary"
+                        onClick={fireRandomTroll}
+                        title="Trigger a random visual troll from the current list"
+                      >
+                        <i class="fa-solid fa-dice" /> chaos roulette
+                      </button>
+                    </div>
+
+                    <div class="admin-subtabs" style={{ marginBottom: "8px" }}>
+                      {(
+                        [
+                          { id: "all", label: `all (${ADMIN_VISUAL_TROLLS.length})` },
+                          { id: "exclusives", label: `exclusives (${ADMIN_VISUAL_TROLLS.filter((t) => t.exclusive).length})` },
+                          { id: "screen", label: "screen & filters" },
+                          { id: "alerts", label: "fake os & alerts" },
+                          { id: "physics", label: "physics & chaos" },
+                          { id: "classic", label: "classic" },
+                        ] as const
+                      ).map((cat) => (
+                        <button
+                          key={cat.id}
+                          type="button"
+                          class={`admin-subtab${trollCategory === cat.id ? " active" : ""}`}
+                          onClick={() => setTrollCategory(cat.id)}
+                        >
+                          {cat.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <input
+                      type="text"
+                      class="admin-input"
+                      style={{ marginBottom: "10px" }}
+                      placeholder="search visual trolls (cracked, bsod, bugs, update, captcha...)"
+                      value={trollQuery}
+                      onInput={(e) => setTrollQuery((e.target as HTMLInputElement).value)}
+                    />
+
+                    <div class="admin-list-grid">
+                      {filteredTrolls.map((prank) => (
+                        <div key={prank.id} class="admin-item-card">
+                          <div>
+                            <div class="admin-item-title" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                                <i class={`fa-solid ${prank.icon}`} style={{ marginRight: "6px", color: "var(--color-icon-muted)" }} />
+                                {prank.title}
+                              </span>
+                              {prank.exclusive && (
+                                <span
+                                  style={{
+                                    fontSize: "9.5px",
+                                    textTransform: "uppercase",
+                                    letterSpacing: "0.04em",
+                                    padding: "1px 6px",
+                                    borderRadius: "999px",
+                                    background: "rgba(251, 191, 36, 0.16)",
+                                    border: "1px solid rgba(251, 191, 36, 0.42)",
+                                    color: "#fde68a",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  admin
+                                </span>
+                              )}
+                            </div>
+                            <div class="admin-item-sub" style={{ marginTop: "3px" }}>
+                              {prank.desc}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            class="admin-btn-primary"
+                            onClick={() => triggerRemote("effect", { effect: prank.id, from: adminUsername })}
+                          >
+                            <i class="fa-solid fa-bolt" /> trigger
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* TAB 4: LIVE USERS */}
               {activeTab === "users" && (
