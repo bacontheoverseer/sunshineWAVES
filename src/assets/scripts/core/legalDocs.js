@@ -13,14 +13,14 @@ export const TERMS_SECTIONS = [
   {
     title: "2. Service Description & Neutral Technical Conduit",
     body: [
-      "Operation Cookie provides a web interface featuring proxy browsing tools (such as Scramjet, Ultraviolet, Epoxy, Libcurl, and related transports), embedded or cached games, an optional CloudSync profile system, Cookie Shop, Cookie Master memberships, Game Studio, and live community tools.",
+      "Operation Cookie provides a web interface featuring proxy browsing tools (such as Scramjet, Ultraviolet, Epoxy, Libcurl, and related transports), embedded or cached games, a CloudSync account and profile system, Cookie Shop, Cookie Master memberships, Game Studio, and live community tools.",
       "Proxy and embedding tools operate solely as neutral, user-directed technical conduits. Operation Cookie does not initiate, monitor, pre-screen, endorse, guarantee, or assume responsibility for any third-party website, game, file, script, image, advertisement, or service you request or access through the Service.",
     ],
   },
   {
     title: "3. Accounts, CloudSync & Termination Rights",
     body: [
-      "CloudSync accounts are optional. You are solely responsible for maintaining the confidentiality of your username, password, and active browser sessions, and for all actions taken under your account. Because passwords are stored only as cryptographic hashes and client sync snapshots depend on your credentials, forgotten passwords or deleted local data may result in permanent inability to recover synced data.",
+      "A CloudSync account is required to access and use the Service. You are solely responsible for maintaining the confidentiality of your username, password, and active browser sessions, and for all actions taken under your account. Because passwords are stored only as cryptographic hashes and client sync snapshots depend on your credentials, forgotten passwords or deleted local data may result in permanent inability to recover synced data.",
       "We reserve the right, in our sole discretion and without prior notice or liability, to suspend, terminate, restrict, rename, reset, or delete any account, CloudSync payload, Studio project, chat message, or access from any device, IP address, or domain at any time — including for suspected abuse, automated scraping, circumvention, payment disputes, or violation of these Terms.",
       "We do not guarantee uninterrupted availability of any specific URL or mirror domain, nor permanent retention of synced data, leaderboards, Cookie Coins, or Studio creations. Keeping personal backups via Settings Export is solely your responsibility.",
     ],
@@ -110,9 +110,9 @@ export const PRIVACY_SECTIONS = [
     ],
   },
   {
-    title: "3. CloudSync Account Data (Optional)",
+    title: "3. CloudSync Account Data",
     body: [
-      "If you register for a CloudSync account, we store your chosen username, a cryptographic hash of your password (never plaintext passwords), account creation timestamp, token version, and the synced JSON snapshot of your browser preferences/progress you choose to upload.",
+      "To create and maintain your required CloudSync account, we store your chosen username, a cryptographic hash of your password (never plaintext passwords), account creation timestamp, token version, and the synced JSON snapshot of your browser preferences/progress uploaded for your account.",
       "Authenticated sessions use signed JWT tokens (including HTTP-only auth cookies and browser session metadata) so your account remains signed in securely. CloudSync account data is stored in our configured Supabase PostgreSQL database (protected with Row Level Security) or local SQLite database fallback.",
     ],
   },
@@ -120,7 +120,7 @@ export const PRIVACY_SECTIONS = [
     title: "4. Payments & Lemon Squeezy Membership Verification Data",
     body: [
       "All $2/month Cookie Master payments are handled entirely by Lemon Squeezy and its payment processors. Operation Cookie NEVER receives, processes, or stores full credit/debit card numbers, security codes, or bank account credentials.",
-      "When Lemon Squeezy sends a signed subscription webhook confirmation or verifies a pass/license, we store only the minimum verification metadata needed to unlock and sync your perks across mirror domains: Lemon Squeezy subscription ID, order/license reference, customer email (lowercased), customer display name, optional CloudSync username checkout custom data, plan/variant identifier, payment amount, subscription status, verification timestamp, and membership renewal/expiration timestamp.",
+      "When Lemon Squeezy sends a signed subscription webhook confirmation or verifies a pass/license, we store only the minimum verification metadata needed to unlock and sync your perks across mirror domains: Lemon Squeezy subscription ID, order/license reference, customer email (lowercased), customer display name, CloudSync username checkout custom data, plan/variant identifier, payment amount, subscription status, verification timestamp, and membership renewal/expiration timestamp.",
     ],
   },
   {
