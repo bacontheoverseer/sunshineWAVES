@@ -594,6 +594,15 @@ for (const [id, filePath] of Object.entries(bMap)) {
 
 const IMMUTABLE_CC = "public, max-age=31536000, immutable";
 const NO_CACHE_CC = "public, max-age=0, must-revalidate";
+const SW_SCRIPT_PATH_RE = /^\/b\/(?:sw\.js|[a-f0-9]{10}\.js)$/;
+
+app.use("/b", (req, res, next) => {
+  if (SW_SCRIPT_PATH_RE.test(req.path) || SW_SCRIPT_PATH_RE.test(req.originalUrl.split("?")[0])) {
+    res.setHeader("Service-Worker-Allowed", "/");
+    res.setHeader("Cache-Control", NO_CACHE_CC);
+  }
+  next();
+});
 
 if (NODE_ENV === "production") {
   const COMPRESSIBLE = /\.(js|css|mjs|json|svg|xml|wasm)$/i;
@@ -640,13 +649,17 @@ if (NODE_ENV === "production") {
           );
           res.setHeader(
             "Cache-Control",
-            req.path.startsWith("/assets/data") ||
+            SW_SCRIPT_PATH_RE.test(req.path) ||
+              req.path.startsWith("/assets/data") ||
               req.path === "/b/all.js" ||
               req.path === "/b/s/jetty.all.js" ||
               req.path === "/b/s/jetty.sync.js"
               ? NO_CACHE_CC
               : IMMUTABLE_CC,
           );
+          if (SW_SCRIPT_PATH_RE.test(req.path)) {
+            res.setHeader("Service-Worker-Allowed", "/");
+          }
           res.setHeader("Vary", "Accept-Encoding");
           res.setHeader("X-File-Cache", "HIT");
           return res.send(buf);

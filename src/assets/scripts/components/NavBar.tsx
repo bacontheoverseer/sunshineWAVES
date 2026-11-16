@@ -144,7 +144,23 @@ export default function NavBar() {
       stopIframeLoading(activeTab.iframe);
     } else {
       const manualUrl = activeTab.iframe.dataset.manualUrl;
-      if (manualUrl) {
+      const pendingProxyUrl = activeTab.iframe.dataset.pendingProxyUrl;
+      if (
+        activeTab.iframe.dataset.proxyUnavailable === "true" ||
+        activeTab.iframe.hasAttribute("srcdoc")
+      ) {
+        const retryTarget =
+          pendingProxyUrl ||
+          manualUrl ||
+          (activeTab.iframe.src && activeTab.iframe.src !== "about:blank"
+            ? activeTab.iframe.src
+            : "");
+        if (retryTarget) {
+          navigateIframeTo(activeTab.iframe, retryTarget, {
+            forceSwRetry: true,
+          });
+        }
+      } else if (manualUrl) {
         if ((window as any).sunshineApp?.handleSearch)
           await (window as any).sunshineApp.handleSearch(
             manualUrl,
@@ -160,19 +176,10 @@ export default function NavBar() {
         if (!activeTab.fixedTitle) activeTab.title = "fetching data...";
         if (!activeTab.fixedFavicon) activeTab.favicon = null;
         store.notify();
-        if (
-          activeTab.iframe.dataset.proxyUnavailable === "1" ||
-          activeTab.iframe.hasAttribute("srcdoc")
-        ) {
-          navigateIframeTo(activeTab.iframe, activeTab.iframe.src, {
-            forceSwRetry: true,
-          });
-        } else {
-          try {
-            activeTab.iframe.contentWindow.location.reload();
-          } catch (e) {
-            navigateIframeTo(activeTab.iframe, activeTab.iframe.src);
-          }
+        try {
+          activeTab.iframe.contentWindow.location.reload();
+        } catch (e) {
+          navigateIframeTo(activeTab.iframe, activeTab.iframe.src);
         }
       }
     }

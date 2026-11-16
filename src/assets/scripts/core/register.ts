@@ -81,6 +81,7 @@ class sunshineConnectionManager {
   _isRecovering: boolean;
   _tabWasHiddenWhileConnected: boolean;
   _swEnsurePromises: Map<string, Promise<ServiceWorkerRegistration>>;
+  _inRetryBackoff: boolean;
 
   constructor() {
     this.state = STATES.IDLE;
@@ -94,6 +95,7 @@ class sunshineConnectionManager {
     this._isRecovering = false;
     this._tabWasHiddenWhileConnected = false;
     this._swEnsurePromises = new Map();
+    this._inRetryBackoff = false;
 
     const app = ((window as unknown as Record<string, unknown>)["sunshineApp"] ??= {}) as typeof window.sunshineApp;
     app.transportReady = this._transportReadyPromise;
@@ -115,8 +117,12 @@ class sunshineConnectionManager {
         if (this._transportReadyPromise._settled && this.state !== STATES.CONNECTED) {
           this._resetTransportReady();
         }
-        if (this.state === STATES.IDLE || this.state === STATES.FAILED) {
-          void this.initializeApp(this.state === STATES.FAILED);
+        if (
+          this.state === STATES.IDLE ||
+          this.state === STATES.FAILED ||
+          (this.state === STATES.RECONNECTING && this._inRetryBackoff)
+        ) {
+          void this.initializeApp(this.state !== STATES.IDLE);
         }
       }
       return Promise.race([
@@ -214,15 +220,28 @@ class sunshineConnectionManager {
     return SCOPE_MAP[this.appConfig.backend] || "/b/s/r/";
   }
 
+  async _getRegistrationForScope(
+    targetScope: string,
+  ): Promise<ServiceWorkerRegistration | undefined> {
+    if (!("serviceWorker" in navigator)) return undefined;
+    const expectedScope = new URL(targetScope, window.location.origin).href;
+    try {
+      const reg = await navigator.serviceWorker.getRegistration(targetScope);
+      if (reg && reg.scope === expectedScope) return reg;
+    } catch {}
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      return regs.find((r) => r.scope === expectedScope);
+    } catch {
+      return undefined;
+    }
+  }
+
   async _verifyServiceWorker(targetScope?: string): Promise<boolean> {
     if (!("serviceWorker" in navigator)) return false;
-    try {
-      const scope = targetScope || this.getActiveScope();
-      const reg = await navigator.serviceWorker.getRegistration(scope);
-      return reg?.active?.state === "activated";
-    } catch {
-      return false;
-    }
+    const scope = targetScope || this.getActiveScope();
+    const reg = await this._getRegistrationForScope(scope);
+    return reg?.active?.state === "activated";
   }
 
   async _waitForRegistrationActive(
@@ -235,9 +254,11 @@ class sunshineConnectionManager {
       let settled = false;
       const watched = new Set<ServiceWorker>();
       let timer: ReturnType<typeof setTimeout>;
+      let failDelayTimer: ReturnType<typeof setTimeout> | null = null;
 
       const cleanup = () => {
         clearTimeout(timer);
+        if (failDelayTimer) clearTimeout(failDelayTimer);
         registration.removeEventListener("updatefound", attachCurrent);
         watched.forEach((sw) => sw.removeEventListener("statechange", evaluate));
       };
@@ -255,9 +276,38 @@ class sunshineConnectionManager {
           finish();
           return;
         }
-        const pending = registration.installing || registration.waiting || registration.active;
-        if (!pending || pending.state === "redundant") {
-          finish(new Error("service worker installation failed or became redundant"));
+        const candidates = [
+          registration.active,
+          registration.waiting,
+          registration.installing,
+        ].filter((sw): sw is ServiceWorker => Boolean(sw));
+
+        const hasLiveWorker = candidates.some((sw) => sw.state !== "redundant");
+        if (hasLiveWorker) {
+          if (failDelayTimer) {
+            clearTimeout(failDelayTimer);
+            failDelayTimer = null;
+          }
+          return;
+        }
+
+        // Wait a short tick in case skipWaiting() is swapping installing -> waiting/active
+        if (!failDelayTimer) {
+          failDelayTimer = setTimeout(() => {
+            failDelayTimer = null;
+            if (registration.active?.state === "activated") {
+              finish();
+              return;
+            }
+            const nextCandidates = [
+              registration.active,
+              registration.waiting,
+              registration.installing,
+            ].filter((sw): sw is ServiceWorker => Boolean(sw));
+            if (!nextCandidates.some((sw) => sw.state !== "redundant")) {
+              finish(new Error("service worker installation failed or became redundant"));
+            }
+          }, 120);
         }
       };
 
@@ -288,6 +338,9 @@ class sunshineConnectionManager {
     forceReRegister?: boolean;
     timeoutMs?: number;
   }): Promise<ServiceWorkerRegistration> {
+    if (!window.isSecureContext) {
+      throw new Error("service workers require HTTPS (secure context)!");
+    }
     if (!("serviceWorker" in navigator)) {
       throw new Error("service workers are not supported!");
     }
@@ -296,25 +349,45 @@ class sunshineConnectionManager {
       throw new Error(`unknown backend: ${this.appConfig.backend}`);
     }
 
-    if (!options?.forceReRegister) {
-      const inflight = this._swEnsurePromises.get(targetScope);
-      if (inflight) return inflight;
+    const inflight = this._swEnsurePromises.get(targetScope);
+    if (inflight) {
+      if (!options?.forceReRegister) return inflight;
+      await inflight.catch(() => {});
     }
 
     const work = (async (): Promise<ServiceWorkerRegistration> => {
       if (!options?.forceReRegister) {
-        try {
-          const existing = await navigator.serviceWorker.getRegistration(targetScope);
-          if (existing?.active?.state === "activated") {
-            return existing;
-          }
-        } catch {}
+        const existing = await this._getRegistrationForScope(targetScope);
+        if (existing?.active?.state === "activated") {
+          return existing;
+        }
+        if (existing && (existing.active || existing.waiting || existing.installing)) {
+          try {
+            await this._waitForRegistrationActive(existing, Math.min(options?.timeoutMs ?? 8000, 4500));
+            const refreshed = await this._getRegistrationForScope(targetScope);
+            if (refreshed?.active?.state === "activated") {
+              return refreshed;
+            }
+          } catch {}
+        }
       }
+
+      // Primary URL is rewritten by build.js to /b/<swHash>.js; fallback remains /b/sw.js if hashed asset 404s.
+      const primarySwUrl = "/b/sw.js";
+      const fallbackSwUrl = ["", "b", "sw.js"].join("/");
+      const scriptCandidates = [primarySwUrl, fallbackSwUrl];
 
       let lastErr: unknown = null;
       for (let attempt = 0; attempt < 2; attempt++) {
+        const scriptUrl = scriptCandidates[Math.min(attempt, scriptCandidates.length - 1)]!;
         try {
-          const reg = await navigator.serviceWorker.register("./b/sw.js", {
+          if (attempt > 0 || options?.forceReRegister) {
+            const stale = await this._getRegistrationForScope(targetScope);
+            if (stale && stale.active?.state !== "activated") {
+              await stale.unregister().catch(() => false);
+            }
+          }
+          const reg = await navigator.serviceWorker.register(scriptUrl, {
             scope: targetScope,
           });
           if (reg.active?.state !== "activated") {
@@ -327,6 +400,10 @@ class sunshineConnectionManager {
         } catch (err) {
           lastErr = err;
           if (attempt === 0) {
+            const stuck = await this._getRegistrationForScope(targetScope);
+            if (stuck && stuck.active?.state !== "activated") {
+              await stuck.unregister().catch(() => false);
+            }
             await new Promise((r) => setTimeout(r, 150));
           }
         }
@@ -335,7 +412,9 @@ class sunshineConnectionManager {
         ? lastErr
         : new Error("service worker failed to activate");
     })().finally(() => {
-      this._swEnsurePromises.delete(targetScope);
+      if (this._swEnsurePromises.get(targetScope) === work) {
+        this._swEnsurePromises.delete(targetScope);
+      }
     });
 
     this._swEnsurePromises.set(targetScope, work);
@@ -425,6 +504,8 @@ class sunshineConnectionManager {
 
   async initializeApp(isRetry: boolean = false): Promise<boolean | undefined> {
     if (this.state === STATES.CONNECTING && !isRetry) return;
+    if (this.state === STATES.RECONNECTING && !this._inRetryBackoff && isRetry) return;
+    this._inRetryBackoff = false;
     this.setState(isRetry ? STATES.RECONNECTING : STATES.CONNECTING);
 
     this._resetTransportReady();
@@ -507,7 +588,10 @@ class sunshineConnectionManager {
       const delay = Math.min(Math.pow(2, this._retryCount) * 500, 15000);
       this._retryCount++;
       this.updateStatus(`retrying in ${delay / 1000}s... (attempt ${this._retryCount}/10)`, "info");
+      this._inRetryBackoff = true;
       await new Promise<void>((res) => setTimeout(res, delay));
+      if (!this._inRetryBackoff) return;
+      this._inRetryBackoff = false;
       await this.initializeApp(true);
     } else {
       this.updateStatus("connection failed after multiple retries!", "error");
@@ -667,17 +751,31 @@ class sunshineConnectionManager {
       }
     });
 
-    const applyLiveChanges = async (updateFn: () => Promise<void>): Promise<void> => {
+    const applyLiveChanges = async (
+      updateFn: () => Promise<void>,
+      options?: { resetWorkers?: boolean },
+    ): Promise<void> => {
       if (this.state === STATES.CONNECTING || this.state === STATES.RECONNECTING) return;
 
       this.updateStatus("switching engine...", "info");
       this._resetTransportReady();
 
       await updateFn();
-      await this.unregisterAllServiceWorkers();
-      await new Promise<void>((res) => setTimeout(res, 800));
+      if (options?.resetWorkers) {
+        await this.ensureServiceWorkerReady({ forceReRegister: true });
+      }
 
-      const success = await this.initializeApp();
+      if (this.state === STATES.CONNECTED && this.bareMuxConnection && !options?.resetWorkers) {
+        const reapplied = await this._reapplyTransport();
+        if (reapplied) {
+          this.updateStatus("switched successfully!", "success");
+          const el = document.querySelector(".transport-selected");
+          if (el) el.textContent = this.appConfig.transport;
+          return;
+        }
+      }
+
+      const success = await this.initializeApp(true);
       if (success) {
         this.updateStatus("switched successfully!", "success");
       }
@@ -752,7 +850,7 @@ class sunshineConnectionManager {
     document.addEventListener("backendUpdated", (e) =>
       applyLiveChanges(async () => {
         this.appConfig.backend = (e as CustomEvent<string>).detail;
-      }),
+      }, { resetWorkers: true }),
     );
   }
 }

@@ -87,6 +87,7 @@ export default function sunshinePlugin() {
 
       await writeFile(path.join(distDir, "build-meta.json"), JSON.stringify({ build: buildId }));
       await writeFile(path.join(distDir, swFileName), swObf);
+      await writeFile(path.join(distDir, "b", "sw.js"), swObf);
 
       for (const [fileName, chunk] of Object.entries(bundle)) {
         if (chunk.type !== "chunk") continue;

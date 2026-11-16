@@ -534,6 +534,8 @@ export function initializeLoad(): void {
         console.error("automatic update failed:", e);
         localStorage.removeItem("justUpdated");
       }
+      // Do not let beforeunload preventClosing cancel the update reload after unregistering SWs
+      (window as unknown as Record<string, unknown>)["bypassPreventClosing"] = true;
       location.reload();
     },
     async checkVersion() {

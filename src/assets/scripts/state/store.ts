@@ -205,6 +205,11 @@ export const store = {
     }
 
     const iframeLoadHandler = () => {
+      if (
+        newTab.iframe.dataset.proxyUnavailable === "true" ||
+        newTab.iframe.dataset.pendingProxyUrl
+      )
+        return;
       try {
         const doc = newTab.iframe.contentDocument;
         if (doc) {

@@ -146,14 +146,50 @@ function getProxyScopeFromUrl(rawUrl: string): string | null {
   return null;
 }
 
-async function isActiveServiceWorkerForScope(scope: string): Promise<boolean> {
-  if (!("serviceWorker" in navigator)) return false;
+async function getRegistrationForExactScope(
+  scope: string,
+): Promise<ServiceWorkerRegistration | undefined> {
+  if (!("serviceWorker" in navigator)) return undefined;
+  const expectedScope = new URL(scope, window.location.origin).href;
   try {
     const reg = await navigator.serviceWorker.getRegistration(scope);
-    return reg?.active?.state === "activated";
+    if (reg && reg.scope === expectedScope) return reg;
+  } catch {}
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    return regs.find((r) => r.scope === expectedScope);
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+async function isActiveServiceWorkerForScope(scope: string): Promise<boolean> {
+  if (!window.isSecureContext || !("serviceWorker" in navigator)) return false;
+  const reg = await getRegistrationForExactScope(scope);
+  if (!reg) return false;
+  if (reg.active?.state === "activated") return true;
+  if (reg.active?.state === "activating" || reg.waiting) {
+    const worker = reg.active || reg.waiting;
+    if (!worker) return false;
+    return await new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        worker.removeEventListener("statechange", onState);
+        resolve(ok);
+      };
+      const onState = () => {
+        if (reg.active?.state === "activated") finish(true);
+        else if (worker.state === "redundant") finish(false);
+      };
+      const timer = setTimeout(() => finish(reg.active?.state === "activated"), 2500);
+      worker.addEventListener("statechange", onState);
+      onState();
+    });
+  }
+  return false;
 }
 
 function escapeHtmlAttr(val: string): string {
@@ -167,18 +203,23 @@ function escapeHtmlAttr(val: string): string {
 function renderProxyUnavailableFrame(
   iframe: HTMLIFrameElement,
   targetUrl: string,
+  reason?: string,
 ): void {
   iframe.dataset.proxyUnavailable = "true";
+  iframe.dataset.pendingProxyUrl = targetUrl;
   const safeUrl = escapeHtmlAttr(targetUrl);
+  const safeReason = reason ? escapeHtmlAttr(reason) : "";
   iframe.srcdoc = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<title>Connection Error</title>
 <style>
   body{margin:0;height:100vh;background:#050505;color:#e7e7e7;font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;text-align:center}
-  .card{max-width:420px;padding:24px}
+  .card{max-width:440px;padding:24px}
   h2{margin:0 0 10px;font-size:20px;font-weight:700}
-  p{margin:0 0 18px;font-size:13px;color:#b8b8b8;line-height:1.5}
+  p{margin:0 0 14px;font-size:13px;color:#b8b8b8;line-height:1.5}
+  .reason{font-size:11px;color:#7a7a7a;word-break:break-word;margin-bottom:18px}
   button{background:#fff;color:#050505;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer}
   button:hover{opacity:.9}
 </style>
@@ -187,6 +228,7 @@ function renderProxyUnavailableFrame(
   <div class="card">
     <h2>proxy still connecting</h2>
     <p>the service worker or transport wasn't ready in time. Click retry to reconnect and load this page.</p>
+    ${safeReason ? `<p class="reason">${safeReason}</p>` : ""}
     <button id="retryBtn" type="button" data-url="${safeUrl}">Retry connection</button>
   </div>
   <script>
@@ -215,9 +257,23 @@ if (typeof window !== "undefined") {
 async function prepareProxyNavigation(
   targetScope: string,
   forceSwRetry: boolean,
-): Promise<boolean> {
+): Promise<{ ready: boolean; reason?: string }> {
+  if (!window.isSecureContext) {
+    return {
+      ready: false,
+      reason: "Service workers require HTTPS or localhost (insecure HTTP context).",
+    };
+  }
+  if (!("serviceWorker" in navigator)) {
+    return {
+      ready: false,
+      reason: "Service workers are unavailable or blocked in this browser/profile.",
+    };
+  }
+
   const app = window.sunshineApp as unknown as Record<string, unknown>;
   const w = window as unknown as Record<string, unknown>;
+  let failureReason = "";
 
   const runScramjetInit = async () => {
     if (targetScope !== "/b/s/r/") return;
@@ -237,7 +293,7 @@ async function prepareProxyNavigation(
   };
 
   const ensureSwFn = app?.["ensureServiceWorkerReady"] as
-    | ((opts?: { scope?: string; forceReRegister?: boolean }) => Promise<unknown>)
+    | ((opts?: { scope?: string; forceReRegister?: boolean; timeoutMs?: number }) => Promise<unknown>)
     | undefined;
   const ensureProxyFn = app?.["ensureProxyReady"] as (() => Promise<unknown>) | undefined;
   const waitTransportFn = app?.["waitForTransport"] as
@@ -246,54 +302,83 @@ async function prepareProxyNavigation(
 
   try {
     if (typeof ensureProxyFn === "function") {
-      await ensureProxyFn();
+      await Promise.race([
+        ensureProxyFn(),
+        new Promise<void>((r) => setTimeout(r, 4000)),
+      ]).catch(() => {});
     }
+    const resolvedEnsureSw =
+      (app?.["ensureServiceWorkerReady"] as typeof ensureSwFn) || ensureSwFn;
     await Promise.all([
       runScramjetInit(),
-      typeof ensureSwFn === "function"
-        ? ensureSwFn({ scope: targetScope, forceReRegister: forceSwRetry })
+      typeof resolvedEnsureSw === "function"
+        ? resolvedEnsureSw({ scope: targetScope, forceReRegister: forceSwRetry, timeoutMs: 8000 })
         : Promise.resolve(),
     ]);
-    if (typeof waitTransportFn === "function") {
-      await waitTransportFn(10000);
+    const resolvedWaitTransport =
+      (app?.["waitForTransport"] as typeof waitTransportFn) || waitTransportFn;
+    if (typeof resolvedWaitTransport === "function") {
+      await resolvedWaitTransport(4500).catch((err: unknown) => {
+        if (err instanceof Error && err.message) failureReason = err.message;
+      });
     }
     if (await isActiveServiceWorkerForScope(targetScope)) {
-      return true;
+      return { ready: true };
     }
   } catch (e: unknown) {
+    failureReason = (e as Error)?.message || String(e);
     console.warn(
       "navigateIframeTo: transport/service worker not ready, attempting recovery...",
-      (e as Error).message,
+      failureReason,
     );
   }
 
   const conn = w["sunshineConnection"] as
     | {
         recoverOnWake?: (opts?: { forceReapply?: boolean }) => Promise<void>;
-        ensureServiceWorkerReady?: (opts?: { scope?: string; forceReRegister?: boolean }) => Promise<unknown>;
+        ensureServiceWorkerReady?: (opts?: {
+          scope?: string;
+          forceReRegister?: boolean;
+          timeoutMs?: number;
+        }) => Promise<unknown>;
       }
     | undefined;
   try {
     await runScramjetInit();
     if (conn?.ensureServiceWorkerReady) {
-      await conn.ensureServiceWorkerReady({ scope: targetScope, forceReRegister: true });
+      await conn.ensureServiceWorkerReady({
+        scope: targetScope,
+        forceReRegister: true,
+        timeoutMs: 8000,
+      });
     } else if (typeof ensureSwFn === "function") {
-      await ensureSwFn({ scope: targetScope, forceReRegister: true });
+      await ensureSwFn({ scope: targetScope, forceReRegister: true, timeoutMs: 8000 });
+    } else {
+      await navigator.serviceWorker.register(["", "b", "sw.js"].join("/"), {
+        scope: targetScope,
+      });
     }
     if (conn?.recoverOnWake) {
-      await conn.recoverOnWake({ forceReapply: true });
+      await Promise.race([
+        conn.recoverOnWake({ forceReapply: true }),
+        new Promise<void>((r) => setTimeout(r, 4000)),
+      ]).catch(() => {});
     }
     if (typeof waitTransportFn === "function") {
-      await waitTransportFn(8000);
+      await waitTransportFn(4000).catch(() => {});
     }
   } catch (recoveryErr: unknown) {
-    console.warn(
-      "navigateIframeTo: recovery failed",
-      (recoveryErr as Error)?.message,
-    );
+    failureReason = (recoveryErr as Error)?.message || failureReason;
+    console.warn("navigateIframeTo: recovery failed", failureReason);
   }
 
-  return await isActiveServiceWorkerForScope(targetScope);
+  const active = await isActiveServiceWorkerForScope(targetScope);
+  return active
+    ? { ready: true }
+    : {
+        ready: false,
+        reason: failureReason || "Service worker did not reach activated state.",
+      };
 }
 
 export function navigateIframeTo(
@@ -328,6 +413,7 @@ export function navigateIframeTo(
   iframe.removeAttribute("srcdoc");
   delete iframe.dataset.proxyUnavailable;
   delete iframe.dataset.manualUrl;
+  delete iframe.dataset.pendingProxyUrl;
 
   if (iframeExt.__usableTimeout) {
     clearTimeout(iframeExt.__usableTimeout as ReturnType<typeof setTimeout>);
@@ -343,13 +429,15 @@ export function navigateIframeTo(
 
   const proxyScope = getProxyScopeFromUrl(url);
   if (proxyScope) {
+    iframe.dataset.pendingProxyUrl = url;
     (async () => {
-      const ready = await prepareProxyNavigation(
+      const { ready, reason } = await prepareProxyNavigation(
         proxyScope,
         Boolean(options?.forceSwRetry),
       );
       if (iframe.dataset.navSeq !== navSeq) return;
       if (ready) {
+        delete iframe.dataset.pendingProxyUrl;
         iframe.removeAttribute("srcdoc");
         iframe.src = url;
       } else {
@@ -362,7 +450,7 @@ export function navigateIframeTo(
         if (window.sunshineApp.renderTabs) {
           (window.sunshineApp.renderTabs as () => void)();
         }
-        renderProxyUnavailableFrame(iframe, url);
+        renderProxyUnavailableFrame(iframe, url, reason);
       }
     })();
   } else {
@@ -631,7 +719,11 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
       if (!tabToUpdate.fixedTitle) {
         tabToUpdate.title = "Connection Error";
       }
-      renderProxyUnavailableFrame(iframe, currentUrl);
+      renderProxyUnavailableFrame(
+        iframe,
+        currentUrl,
+        "Proxy transport/upstream failed to load this page after retries.",
+      );
       if (window.sunshineApp.renderTabs) {
         (window.sunshineApp.renderTabs as () => void)();
       }
