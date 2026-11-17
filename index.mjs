@@ -814,7 +814,7 @@ app.use("/api/", apiLimiter);
 app.use(
   "/api/",
   express.json({
-    limit: "8mb",
+    limit: "12mb",
     verify: (req, _res, buf) => {
       if (
         req.originalUrl?.startsWith("/api/cookie-master/webhook") ||
@@ -998,6 +998,14 @@ function getSharedCloudSyncDb() {
 }
 
 const RESERVED_SYSTEM_KV_USERNAME = "__sunshine_kv__";
+const STUDIO_GAMES_KV_KEY = "studio_games_v1";
+const STUDIO_PROFILES_KV_KEY = "studio_profiles_v1";
+const publishedStudioGames = [];
+const MAX_PUBLISHED_STUDIO_GAMES = 60;
+const MAX_CUSTOM_HTML_BYTES = 5 * 1024 * 1024;
+const customStudios = [];
+let studioGamesRemoteSyncedAt = 0;
+let studioStudiosRemoteSyncedAt = 0;
 const CHAT_META_KV_KEYS = [
   "staff_moderators_v1",
   "goat_users_v1",
@@ -1005,10 +1013,75 @@ const CHAT_META_KV_KEYS = [
   "chat_timeouts_v1",
   "chat_groups_v1",
   "chat_history_v1",
+  STUDIO_GAMES_KV_KEY,
+  STUDIO_PROFILES_KV_KEY,
   OXIUM_PARTNERS_KV_KEY,
   OXIUM_SYNC_KV_KEY,
   OXIUM_PROMOS_KV_KEY,
 ];
+
+function mergeStudioGamesLists(...lists) {
+  const byId = new Map();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (!raw || typeof raw !== "object" || !raw.id || !raw.title) continue;
+      const id = String(raw.id).trim();
+      if (!id) continue;
+      const incoming = {
+        ...raw,
+        id,
+        title: String(raw.title).trim().slice(0, 80),
+        author: String(raw.author || "creator").trim().slice(0, 60),
+        createdAt: raw.createdAt || new Date().toISOString(),
+        updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
+        plays: Number(raw.plays) || 0,
+        likes: Number(raw.likes) || 0,
+      };
+      const prev = byId.get(id);
+      if (!prev) {
+        byId.set(id, incoming);
+      } else {
+        const prevTs = Date.parse(prev.updatedAt || prev.createdAt || "") || 0;
+        const nextTs = Date.parse(incoming.updatedAt || incoming.createdAt || "") || 0;
+        const winner = nextTs >= prevTs ? incoming : prev;
+        byId.set(id, {
+          ...winner,
+          plays: Math.max(Number(prev.plays) || 0, Number(incoming.plays) || 0),
+          likes: Math.max(Number(prev.likes) || 0, Number(incoming.likes) || 0),
+        });
+      }
+    }
+  }
+  return Array.from(byId.values())
+    .sort(
+      (a, b) =>
+        (Date.parse(b.updatedAt || b.createdAt || "") || 0) -
+        (Date.parse(a.updatedAt || a.createdAt || "") || 0)
+    )
+    .slice(0, MAX_PUBLISHED_STUDIO_GAMES);
+}
+
+function mergeStudioProfilesLists(...lists) {
+  const byKey = new Map();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const raw of list) {
+      if (!raw || typeof raw !== "object" || !raw.name || !raw.owner) continue;
+      const key = String(raw.owner).trim().toLowerCase();
+      if (!key) continue;
+      const prev = byKey.get(key);
+      if (!prev) {
+        byKey.set(key, raw);
+      } else {
+        const prevTs = Date.parse(prev.updatedAt || prev.createdAt || "") || 0;
+        const nextTs = Date.parse(raw.updatedAt || raw.createdAt || "") || 0;
+        byKey.set(key, nextTs >= prevTs ? { ...prev, ...raw } : { ...raw, ...prev });
+      }
+    }
+  }
+  return Array.from(byKey.values()).slice(0, 500);
+}
 let supabaseHasAppKvTable = null; // null = probe on first sync, true/false once probed
 let supabaseKvSysUserId = null;
 let supabaseMetaHydrated = false;
@@ -1207,6 +1280,16 @@ function applyChatMetaKvMap(kvMap) {
       }
     }
   }
+  const sGames = kvMap[STUDIO_GAMES_KV_KEY];
+  if (Array.isArray(sGames)) {
+    const mergedGames = mergeStudioGamesLists(publishedStudioGames, sGames);
+    publishedStudioGames.splice(0, publishedStudioGames.length, ...mergedGames);
+  }
+  const sStudios = kvMap[STUDIO_PROFILES_KV_KEY];
+  if (Array.isArray(sStudios)) {
+    const mergedStudios = mergeStudioProfilesLists(customStudios, sStudios);
+    customStudios.splice(0, customStudios.length, ...mergedStudios);
+  }
 }
 
 function ensureChatMetaLoaded() {
@@ -1219,6 +1302,8 @@ function ensureChatMetaLoaded() {
     chat_timeouts_v1: kvGetJson("chat_timeouts_v1", {}),
     chat_history_v1: kvGetJson("chat_history_v1", []),
     chat_groups_v1: kvGetJson("chat_groups_v1", {}),
+    [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
+    [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
   });
 }
 
@@ -1242,13 +1327,14 @@ async function getOrCreateSupabaseSystemKvUserId() {
   return null;
 }
 
-async function persistKvKeyToSupabaseAsync(key) {
-  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return;
+async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
+  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return { ok: false };
   const val = kvGetJson(key, null);
-  if (val === null || val === undefined) return;
+  if (val === null || val === undefined) return { ok: false };
   if (supabaseHasAppKvTable !== false) {
     const res = await supabaseRest("app_kv?on_conflict=k", {
       method: "POST",
+      timeoutMs,
       headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify({
         k: String(key),
@@ -1258,18 +1344,20 @@ async function persistKvKeyToSupabaseAsync(key) {
     });
     if (res.ok) {
       supabaseHasAppKvTable = true;
-      return;
+      return { ok: true };
     }
     if (res.status >= 500 || res.status === 429 || isSupabaseDegraded()) {
-      return;
+      return { ok: false, status: res.status };
     }
     if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
       supabaseHasAppKvTable = false;
+    } else if (!res.ok) {
+      return { ok: false, status: res.status };
     }
   }
-  if (isSupabaseDegraded()) return;
+  if (isSupabaseDegraded()) return { ok: false };
   const sysId = await getOrCreateSupabaseSystemKvUserId();
-  if (!sysId) return;
+  if (!sysId) return { ok: false };
   const snapshot = {};
   for (const k of CHAT_META_KV_KEYS) {
     const localVal = kvGetJson(k, null);
@@ -1277,6 +1365,7 @@ async function persistKvKeyToSupabaseAsync(key) {
   }
   snapshot[String(key)] = val;
   await dbUpsertSyncPayload(sysId, JSON.stringify({ kv: snapshot }), new Date().toISOString());
+  return { ok: !isSupabaseDegraded() };
 }
 
 async function ensureChatMetaReadyAsync() {
@@ -1321,6 +1410,14 @@ async function ensureChatMetaReadyAsync() {
           try {
             applyChatMetaKvMap(remoteKv);
             for (const k of CHAT_META_KV_KEYS) {
+              if (k === STUDIO_GAMES_KV_KEY) {
+                if (publishedStudioGames.length > 0) localKvSetJson(STUDIO_GAMES_KV_KEY, publishedStudioGames);
+                continue;
+              }
+              if (k === STUDIO_PROFILES_KV_KEY) {
+                if (customStudios.length > 0) localKvSetJson(STUDIO_PROFILES_KV_KEY, customStudios);
+                continue;
+              }
               if (remoteKv[k] !== undefined) kvSetJson(k, remoteKv[k]);
             }
           } finally {
@@ -1521,11 +1618,12 @@ async function supabaseRest(restPath, options = {}) {
   if (SUPABASE_KEY_IS_JWT) {
     authHeaders.Authorization = `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`;
   }
+  const { timeoutMs, ...fetchOptions } = options;
   let res;
   try {
     res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
-      ...options,
-      signal: options.signal || AbortSignal.timeout(8000),
+      ...fetchOptions,
+      signal: options.signal || AbortSignal.timeout(Number(timeoutMs) || 8000),
       headers: {
         ...authHeaders,
         ...(options.headers || {}),
@@ -4534,6 +4632,10 @@ app.get("/api/chat/user-profile", async (req, res) => {
   }
   topGames.sort((a, b) => b.seconds - a.seconds || b.plays - a.plays);
 
+  await Promise.all([
+    getMergedStudioGamesAsync().catch(() => publishedStudioGames),
+    getMergedStudiosAsync().catch(() => customStudios),
+  ]);
   const userStudio =
     customStudios.find((s) => (s.owner || "").toLowerCase() === key) || null;
   const userPublishedGames = publishedStudioGames.filter(
@@ -5644,19 +5746,116 @@ app.post("/api/voice/signal", (req, res) => {
   }
 });
 
-// --- Game Studio Published Games API ---
-const publishedStudioGames = [];
-const MAX_PUBLISHED_STUDIO_GAMES = 60;
-const MAX_CUSTOM_HTML_BYTES = 2 * 1024 * 1024;
+// --- Game Studio Published Games API (shared SQLite app_kv + Supabase app_kv) ---
+async function fetchSupabaseKvKeyAsync(key, { timeoutMs = 15000 } = {}) {
+  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return undefined;
+  try {
+    if (supabaseHasAppKvTable !== false) {
+      const res = await supabaseRest(
+        `app_kv?k=eq.${encodeURIComponent(String(key))}&select=v&limit=1`,
+        { timeoutMs }
+      );
+      if (res.ok && Array.isArray(res.json)) {
+        supabaseHasAppKvTable = true;
+        const row = res.json[0];
+        if (row && typeof row.v === "string") {
+          try {
+            return JSON.parse(row.v);
+          } catch {}
+        }
+        return null;
+      }
+      if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
+        supabaseHasAppKvTable = false;
+      }
+    }
+    if (supabaseHasAppKvTable === false && !isSupabaseDegraded()) {
+      const sysId = supabaseKvSysUserId || (await getOrCreateSupabaseSystemKvUserId());
+      if (sysId) {
+        const row = await dbGetSyncPayload(sysId);
+        if (row?.payload_json) {
+          try {
+            const parsed = JSON.parse(String(row.payload_json));
+            if (parsed?.kv && parsed.kv[key] !== undefined) {
+              return parsed.kv[key];
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[studio] Supabase ${key} fetch warning:`, err?.message);
+  }
+  return undefined;
+}
 
-app.get("/api/studio/games", (_req, res) => {
-  res.json({ success: true, games: publishedStudioGames });
+async function flushKvKeyToSqliteAndSupabaseAsync(key, value, { awaitRemote = false, timeoutMs = 25000 } = {}) {
+  localKvSetJson(key, value);
+  if (pendingSupabaseKvTimers.has(String(key))) {
+    clearTimeout(pendingSupabaseKvTimers.get(String(key)));
+    pendingSupabaseKvTimers.delete(String(key));
+  }
+  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) {
+    return { persistedRemote: false };
+  }
+  if (awaitRemote) {
+    const r = await persistKvKeyToSupabaseAsync(key, { timeoutMs }).catch(() => ({ ok: false }));
+    return { persistedRemote: Boolean(r?.ok) };
+  }
+  scheduleSupabaseKvSync(key);
+  return { persistedRemote: false };
+}
+
+let studioGamesRemoteRefreshPromise = null;
+async function getMergedStudioGamesAsync({ forceRemote = false } = {}) {
+  await ensureChatMetaReadyAsync();
+  const localGames = kvGetJson(STUDIO_GAMES_KV_KEY, []);
+  const now = Date.now();
+  let remoteGames;
+  if (
+    USE_SUPABASE_CLOUDSYNC &&
+    !isSupabaseDegraded() &&
+    (forceRemote || now - studioGamesRemoteSyncedAt > 8000)
+  ) {
+    if (!studioGamesRemoteRefreshPromise) {
+      studioGamesRemoteRefreshPromise = fetchSupabaseKvKeyAsync(STUDIO_GAMES_KV_KEY, { timeoutMs: 15000 })
+        .then((val) => {
+          if (val !== undefined) studioGamesRemoteSyncedAt = Date.now();
+          return Array.isArray(val) ? val : [];
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          studioGamesRemoteRefreshPromise = null;
+        });
+    }
+    remoteGames = await studioGamesRemoteRefreshPromise;
+  }
+  const merged = mergeStudioGamesLists(
+    publishedStudioGames,
+    Array.isArray(localGames) ? localGames : [],
+    Array.isArray(remoteGames) ? remoteGames : []
+  );
+  publishedStudioGames.splice(0, publishedStudioGames.length, ...merged);
+  if (merged.length > 0) {
+    localKvSetJson(STUDIO_GAMES_KV_KEY, merged);
+    if (Array.isArray(remoteGames) && merged.length > remoteGames.length) {
+      scheduleSupabaseKvSync(STUDIO_GAMES_KV_KEY);
+    }
+  }
+  return publishedStudioGames;
+}
+
+app.get(["/api/studio/games", "/api/games/community", "/api/creator/games"], async (req, res) => {
+  const forceRemote = req.query.fresh === "1" || req.query.refresh === "1";
+  const games = await getMergedStudioGamesAsync({ forceRemote }).catch(() => publishedStudioGames);
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.json({ success: true, games });
 });
 
-app.post("/api/studio/games", async (req, res) => {
+app.post(["/api/studio/games", "/api/games/community", "/api/creator/games"], async (req, res) => {
   try {
     const { game } = req.body || {};
-    if (!game || !game.title || !game.author) {
+    if (!game || !String(game.title || "").trim() || !String(game.author || "").trim()) {
       return res.status(400).json({ success: false, error: "Missing game title or author" });
     }
     if (
@@ -5665,52 +5864,80 @@ app.post("/api/studio/games", async (req, res) => {
     ) {
       return res.status(413).json({
         success: false,
-        error: "Custom HTML file exceeds 2MB server memory limit",
+        error: "Custom HTML file exceeds 5MB server limit",
       });
     }
-    const modCheck = await moderateTextWithOpenAI(`${game.title} ${game.description || ""}`);
+    const cleanTitle = String(game.title).trim().slice(0, 80);
+    const cleanDesc = String(game.description || "").trim().slice(0, 240);
+    const modCheck = await moderateTextWithOpenAI(`${cleanTitle} ${cleanDesc}`);
     if (modCheck.blocked) {
       return res.status(400).json({
         success: false,
         error: modCheck.reason || "Game title or description blocked by moderation",
       });
     }
+
+    const [authUser] = await Promise.all([
+      getAuthenticatedCloudSyncUser(req).catch(() => null),
+      getMergedStudioGamesAsync().catch(() => publishedStudioGames),
+    ]);
+
+    const nowIso = new Date().toISOString();
+    const entryId = String(game.id || "").trim() || `game_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const existing = publishedStudioGames.find((g) => g.id === entryId);
     const entry = {
       ...game,
-      id: game.id || `game_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      createdAt: game.createdAt || new Date().toISOString(),
-      plays: Number(game.plays) || 0,
-      likes: Number(game.likes) || 0,
+      id: entryId,
+      title: cleanTitle,
+      description: cleanDesc,
+      author: authUser?.username || existing?.author || String(game.author).trim().slice(0, 60),
+      createdAt: existing?.createdAt || game.createdAt || nowIso,
+      updatedAt: nowIso,
+      plays: Math.max(Number(existing?.plays) || 0, Number(game.plays) || 0),
+      likes: Math.max(Number(existing?.likes) || 0, Number(game.likes) || 0),
     };
-    const existingIdx = publishedStudioGames.findIndex((g) => g.id === entry.id);
-    if (existingIdx >= 0) {
-      publishedStudioGames[existingIdx] = entry;
-    } else {
-      publishedStudioGames.unshift(entry);
-      while (publishedStudioGames.length > MAX_PUBLISHED_STUDIO_GAMES) {
-        publishedStudioGames.pop();
-      }
-    }
+
+    const merged = mergeStudioGamesLists([entry], publishedStudioGames);
+    publishedStudioGames.splice(0, publishedStudioGames.length, ...merged);
+    studioGamesRemoteSyncedAt = Date.now();
+
+    const syncResult = await flushKvKeyToSqliteAndSupabaseAsync(
+      STUDIO_GAMES_KV_KEY,
+      publishedStudioGames,
+      { awaitRemote: true, timeoutMs: 25000 }
+    );
+
     broadcastToClients({ type: "studio-event", event: "GAME_PUBLISHED", game: entry }, "all");
-    res.json({ success: true, game: entry });
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.json({
+      success: true,
+      game: entry,
+      persistedRemote: syncResult.persistedRemote,
+      totalGames: publishedStudioGames.length,
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post("/api/studio/games/:id/stat", (req, res) => {
+app.post("/api/studio/games/:id/stat", async (req, res) => {
+  await getMergedStudioGamesAsync().catch(() => publishedStudioGames);
   const { id } = req.params;
   const { field } = req.body || {};
   const found = publishedStudioGames.find((g) => g.id === id);
   if (found) {
     if (field === "likes") found.likes = (found.likes || 0) + 1;
     if (field === "plays") found.plays = (found.plays || 0) + 1;
+    found.updatedAt = new Date().toISOString();
+    localKvSetJson(STUDIO_GAMES_KV_KEY, publishedStudioGames);
+    scheduleSupabaseKvSync(STUDIO_GAMES_KV_KEY);
   }
   res.json({ success: true, game: found || null });
 });
 
 // Serve custom uploaded index.html studio game with CloudSync Player Tracking SDK bridge
-app.get("/api/studio/games/:id/play.html", (req, res) => {
+app.get("/api/studio/games/:id/play.html", async (req, res) => {
+  await getMergedStudioGamesAsync().catch(() => publishedStudioGames);
   const { id } = req.params;
   const found = publishedStudioGames.find((g) => g.id === id);
   if (!found || !found.customHtmlContent) {
@@ -5845,11 +6072,33 @@ app.post("/api/studio/progress", (req, res) => {
   }
 });
 
-// --- Custom User Game Studios API ---
-const customStudios = [];
+// --- Custom User Game Studios API (shared SQLite + Supabase app_kv) ---
+async function getMergedStudiosAsync() {
+  await ensureChatMetaReadyAsync();
+  const localStudios = kvGetJson(STUDIO_PROFILES_KV_KEY, []);
+  const now = Date.now();
+  let remoteStudios;
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded() && now - studioStudiosRemoteSyncedAt > 15000) {
+    const val = await fetchSupabaseKvKeyAsync(STUDIO_PROFILES_KV_KEY, { timeoutMs: 8000 });
+    if (val !== undefined) {
+      studioStudiosRemoteSyncedAt = now;
+      remoteStudios = Array.isArray(val) ? val : [];
+    }
+  }
+  const merged = mergeStudioProfilesLists(
+    customStudios,
+    Array.isArray(localStudios) ? localStudios : [],
+    Array.isArray(remoteStudios) ? remoteStudios : []
+  );
+  customStudios.splice(0, customStudios.length, ...merged);
+  if (merged.length > 0) localKvSetJson(STUDIO_PROFILES_KV_KEY, merged);
+  return customStudios;
+}
 
-app.get("/api/studio/studios", (_req, res) => {
-  res.json({ success: true, studios: customStudios });
+app.get("/api/studio/studios", async (_req, res) => {
+  const studios = await getMergedStudiosAsync().catch(() => customStudios);
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.json({ success: true, studios });
 });
 
 app.post("/api/studio/studios", async (req, res) => {
@@ -5865,15 +6114,20 @@ app.post("/api/studio/studios", async (req, res) => {
         error: modCheck.reason || "Studio name blocked by moderation",
       });
     }
-    const idx = customStudios.findIndex(
-      (s) => s.id === studio.id || s.owner.toLowerCase() === studio.owner.toLowerCase()
-    );
-    if (idx >= 0) {
-      customStudios[idx] = { ...customStudios[idx], ...studio };
-      return res.json({ success: true, studio: customStudios[idx] });
-    }
-    customStudios.unshift(studio);
-    res.json({ success: true, studio });
+    await getMergedStudiosAsync().catch(() => customStudios);
+    const updated = { ...studio, updatedAt: new Date().toISOString() };
+    const merged = mergeStudioProfilesLists([updated], customStudios);
+    customStudios.splice(0, customStudios.length, ...merged);
+    studioStudiosRemoteSyncedAt = Date.now();
+    await flushKvKeyToSqliteAndSupabaseAsync(STUDIO_PROFILES_KV_KEY, customStudios, {
+      awaitRemote: true,
+      timeoutMs: 12000,
+    });
+    const saved =
+      customStudios.find(
+        (s) => s.id === updated.id || s.owner.toLowerCase() === String(updated.owner).toLowerCase()
+      ) || updated;
+    res.json({ success: true, studio: saved });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

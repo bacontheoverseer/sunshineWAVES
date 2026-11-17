@@ -563,7 +563,7 @@ export default function GameStudioPage() {
   const [studioColorInput, setStudioColorInput] = useState(userStudio.color);
   const [studioIconInput, setStudioIconInput] = useState(userStudio.icon);
 
-  // Community published games state (only real user-published games)
+  // Community published games state (synced with global /api/studio/games SQLite + Supabase store)
   const [communityGames, setCommunityGames] = useState<StudioGameProject[]>(() => {
     try {
       const saved = localStorage.getItem("cookie_studio_games_v2");
@@ -574,6 +574,9 @@ export default function GameStudioPage() {
     } catch {}
     return [];
   });
+  const [serverGameIds, setServerGameIds] = useState<Set<string>>(() => new Set());
+  const [serverSyncLoaded, setServerSyncLoaded] = useState(false);
+  const [isRefreshingLibrary, setIsRefreshingLibrary] = useState(false);
 
   // CloudSync Player Tracking state
   const [activeGameId, setActiveGameId] = useState<string>("editor_preview");
@@ -1085,29 +1088,66 @@ export default function GameStudioPage() {
     });
   }, []);
 
+  const refreshCommunityLibrary = useCallback(async (forceFresh = false) => {
+    setIsRefreshingLibrary(true);
+    try {
+      const qs = forceFresh ? `fresh=1&t=${Date.now()}` : `t=${Date.now()}`;
+      const res = await fetch(`/api/studio/games?${qs}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (Array.isArray(data?.games)) {
+        const remoteList = data.games as StudioGameProject[];
+        setServerGameIds(new Set(remoteList.map((g) => g.id)));
+        setServerSyncLoaded(true);
+        setCommunityGames((prev) => {
+          const byId = new Map<string, StudioGameProject>();
+          for (const g of remoteList) {
+            if (g?.id) byId.set(g.id, g);
+          }
+          for (const g of prev) {
+            if (g?.id && !byId.has(g.id)) {
+              byId.set(g.id, g);
+            }
+          }
+          const next = Array.from(byId.values()).slice(0, 80);
+          try {
+            localStorage.setItem("cookie_studio_games_v2", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+      }
+    } catch {} finally {
+      setIsRefreshingLibrary(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!visible) return;
-    fetch("/api/studio/games")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (Array.isArray(data?.games)) {
-          for (const g of data.games) mergePublishedGame(g);
-        }
-      })
-      .catch(() => {});
+    void refreshCommunityLibrary(subTab === "community");
 
     fetchCloudProgressForGame(activeGameId);
 
     const onSseStudio = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.game) mergePublishedGame(detail.game);
+      if (detail?.game?.id) {
+        setServerGameIds((prev) => new Set(prev).add(detail.game.id));
+        mergePublishedGame(detail.game);
+      }
+    };
+    const onVisChange = () => {
+      if (!document.hidden && visible) void refreshCommunityLibrary();
     };
     window.addEventListener("sunshine-studio-event", onSseStudio);
+    document.addEventListener("visibilitychange", onVisChange);
 
     try {
       const bc = new BroadcastChannel("cookie_studio_v1_channel");
       bc.onmessage = (ev) => {
-        if (ev.data?.type === "GAME_PUBLISHED" && ev.data.game) {
+        if (ev.data?.type === "GAME_PUBLISHED" && ev.data.game?.id) {
+          setServerGameIds((prev) => new Set(prev).add(ev.data.game.id));
           mergePublishedGame(ev.data.game);
         }
       };
@@ -1116,9 +1156,10 @@ export default function GameStudioPage() {
 
     return () => {
       window.removeEventListener("sunshine-studio-event", onSseStudio);
+      document.removeEventListener("visibilitychange", onVisChange);
       broadcastRef.current?.close();
     };
-  }, [visible, activeGameId, mergePublishedGame, fetchCloudProgressForGame]);
+  }, [visible, subTab, activeGameId, mergePublishedGame, fetchCloudProgressForGame, refreshCommunityLibrary]);
 
   useEffect(() => {
     if (!visible) return;
@@ -2194,8 +2235,8 @@ export default function GameStudioPage() {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
-      notifyToast("html file too large (max 2MB)", "error");
+    if (file.size > 5 * 1024 * 1024) {
+      notifyToast("html file too large (max 5MB)", "error");
       return;
     }
     setHtmlFileName(file.name);
@@ -2269,6 +2310,55 @@ export default function GameStudioPage() {
     };
   }, [playingCustomHtmlGame]);
 
+  const publishStudioGameToServer = useCallback(
+    async (gamePayload: StudioGameProject): Promise<StudioGameProject> => {
+      let authToken = "";
+      try {
+        authToken = localStorage.getItem("auth_token") || "";
+      } catch {}
+      const res = await fetch("/api/studio/games", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({ game: gamePayload }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success || !data?.game) {
+        throw new Error(
+          data?.error || `Failed to publish to global library (HTTP ${res.status})`
+        );
+      }
+      return data.game as StudioGameProject;
+    },
+    []
+  );
+
+  const handleRepublishGame = useCallback(
+    async (g: StudioGameProject) => {
+      try {
+        const saved = await publishStudioGameToServer({
+          ...g,
+          author: g.author || getActiveAuthor(),
+        });
+        setServerGameIds((prev) => new Set(prev).add(saved.id));
+        mergePublishedGame(saved);
+        try {
+          broadcastRef.current?.postMessage({ type: "GAME_PUBLISHED", game: saved });
+        } catch {}
+        notifyToast(`republished "${saved.title}" to community library!`, "success");
+      } catch (err) {
+        notifyToast(
+          (err as Error)?.message || "failed to republish game to server",
+          "error"
+        );
+      }
+    },
+    [publishStudioGameToServer, mergePublishedGame]
+  );
+
   const handlePublishCustomHtmlGame = async (e: Event) => {
     e.preventDefault();
     if (isUploadingHtml) return;
@@ -2279,6 +2369,10 @@ export default function GameStudioPage() {
     }
     if (!customHtmlCode.trim()) {
       notifyToast("upload or paste an index.html file first", "error");
+      return;
+    }
+    if (new Blob([customHtmlCode]).size > 5 * 1024 * 1024) {
+      notifyToast("custom index.html exceeds 5MB limit", "error");
       return;
     }
     if (coins < CUSTOM_HTML_UPLOAD_COST) {
@@ -2296,12 +2390,6 @@ export default function GameStudioPage() {
         notifyToast(mod.reason || "title or description blocked by moderation", "error");
         return;
       }
-
-      if (!spendCookieCoins(CUSTOM_HTML_UPLOAD_COST)) {
-        notifyToast(`insufficient cookie coins (${CUSTOM_HTML_UPLOAD_COST} required)`, "error");
-        return;
-      }
-      setCoins(getCookieCoins());
 
       const newGame: StudioGameProject = {
         id: `htmlgame_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -2328,22 +2416,29 @@ export default function GameStudioPage() {
         createdAt: new Date().toISOString(),
       };
 
-      mergePublishedGame(newGame);
+      const savedGame = await publishStudioGameToServer(newGame);
+      if (!spendCookieCoins(CUSTOM_HTML_UPLOAD_COST)) {
+        notifyToast(`insufficient cookie coins (${CUSTOM_HTML_UPLOAD_COST} required)`, "error");
+        return;
+      }
+      setCoins(getCookieCoins());
+
+      setServerGameIds((prev) => new Set(prev).add(savedGame.id));
+      mergePublishedGame(savedGame);
       try {
-        broadcastRef.current?.postMessage({ type: "GAME_PUBLISHED", game: newGame });
+        broadcastRef.current?.postMessage({ type: "GAME_PUBLISHED", game: savedGame });
       } catch {}
 
-      await fetch("/api/studio/games", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ game: newGame }),
-      }).catch(() => {});
-
       notifyToast(
-        `published custom index.html game "${cleanTitle}" under ${userStudio.name}! (-1,000 coins)`,
+        `published custom index.html game "${savedGame.title}" under ${userStudio.name}! (-1,000 coins)`,
         "success"
       );
       setSubTab("community");
+    } catch (err) {
+      notifyToast(
+        (err as Error)?.message || "failed to publish custom game to community library",
+        "error"
+      );
     } finally {
       setIsUploadingHtml(false);
     }
@@ -2363,12 +2458,19 @@ export default function GameStudioPage() {
       const mod = await moderateChatMessage(`${cleanTitle} ${description}`);
       if (mod.blocked) {
         notifyToast(mod.reason || "game title or description blocked by moderation", "error");
-        setIsPublishing(false);
         return;
       }
 
+      const canUpdateExisting =
+        !isForeignProjectRef.current &&
+        activeGameId &&
+        activeGameId !== "editor_preview" &&
+        !activeGameId.startsWith("htmlgame_");
+
       const newGame: StudioGameProject = {
-        id: `game_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        id: canUpdateExisting
+          ? activeGameId
+          : `game_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         title: cleanTitle,
         description: description.trim() || `built by ${userStudio.name}`,
         author: getActiveAuthor(),
@@ -2396,19 +2498,15 @@ export default function GameStudioPage() {
         createdAt: new Date().toISOString(),
       };
 
-      mergePublishedGame(newGame);
-      setActiveGameId(newGame.id);
+      const savedGame = await publishStudioGameToServer(newGame);
+      setServerGameIds((prev) => new Set(prev).add(savedGame.id));
+      mergePublishedGame(savedGame);
+      setActiveGameId(savedGame.id);
       try {
-        broadcastRef.current?.postMessage({ type: "GAME_PUBLISHED", game: newGame });
+        broadcastRef.current?.postMessage({ type: "GAME_PUBLISHED", game: savedGame });
       } catch {}
 
-      await fetch("/api/studio/games", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ game: newGame }),
-      }).catch(() => {});
-
-      addCookieCoins(50, `published "${cleanTitle}" under ${userStudio.name}`);
+      addCookieCoins(50, `published "${savedGame.title}" under ${userStudio.name}`);
       const updatedStudio: StudioProfile = {
         ...userStudio,
         coinsEarned: (userStudio.coinsEarned || 0) + 50,
@@ -2418,6 +2516,11 @@ export default function GameStudioPage() {
       setUserStudio(updatedStudio);
 
       setSubTab("community");
+    } catch (err) {
+      notifyToast(
+        (err as Error)?.message || "failed to publish game to community library",
+        "error"
+      );
     } finally {
       setIsPublishing(false);
     }
@@ -2724,6 +2827,16 @@ export default function GameStudioPage() {
               />
               <button
                 type="button"
+                class="studio-tool-btn"
+                title="Refresh shared community library"
+                disabled={isRefreshingLibrary}
+                onClick={() => void refreshCommunityLibrary(true)}
+              >
+                <i class={`fa-solid ${isRefreshingLibrary ? "fa-spinner fa-spin" : "fa-rotate-right"}`}></i>
+                <span>refresh</span>
+              </button>
+              <button
+                type="button"
                 class="apps-custom-btn"
                 onClick={() => setSubTab("editor")}
               >
@@ -2911,6 +3024,20 @@ export default function GameStudioPage() {
                       </div>
 
                       <div class="studio-game-actions">
+                        {serverSyncLoaded &&
+                          !serverGameIds.has(g.id) &&
+                          g.author.toLowerCase() === getActiveAuthor().toLowerCase() && (
+                            <button
+                              type="button"
+                              class="studio-tool-btn"
+                              style={{ flex: 1, justifyContent: "center", borderColor: "rgba(251, 191, 36, 0.4)", color: "#fbbf24" }}
+                              title="This game is only saved locally; click to republish to global library"
+                              onClick={() => void handleRepublishGame(g)}
+                            >
+                              <i class="fa-solid fa-cloud-arrow-up"></i>
+                              <span>republish globally</span>
+                            </button>
+                          )}
                         <button
                           type="button"
                           class="studio-tool-btn"
@@ -3204,6 +3331,16 @@ export default function GameStudioPage() {
                         >
                           <i class="fa-solid fa-pen"></i> edit
                         </button>
+                        {serverSyncLoaded && !serverGameIds.has(g.id) && (
+                          <button
+                            type="button"
+                            class="studio-tool-btn"
+                            title="Republish to global community library"
+                            onClick={() => void handleRepublishGame(g)}
+                          >
+                            <i class="fa-solid fa-cloud-arrow-up"></i> republish
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
