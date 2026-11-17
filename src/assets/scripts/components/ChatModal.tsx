@@ -1530,7 +1530,7 @@ export default function ChatModal() {
       fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`, {
         credentials: "same-origin",
         cache: "no-store",
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+        ...(authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}),
       })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
@@ -1682,14 +1682,17 @@ export default function ChatModal() {
             setVoiceRooms((prev) => ({ ...prev, ...data.voiceRooms }));
           }
           const incomingPresenceAt = Number(data.presenceAt || 0);
+          const usersLoaded = data.usersLoaded !== false;
           if (!incomingPresenceAt || incomingPresenceAt >= lastPresenceAtRef.current) {
-            if (incomingPresenceAt) lastPresenceAtRef.current = incomingPresenceAt;
+            if (incomingPresenceAt && usersLoaded) lastPresenceAtRef.current = incomingPresenceAt;
             if (Array.isArray(data.onlineUsers)) {
               setServerOnlineUsers(data.onlineUsers);
             }
-            if (Array.isArray(data.offlineUsers)) {
+            if (Array.isArray(data.offlineUsers) && (usersLoaded || data.offlineUsers.length > 0)) {
               setServerOfflineUsers(data.offlineUsers);
             }
+          } else if (usersLoaded && Array.isArray(data.offlineUsers) && data.offlineUsers.length > 0) {
+            setServerOfflineUsers((prev) => (prev.length === 0 ? data.offlineUsers : prev));
           }
           if (Array.isArray(data.staffMods)) {
             setStaffMods(data.staffMods);
@@ -1745,7 +1748,7 @@ export default function ChatModal() {
               setEditingStatusText(myRecord.statusText);
             }
           }
-          if (Array.isArray(data.registeredUsers)) {
+          if (Array.isArray(data.registeredUsers) && (usersLoaded || data.registeredUsers.length > 0)) {
             setRegisteredCloudSyncUsers(data.registeredUsers);
             if (data.registeredUsers.length > 0) {
               const validSet = new Set(
@@ -1781,12 +1784,20 @@ export default function ChatModal() {
     let lastPollAt = Date.now();
     const pollInterval = window.setInterval(() => {
       const sseOpen = isLiveStreamConnected();
-      const targetInterval = isOpen ? (sseOpen ? 12000 : 3500) : sseOpen ? 40000 : 12000;
+      const targetInterval = !initialStateLoadedRef.current
+        ? 2500
+        : isOpen
+          ? sseOpen
+            ? 12000
+            : 3500
+          : sseOpen
+            ? 40000
+            : 12000;
       if (Date.now() - lastPollAt >= targetInterval - 200) {
         lastPollAt = Date.now();
         fetchChatAndPresenceState();
       }
-    }, 3500);
+    }, 2500);
     return () => {
       window.clearInterval(pollInterval);
       document.removeEventListener("visibilitychange", onVisWake);
@@ -1938,12 +1949,13 @@ export default function ChatModal() {
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
       const incomingAt = Number(detail.snapshotAt || 0);
+      const usersLoaded = detail.usersLoaded !== false;
       if (incomingAt && incomingAt < lastPresenceAtRef.current) return;
-      if (incomingAt) lastPresenceAtRef.current = incomingAt;
+      if (incomingAt && usersLoaded) lastPresenceAtRef.current = incomingAt;
       if (Array.isArray(detail.onlineUsers)) {
         setServerOnlineUsers(detail.onlineUsers);
       }
-      if (Array.isArray(detail.offlineUsers)) {
+      if (Array.isArray(detail.offlineUsers) && (usersLoaded || detail.offlineUsers.length > 0)) {
         setServerOfflineUsers(detail.offlineUsers);
       }
       const combinedUsers: OnlineUser[] = [
@@ -1979,7 +1991,7 @@ export default function ChatModal() {
       if (Array.isArray(detail.goatUsers)) {
         setGoatUsers(detail.goatUsers);
       }
-      if (Array.isArray(detail.registeredUsers)) {
+      if (Array.isArray(detail.registeredUsers) && (usersLoaded || detail.registeredUsers.length > 0)) {
         setRegisteredCloudSyncUsers(detail.registeredUsers);
       }
       if (cloudUser && (Array.isArray(detail.ownerUsers) || Array.isArray(detail.staffMods))) {

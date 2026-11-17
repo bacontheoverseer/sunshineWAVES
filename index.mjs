@@ -204,10 +204,17 @@ server.on("connection", (conn) => {
 });
 
 server.on("upgrade", (req, socket, head) => {
-  if (req.url.startsWith("/w/")) {
-    wisp.routeRequest(req, socket, head);
+  socket.on("error", () => {
+    try { socket.destroy(); } catch {}
+  });
+  if (req.url && req.url.startsWith("/w/")) {
+    try {
+      wisp.routeRequest(req, socket, head);
+    } catch {
+      try { socket.end(); } catch {}
+    }
   } else {
-    socket.end();
+    try { socket.end(); } catch {}
   }
 });
 const pageCache = new LRUCache({ max: parseInt(process.env.PAGE_CACHE_MAX || "50", 10), ttl: 1000 * 60 * 5 });
@@ -894,9 +901,9 @@ const ENV_STAFF_MODS = (process.env.STAFF_MODERATORS || "")
   .filter(Boolean);
 
 const liveClients = new Map();
-const httpHeartbeats = new Map(); // clientId -> { id, username, verifiedUsername, page, game, isPlayingGame, gameStartedAt, isIdle, lastSeen }
-const LIVE_SSE_PRESENCE_TTL_MS = 135000; // Covers Chrome background timer throttling without dropping open SSE tabs
-const HTTP_HEARTBEAT_PRESENCE_TTL_MS = 35000; // Keeps HTTP-heartbeating tabs online across SSE reconnects/blocks
+const httpHeartbeats = new Map(); // clientId -> { id, instanceId, username, verifiedUsername, page, game, isPlayingGame, gameStartedAt, isIdle, lastSeen }
+const LIVE_SSE_PRESENCE_TTL_MS = 360000; // Covers Chrome 5-min background throttling; req.on("close") & /offline still clear closed tabs immediately
+const HTTP_HEARTBEAT_PRESENCE_TTL_MS = 65000; // Keeps HTTP-heartbeating tabs online across throttled timers or SSE reconnects
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
 const userProfiles = new Map(); // usernameLower -> { bio, statusText, customization, updatedAt }
 const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
@@ -1470,6 +1477,7 @@ async function supabaseRest(restPath, options = {}) {
   }
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
     ...options,
+    signal: options.signal || AbortSignal.timeout(8000),
     headers: {
       ...authHeaders,
       ...(options.headers || {}),
@@ -1659,11 +1667,18 @@ async function dbUpsertSyncPayload(userId, payloadJson, updatedAt) {
 
 async function dbListUsers() {
   if (USE_SUPABASE_CLOUDSYNC) {
-    const { ok, status, json, text } = await supabaseRest(
-      "cloudsync_users?select=id,username,created_at&order=id.asc"
-    );
-    if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
-    return Array.isArray(json) ? json : [];
+    const allRows = [];
+    const pageSize = 1000;
+    for (let offset = 0; offset < 50000; offset += pageSize) {
+      const { ok, status, json, text } = await supabaseRest(
+        `cloudsync_users?select=id,username,created_at&order=id.asc&limit=${pageSize}&offset=${offset}`
+      );
+      if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
+      const batch = Array.isArray(json) ? json : [];
+      allRows.push(...batch);
+      if (batch.length < pageSize) break;
+    }
+    return allRows;
   }
   const db = openCloudSyncDb(true);
   try {
@@ -2034,9 +2049,12 @@ function isTemporaryGuestName(name) {
 }
 
 let cloudSyncUsersCache = { map: null, expiresAt: 0 };
+let cloudSyncUsersLoaded = !USE_SUPABASE_CLOUDSYNC;
 let cloudSyncUsersRefreshPromise = null;
+let lastForcedUserRefreshAt = 0;
 function invalidateCloudSyncUsersCache() {
-  cloudSyncUsersCache = { map: null, expiresAt: 0 };
+  // Keep previous map as fallback while marking expired so synchronous callers never flash empty user lists
+  cloudSyncUsersCache.expiresAt = 0;
 }
 
 function buildCloudSyncUsersMap(rows) {
@@ -2067,7 +2085,8 @@ async function getCloudSyncUsersMapAsync(forceRefresh = false) {
     try {
       const rows = await dbListUsers();
       const map = buildCloudSyncUsersMap(rows);
-      cloudSyncUsersCache = { map, expiresAt: Date.now() + 15000 };
+      cloudSyncUsersCache = { map, expiresAt: Date.now() + 45000 };
+      cloudSyncUsersLoaded = true;
       return map;
     } catch (err) {
       if (USE_SUPABASE_CLOUDSYNC) {
@@ -2101,7 +2120,8 @@ function getCloudSyncUsersMap(forceRefresh = false) {
         .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
         .all();
       const built = buildCloudSyncUsersMap(rows);
-      cloudSyncUsersCache = { map: built, expiresAt: now + 15000 };
+      cloudSyncUsersCache = { map: built, expiresAt: now + 45000 };
+      cloudSyncUsersLoaded = true;
       return built;
     } finally {
       db.close();
@@ -2109,7 +2129,7 @@ function getCloudSyncUsersMap(forceRefresh = false) {
   } catch {
     // ignore if DB not initialized yet
   }
-  return map;
+  return cloudSyncUsersCache.map || map;
 }
 
 async function getCloudSyncUserAsync(username) {
@@ -2135,7 +2155,7 @@ function touchKnownUser(username, extra = {}) {
   const key = clean.toLowerCase();
   const csMap = getCloudSyncUsersMap();
   if (isTemporaryGuestName(clean) && !csMap.has(key)) return;
-  if (csMap.size > 0 && !csMap.has(key)) return;
+  if (cloudSyncUsersLoaded && csMap.size > 0 && !csMap.has(key) && !extra.verified) return;
 
   const csRecord = csMap.get(key);
   const canonicalName = csRecord ? csRecord.username : clean;
@@ -2158,11 +2178,14 @@ function getPresenceSnapshot() {
   ensureChatMetaLoaded();
   const csMap = getCloudSyncUsersMap();
   const now = Date.now();
+  const usersLoaded = Boolean(!USE_SUPABASE_CLOUDSYNC || cloudSyncUsersLoaded);
 
-  // Remove any non-CloudSync or temporary guest entries from knownUsers
-  for (const [k] of knownUsers.entries()) {
-    if ((csMap.size > 0 && !csMap.has(k)) || (isTemporaryGuestName(k) && !csMap.has(k))) {
-      knownUsers.delete(k);
+  // Prune stale non-CloudSync entries only after the authoritative user directory has loaded
+  if (usersLoaded) {
+    for (const [k] of knownUsers.entries()) {
+      if ((csMap.size > 0 && !csMap.has(k)) || (isTemporaryGuestName(k) && !csMap.has(k))) {
+        knownUsers.delete(k);
+      }
     }
   }
 
@@ -2187,8 +2210,17 @@ function getPresenceSnapshot() {
     const clean = String(c.username || "").trim();
     if (!clean) return;
     const key = clean.toLowerCase();
-    if (isTemporaryGuestName(clean) && !csMap.has(key)) return;
-    if (csMap.size > 0 && !csMap.has(key)) return;
+    const hasVerifiedSession = Boolean(c.verifiedUsername && c.verifiedUsername === key);
+    if (isTemporaryGuestName(clean) && !csMap.has(key) && !hasVerifiedSession) return;
+    if (usersLoaded && csMap.size > 0 && !csMap.has(key)) {
+      if (!hasVerifiedSession) {
+        return;
+      }
+      if (now - lastForcedUserRefreshAt > 10000) {
+        lastForcedUserRefreshAt = now;
+        void getCloudSyncUsersMapAsync(true).catch(() => {});
+      }
+    }
 
     const csRecord = csMap.get(key);
     const canonicalName = csRecord ? csRecord.username : clean;
@@ -2263,6 +2295,7 @@ function getPresenceSnapshot() {
   const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
   return {
     snapshotAt: now,
+    usersLoaded,
     onlineUsers,
     offlineUsers,
     registeredUsers,
@@ -2302,62 +2335,76 @@ function broadcastToClients(actionPayload, target = "all") {
 let heartbeatTick = 0;
 let lastBroadcastOnlineKey = "";
 setInterval(() => {
-  const now = Date.now();
-  heartbeatTick++;
-  let prunedAny = false;
-  for (const [id, client] of liveClients.entries()) {
-    if (client.res?.writableEnded || client.res?.destroyed || now - (client.lastSeen || 0) > 300000) {
-      liveClients.delete(id);
-      prunedAny = true;
-      continue;
-    }
-    try {
-      client.res.write(": keepalive\n\n");
-    } catch {
-      liveClients.delete(id);
-      prunedAny = true;
-    }
-  }
-  for (const [id, hb] of httpHeartbeats.entries()) {
-    if (!hb || now - (hb.lastSeen || 0) > HTTP_HEARTBEAT_PRESENCE_TTL_MS) {
-      httpHeartbeats.delete(id);
-      prunedAny = true;
-    }
-  }
-  const snap = getPresenceSnapshot();
-  const nextOnlineKey = snap.onlineUsers
-    .map((u) => `${u.username.toLowerCase()}:${u.isIdle ? 1 : 0}:${u.game || ""}`)
-    .sort()
-    .join("|");
-  if (prunedAny || nextOnlineKey !== lastBroadcastOnlineKey) {
-    lastBroadcastOnlineKey = nextOnlineKey;
-    broadcastToClients({ type: "presence-event", ...snap }, "all");
-  }
-  if (heartbeatTick % 4 === 0) {
-    // Prune disconnected peers from voiceRooms & cap knownUsers
-    for (const [roomId, peers] of voiceRooms.entries()) {
-      for (const peerId of peers.keys()) {
-        if (!liveClients.has(peerId)) peers.delete(peerId);
+  try {
+    const now = Date.now();
+    heartbeatTick++;
+    let prunedAny = false;
+    for (const [id, client] of liveClients.entries()) {
+      if (
+        client.res?.writableEnded ||
+        client.res?.destroyed ||
+        now - (client.lastSeen || 0) > Math.max(LIVE_SSE_PRESENCE_TTL_MS + 60000, 420000)
+      ) {
+        liveClients.delete(id);
+        prunedAny = true;
+        continue;
       }
-      if (peers.size === 0) voiceRooms.delete(roomId);
-    }
-    if (knownUsers.size > 300) {
-      for (const [uname, lastSeen] of knownUsers.entries()) {
-        if (now - lastSeen > 24 * 60 * 60 * 1000) knownUsers.delete(uname);
+      try {
+        client.res.write(": keepalive\n\n");
+      } catch {
+        liveClients.delete(id);
+        prunedAny = true;
       }
     }
-    if (userProfiles.size > 1000) {
-      for (const [uname] of userProfiles.entries()) {
-        if (!knownUsers.has(uname)) userProfiles.delete(uname);
-        if (userProfiles.size <= 1000) break;
+    for (const [id, hb] of httpHeartbeats.entries()) {
+      if (!hb || now - (hb.lastSeen || 0) > HTTP_HEARTBEAT_PRESENCE_TTL_MS) {
+        httpHeartbeats.delete(id);
+        prunedAny = true;
       }
-      persistUserProfiles();
     }
-  }
-  if (heartbeatTick % 20 === 0 && sharedCloudSyncDb) {
-    try {
-      sharedCloudSyncDb.exec("PRAGMA wal_checkpoint(PASSIVE);");
-    } catch {}
+    if (liveClients.size > 0 || httpHeartbeats.size > 0 || prunedAny) {
+      const snap = getPresenceSnapshot();
+      const onlineSig = snap.onlineUsers
+        .map((u) => `${u.username.toLowerCase()}:${u.isIdle ? 1 : 0}:${u.game || ""}`)
+        .sort()
+        .join("|");
+      const nextKey = `${onlineSig}::${snap.usersLoaded ? snap.registeredUsers.length : "pending"}`;
+      if (prunedAny || nextKey !== lastBroadcastOnlineKey) {
+        lastBroadcastOnlineKey = nextKey;
+        if (liveClients.size > 0) {
+          broadcastToClients({ type: "presence-event", ...snap }, "all");
+        }
+      }
+    }
+    if (heartbeatTick % 4 === 0) {
+      // Prune disconnected peers from voiceRooms & cap knownUsers
+      for (const [roomId, peers] of voiceRooms.entries()) {
+        for (const peerId of peers.keys()) {
+          if (!liveClients.has(peerId)) peers.delete(peerId);
+        }
+        if (peers.size === 0) voiceRooms.delete(roomId);
+      }
+      if (knownUsers.size > 300) {
+        for (const [uname, entry] of knownUsers.entries()) {
+          const ts = Number(entry?.lastSeen || 0);
+          if (ts > 0 && now - ts > 24 * 60 * 60 * 1000) knownUsers.delete(uname);
+        }
+      }
+      if (userProfiles.size > 1000) {
+        for (const [uname] of userProfiles.entries()) {
+          if (!knownUsers.has(uname)) userProfiles.delete(uname);
+          if (userProfiles.size <= 1000) break;
+        }
+        persistUserProfiles();
+      }
+    }
+    if (heartbeatTick % 20 === 0 && sharedCloudSyncDb) {
+      try {
+        sharedCloudSyncDb.exec("PRAGMA wal_checkpoint(PASSIVE);");
+      } catch {}
+    }
+  } catch (err) {
+    console.warn("Keepalive interval warning:", err?.message || err);
   }
 }, 15000);
 
@@ -2387,6 +2434,7 @@ app.get("/api/live/stream", async (req, res) => {
   }
 
   const clientId = (req.query.id || Math.random().toString(36).substring(2, 10)).toString();
+  const instanceId = String(req.query.instance || "").trim().slice(0, 64);
   const username = authUser
     ? authUser.username
     : (req.query.user || "Guest-" + clientId.substring(0, 4)).toString();
@@ -2399,6 +2447,7 @@ app.get("/api/live/stream", async (req, res) => {
   const clientRecord = {
     res,
     id: clientId,
+    instanceId,
     username,
     verifiedUsername: authUser ? authUser.username.toLowerCase() : null,
     ip,
@@ -2412,29 +2461,52 @@ app.get("/api/live/stream", async (req, res) => {
   };
 
   liveClients.set(clientId, clientRecord);
-  touchKnownUser(username, { game, isPlayingGame: false, gameStartedAt: 0 });
+  touchKnownUser(username, {
+    game,
+    isPlayingGame: false,
+    gameStartedAt: 0,
+    verified: Boolean(authUser),
+  });
+
+  const cleanupSseClient = () => {
+    if (liveClients.get(clientId) === clientRecord) {
+      liveClients.delete(clientId);
+      const activeHb = httpHeartbeats.get(clientId);
+      if (
+        !activeHb ||
+        (instanceId && activeHb.instanceId === instanceId && Date.now() - (activeHb.lastSeen || 0) > 15000) ||
+        Date.now() - (activeHb.lastSeen || 0) > HTTP_HEARTBEAT_PRESENCE_TTL_MS
+      ) {
+        httpHeartbeats.delete(clientId);
+      }
+      touchKnownUser(clientRecord.username, {
+        isPlayingGame: false,
+        gameStartedAt: 0,
+        verified: Boolean(clientRecord.verifiedUsername),
+      });
+      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    }
+  };
+
+  req.on("error", cleanupSseClient);
+  res.on("error", cleanupSseClient);
+  req.on("close", cleanupSseClient);
 
   // Initial handshake
   res.write(`data: ${JSON.stringify({ type: "connected", clientId, username })}\n\n`);
   broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
-
-  req.on("close", () => {
-    if (liveClients.get(clientId) === clientRecord) {
-      liveClients.delete(clientId);
-      const activeHb = httpHeartbeats.get(clientId);
-      if (!activeHb || Date.now() - (activeHb.lastSeen || 0) > 15000) {
-        httpHeartbeats.delete(clientId);
-      }
-      touchKnownUser(clientRecord.username, { isPlayingGame: false, gameStartedAt: 0 });
-      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
-    }
-  });
 });
 
 app.post("/api/live/heartbeat", async (req, res) => {
-  const authUser = await getAuthenticatedCloudSyncUser(req).catch(() => null);
-  const { clientId, username, page, game, isPlayingGame, gameStartedAt, idle } = req.body || {};
+  const [authUser] = await Promise.all([
+    getAuthenticatedCloudSyncUser(req).catch(() => null),
+    USE_SUPABASE_CLOUDSYNC && !cloudSyncUsersLoaded
+      ? getCloudSyncUsersMapAsync().catch(() => null)
+      : Promise.resolve(null),
+  ]);
+  const { clientId, instanceId, username, page, game, isPlayingGame, gameStartedAt, idle } = req.body || {};
   const now = Date.now();
+  const cleanInstance = String(instanceId || "").trim().slice(0, 64);
   const rawUser = String(username || "").trim();
   const effectiveUser = authUser ? authUser.username : rawUser;
   const verifiedLower = authUser ? authUser.username.toLowerCase() : null;
@@ -2442,6 +2514,7 @@ app.post("/api/live/heartbeat", async (req, res) => {
 
   if (clientId && liveClients.has(clientId)) {
     const client = liveClients.get(clientId);
+    if (cleanInstance) client.instanceId = cleanInstance;
     if (verifiedLower && client.verifiedUsername !== verifiedLower) {
       client.verifiedUsername = verifiedLower;
       changed = true;
@@ -2477,12 +2550,14 @@ app.post("/api/live/heartbeat", async (req, res) => {
       game: client.game,
       isPlayingGame: client.isPlayingGame,
       gameStartedAt: client.gameStartedAt,
+      verified: Boolean(client.verifiedUsername),
     });
   } else if (effectiveUser) {
     touchKnownUser(effectiveUser, {
       game: game || "browsing",
       isPlayingGame: Boolean(isPlayingGame),
       gameStartedAt: Number(gameStartedAt) || 0,
+      verified: Boolean(verifiedLower),
     });
     changed = true;
   }
@@ -2499,6 +2574,7 @@ app.post("/api/live/heartbeat", async (req, res) => {
     }
     httpHeartbeats.set(clientId, {
       id: String(clientId),
+      instanceId: cleanInstance || prevHb?.instanceId || "",
       username: effectiveUser,
       verifiedUsername: verifiedLower,
       page: typeof page === "string" ? page.slice(0, 200) : "/",
@@ -2527,12 +2603,28 @@ app.post("/api/live/offline", (req, res) => {
       }
     }
     const clientId = String(body?.clientId || req.query?.id || "").trim();
+    const instanceId = String(body?.instanceId || req.query?.instance || "").trim();
     if (clientId) {
+      let hadAny = false;
       const rec = liveClients.get(clientId);
-      if (rec?.username) {
-        touchKnownUser(rec.username, { isPlayingGame: false, gameStartedAt: 0 });
+      const hbRec = httpHeartbeats.get(clientId);
+      const recMatches = !instanceId || !rec?.instanceId || rec.instanceId === instanceId;
+      const hbMatches = !instanceId || !hbRec?.instanceId || hbRec.instanceId === instanceId;
+      if (rec && recMatches) {
+        if (rec.username) {
+          touchKnownUser(rec.username, {
+            isPlayingGame: false,
+            gameStartedAt: 0,
+            verified: Boolean(rec.verifiedUsername),
+          });
+        }
+        liveClients.delete(clientId);
+        hadAny = true;
       }
-      const hadAny = liveClients.delete(clientId) || httpHeartbeats.delete(clientId);
+      if (hbRec && hbMatches) {
+        httpHeartbeats.delete(clientId);
+        hadAny = true;
+      }
       if (hadAny) {
         broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
       }
@@ -2542,15 +2634,33 @@ app.post("/api/live/offline", (req, res) => {
 });
 
 app.get("/api/admin/clients", verifyAdmin, (_req, res) => {
-  const clients = Array.from(liveClients.values()).map((c) => ({
-    id: c.id,
-    username: c.username,
-    ip: c.ip,
-    page: c.page,
-    game: c.game,
-    connectedAt: c.connectedAt,
-    lastSeen: c.lastSeen,
-  }));
+  const now = Date.now();
+  const byId = new Map();
+  for (const hb of httpHeartbeats.values()) {
+    if (!hb || now - (hb.lastSeen || 0) > HTTP_HEARTBEAT_PRESENCE_TTL_MS) continue;
+    byId.set(hb.id, {
+      id: hb.id,
+      username: hb.username,
+      ip: "http-heartbeat",
+      page: hb.page,
+      game: hb.game,
+      connectedAt: hb.lastSeen,
+      lastSeen: hb.lastSeen,
+    });
+  }
+  for (const c of liveClients.values()) {
+    if (c.res?.writableEnded || c.res?.destroyed) continue;
+    byId.set(c.id, {
+      id: c.id,
+      username: c.username,
+      ip: c.ip,
+      page: c.page,
+      game: c.game,
+      connectedAt: c.connectedAt,
+      lastSeen: c.lastSeen,
+    });
+  }
+  const clients = Array.from(byId.values());
   res.json({ success: true, count: clients.length, clients });
 });
 
@@ -3635,6 +3745,7 @@ app.get("/api/chat/state", async (req, res) => {
     messages: visibleMessages.slice(-200),
     hasMoreMessages: visibleMessages.length > 200,
     presenceAt: presence.snapshotAt,
+    usersLoaded: presence.usersLoaded,
     groups: userGroups,
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
@@ -7279,6 +7390,12 @@ async function gracefulShutdown() {
 process.on("SIGINT", gracefulShutdown);
 process.on("SIGTERM", gracefulShutdown);
 process.on("exit", killServices);
+process.on("unhandledRejection", (reason) => {
+  console.warn("Unhandled promise rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception (kept alive):", err);
+});
 
 server.listen(PORT, () => {
   console.log(

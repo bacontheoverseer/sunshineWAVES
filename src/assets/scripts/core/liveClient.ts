@@ -1175,6 +1175,8 @@ export function executeTrollAction(
 
 // --- Live Client Registration & SSE Connection ---
 
+const PAGE_INSTANCE_ID: string =
+  Math.random().toString(36).substring(2, 10) + Date.now().toString(36).slice(-5);
 let currentClientId: string | null = null;
 let currentUsername: string = "Guest";
 let eventSource: EventSource | null = null;
@@ -1348,6 +1350,7 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
     },
     body: JSON.stringify({
       clientId,
+      instanceId: PAGE_INSTANCE_ID,
       username,
       page: activePage,
       game: activeGame,
@@ -1372,7 +1375,7 @@ function connectLiveEventSource(): void {
   const user = encodeURIComponent(currentUsername);
   const idleFlag = isClientAutoIdle() ? "1" : "0";
 
-  const streamUrl = `/api/live/stream?id=${encodeURIComponent(clientId)}&user=${user}&page=${page}&idle=${idleFlag}`;
+  const streamUrl = `/api/live/stream?id=${encodeURIComponent(clientId)}&instance=${encodeURIComponent(PAGE_INSTANCE_ID)}&user=${user}&page=${page}&idle=${idleFlag}`;
   const es = new EventSource(streamUrl);
   eventSource = es;
 
@@ -1380,11 +1383,9 @@ function connectLiveEventSource(): void {
     const isReconnect = hasOpenedStreamOnce;
     hasOpenedStreamOnce = true;
     sendHeartbeat();
-    if (isReconnect) {
-      try {
-        window.dispatchEvent(new CustomEvent("sunshine-sse-open"));
-      } catch {}
-    }
+    try {
+      window.dispatchEvent(new CustomEvent("sunshine-sse-open", { detail: { isReconnect } }));
+    } catch {}
   };
 
   es.onmessage = (event) => {
@@ -1483,9 +1484,10 @@ export function initLiveClient(): void {
     window.addEventListener("pagehide", (ev: PageTransitionEvent) => {
       if (ev.persisted) return;
       try {
-        const blob = new Blob([JSON.stringify({ clientId: getClientId() })], {
-          type: "application/json",
-        });
+        const blob = new Blob(
+          [JSON.stringify({ clientId: getClientId(), instanceId: PAGE_INSTANCE_ID })],
+          { type: "application/json" },
+        );
         navigator.sendBeacon?.("/api/live/offline", blob);
       } catch {}
     });

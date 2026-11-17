@@ -195,12 +195,19 @@ export class CloudSync {
         window.dispatchEvent(
           new CustomEvent("cloudsync-auth-changed", { detail: this.user })
         );
-      } else {
+      } else if (authRes.status === 401 || authRes.status === 403) {
         this.isAuthenticated = false;
         this.user = {};
         localStorage.removeItem("auth_user");
         localStorage.removeItem("auth_token");
         window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+      } else {
+        // Transient 5xx/503 deploy restart or 429 must never log the user out
+        this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+        this.updateStatus("reconnecting...", "info");
+        setTimeout(() => {
+          void this.checkAuthStatus();
+        }, 5000);
       }
       this.updateModalState();
 
@@ -229,8 +236,16 @@ export class CloudSync {
       }
     } catch (e) {
       console.warn("[cloudsync] startup check failed", e);
+      // Keep locally cached session alive during temporary network/restart outages
+      this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+      this.updateModalState();
       if (!this.isAuthenticated) {
         await this.enforceAuthGate();
+      } else {
+        this.updateStatus("reconnecting...", "info");
+        setTimeout(() => {
+          void this.checkAuthStatus();
+        }, 5000);
       }
     } finally {
       if (safetyTimer) clearTimeout(safetyTimer);
@@ -320,15 +335,20 @@ export class CloudSync {
         this.user = data.user;
         this.isAuthenticated = true;
         localStorage.setItem("auth_user", JSON.stringify(this.user));
-      } else {
+        this.startPolling();
+      } else if (res.status === 401 || res.status === 403) {
         this.isAuthenticated = false;
         this.user = {};
         localStorage.removeItem("auth_user");
+        localStorage.removeItem("auth_token");
+        window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+      } else {
+        this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
       }
       this.updateModalState();
     } catch (e) {
       console.warn("auth check failed!", e);
-      this.isAuthenticated = false;
+      this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
     }
   }
 
@@ -1065,6 +1085,9 @@ export class CloudSync {
       try {
         data = await res.json();
       } catch {
+        if (res.status === 502 || res.status === 503 || res.status === 504) {
+          throw new Error("server is restarting — please try again in a few seconds");
+        }
         throw new Error(`server returned ${res.status}`);
       }
 
@@ -1131,6 +1154,9 @@ export class CloudSync {
       try {
         data = await res.json();
       } catch {
+        if (res.status === 502 || res.status === 503 || res.status === 504) {
+          throw new Error("server is restarting — please try again in a few seconds");
+        }
         throw new Error(`server returned ${res.status}`);
       }
 
