@@ -1243,7 +1243,7 @@ async function getOrCreateSupabaseSystemKvUserId() {
 }
 
 async function persistKvKeyToSupabaseAsync(key) {
-  if (!USE_SUPABASE_CLOUDSYNC) return;
+  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return;
   const val = kvGetJson(key, null);
   if (val === null || val === undefined) return;
   if (supabaseHasAppKvTable !== false) {
@@ -1260,10 +1260,14 @@ async function persistKvKeyToSupabaseAsync(key) {
       supabaseHasAppKvTable = true;
       return;
     }
+    if (res.status >= 500 || res.status === 429 || isSupabaseDegraded()) {
+      return;
+    }
     if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
       supabaseHasAppKvTable = false;
     }
   }
+  if (isSupabaseDegraded()) return;
   const sysId = await getOrCreateSupabaseSystemKvUserId();
   if (!sysId) return;
   const snapshot = {};
@@ -1277,12 +1281,12 @@ async function persistKvKeyToSupabaseAsync(key) {
 
 async function ensureChatMetaReadyAsync() {
   ensureChatMetaLoaded();
-  if (!USE_SUPABASE_CLOUDSYNC || supabaseMetaHydrated) return;
+  if (!USE_SUPABASE_CLOUDSYNC || supabaseMetaHydrated || isSupabaseDegraded()) return;
   if (!supabaseMetaHydratePromise) {
     supabaseMetaHydratePromise = (async () => {
       try {
         let remoteKv = {};
-        if (supabaseHasAppKvTable !== false) {
+        if (supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
           const res = await supabaseRest("app_kv?select=k,v");
           if (res.ok && Array.isArray(res.json)) {
             supabaseHasAppKvTable = true;
@@ -1297,7 +1301,7 @@ async function ensureChatMetaReadyAsync() {
             supabaseHasAppKvTable = false;
           }
         }
-        if (supabaseHasAppKvTable === false) {
+        if (supabaseHasAppKvTable === false && !isSupabaseDegraded()) {
           const sysUser = await dbFindUserByUsername(RESERVED_SYSTEM_KV_USERNAME);
           if (sysUser?.id) {
             supabaseKvSysUserId = Number(sysUser.id);
@@ -1327,6 +1331,7 @@ async function ensureChatMetaReadyAsync() {
         console.warn("Supabase chat meta hydrate warning:", e?.message);
       } finally {
         supabaseMetaHydrated = true;
+        invalidateCloudSyncUsersCache();
       }
     })();
   }
@@ -1467,6 +1472,47 @@ function openCloudSyncDb(_readonly = false) {
   return sharedCloudSyncDbHandle;
 }
 
+const USERS_DIR_PAGE_SIZE = 50; // Strict limit=50 per paginated Supabase query
+const USERS_CACHE_TTL_MS = 60_000; // 60-second in-memory cache TTL
+const SUPABASE_DEGRADED_COOLDOWN_MS = 25_000; // 25s circuit-breaker cooldown (15-30s backoff)
+const USERS_DIR_KV_KEY = "registered_users_cache_v1";
+const USERS_COUNT_KV_KEY = "registered_users_count_v1";
+const DELETED_USERS_KV_KEY = "deleted_users_v1";
+let supabaseDegradedUntil = 0;
+
+function markSupabaseDegraded(reason = "") {
+  const until = Date.now() + SUPABASE_DEGRADED_COOLDOWN_MS;
+  if (until > supabaseDegradedUntil) {
+    supabaseDegradedUntil = until;
+  }
+  if (reason) {
+    console.warn(`[cloudsync] Supabase degraded (cooldown 25s): ${reason}`);
+  }
+}
+
+function isSupabaseDegraded() {
+  return Date.now() < supabaseDegradedUntil;
+}
+
+function localKvSetJson(key, value) {
+  try {
+    const db = getSharedCloudSyncDb();
+    db.query("INSERT OR REPLACE INTO app_kv (k, v, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)").run(
+      String(key),
+      JSON.stringify(value)
+    );
+  } catch {}
+}
+
+function parseSupabaseExactCount(contentRange) {
+  const raw = String(contentRange || "").trim();
+  const slashIdx = raw.lastIndexOf("/");
+  if (slashIdx < 0) return null;
+  const countStr = raw.slice(slashIdx + 1).trim();
+  if (!/^\d+$/.test(countStr)) return null;
+  return Number(countStr);
+}
+
 async function supabaseRest(restPath, options = {}) {
   const authHeaders = {
     apikey: SUPABASE_SERVICE_ROLE_KEY,
@@ -1475,31 +1521,178 @@ async function supabaseRest(restPath, options = {}) {
   if (SUPABASE_KEY_IS_JWT) {
     authHeaders.Authorization = `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`;
   }
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
-    ...options,
-    signal: options.signal || AbortSignal.timeout(8000),
-    headers: {
-      ...authHeaders,
-      ...(options.headers || {}),
-    },
-  });
-  const text = await res.text();
+  let res;
+  try {
+    res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
+      ...options,
+      signal: options.signal || AbortSignal.timeout(8000),
+      headers: {
+        ...authHeaders,
+        ...(options.headers || {}),
+      },
+    });
+  } catch (err) {
+    markSupabaseDegraded(err?.message || "network/timeout error");
+    throw err;
+  }
+  const contentRange = res.headers.get("content-range") || "";
+  const isHead = String(options.method || "GET").toUpperCase() === "HEAD";
+  const text = isHead ? "" : await res.text();
   let json = null;
   if (text) {
     try {
       json = JSON.parse(text);
     } catch {}
   }
-  return { ok: res.ok, status: res.status, json, text };
+  if (res.status >= 500 || res.status === 429) {
+    markSupabaseDegraded(`${restPath.split("?")[0]} HTTP ${res.status}`);
+  }
+  return { ok: res.ok, status: res.status, json, text, contentRange };
+}
+
+function getDeletedUsersSet() {
+  const arr = kvGetJson(DELETED_USERS_KV_KEY, []);
+  const set = new Set();
+  if (Array.isArray(arr)) {
+    for (const u of arr) {
+      const k = String(u || "").trim().toLowerCase();
+      if (k) set.add(k);
+    }
+  }
+  return set;
+}
+
+function recordDeletedUsername(username) {
+  const k = String(username || "").trim().toLowerCase();
+  if (!k) return;
+  const set = getDeletedUsersSet();
+  set.add(k);
+  kvSetJson(DELETED_USERS_KV_KEY, Array.from(set).slice(-500));
+  const cached = kvGetJson(USERS_DIR_KV_KEY, []);
+  if (Array.isArray(cached)) {
+    localKvSetJson(
+      USERS_DIR_KV_KEY,
+      cached.filter((r) => String(r?.username || "").trim().toLowerCase() !== k),
+    );
+  }
+}
+
+function unmarkDeletedUsername(username) {
+  const k = String(username || "").trim().toLowerCase();
+  if (!k) return;
+  const set = getDeletedUsersSet();
+  if (set.delete(k)) {
+    kvSetJson(DELETED_USERS_KV_KEY, Array.from(set));
+  }
+}
+
+function mirrorLocalUserRecord({ username, passwordHash = "", tokenVersion = 1 }) {
+  const clean = String(username || "").trim();
+  if (!clean || clean.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) return null;
+  const db = openCloudSyncDb(false);
+  try {
+    const existing = db
+      .query("SELECT id, username, password_hash, token_version FROM users WHERE LOWER(username) = LOWER(?)")
+      .get(clean);
+    if (existing) {
+      if (passwordHash && existing.password_hash !== passwordHash) {
+        db.query("UPDATE users SET username = ?, password_hash = ?, token_version = ? WHERE id = ?").run(
+          clean,
+          passwordHash,
+          Number(tokenVersion || existing.token_version || 1),
+          existing.id,
+        );
+      }
+      return Number(existing.id);
+    }
+    if (!passwordHash) return null;
+    const res = db
+      .query("INSERT INTO users (username, password_hash, token_version) VALUES (?, ?, ?)")
+      .run(clean, passwordHash, Number(tokenVersion || 1));
+    return Number(res.lastInsertRowid);
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+function saveRegisteredUsersDirCache(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  const deleted = getDeletedUsersSet();
+  const byKey = new Map();
+  const prev = kvGetJson(USERS_DIR_KV_KEY, []);
+  if (Array.isArray(prev)) {
+    for (const r of prev) {
+      const clean = String(r?.username || "").trim();
+      const k = clean.toLowerCase();
+      if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+      byKey.set(k, { id: Number(r.id) || 0, username: clean, created_at: r.created_at || null });
+    }
+  }
+  for (const r of rows) {
+    const clean = String(r?.username || "").trim();
+    const k = clean.toLowerCase();
+    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    byKey.set(k, {
+      id: Number(r.id) || byKey.get(k)?.id || 0,
+      username: clean,
+      created_at: r.created_at || byKey.get(k)?.created_at || null,
+    });
+  }
+  const merged = Array.from(byKey.values());
+  localKvSetJson(USERS_DIR_KV_KEY, merged);
+}
+
+function collectFallbackUserRows(primaryRows = []) {
+  ensureChatMetaLoaded();
+  const deleted = getDeletedUsersSet();
+  const byKey = new Map();
+  const addRow = (id, username, createdAt = null) => {
+    const clean = String(username || "").trim();
+    const k = clean.toLowerCase();
+    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) {
+      return;
+    }
+    if (!byKey.has(k)) {
+      byKey.set(k, { id: Number(id) || 0, username: clean, created_at: createdAt || null });
+    }
+  };
+
+  for (const r of primaryRows || []) {
+    addRow(r?.id, r?.username, r?.created_at);
+  }
+  try {
+    const db = openCloudSyncDb(true);
+    const localRows = db.query("SELECT id, username, created_at FROM users ORDER BY id ASC").all();
+    for (const r of localRows || []) addRow(r?.id, r?.username, r?.created_at);
+  } catch {}
+  const cachedDir = kvGetJson(USERS_DIR_KV_KEY, []);
+  if (Array.isArray(cachedDir)) {
+    for (const r of cachedDir) addRow(r?.id, r?.username, r?.created_at);
+  }
+  for (const k of userProfiles.keys()) addRow(0, k);
+  for (const k of OWNER_USERNAMES) addRow(0, k);
+  for (const k of staffModerators) addRow(0, k);
+  for (const k of goatUsers) addRow(0, k);
+  for (const msg of chatHistory || []) {
+    if (msg?.author) addRow(0, msg.author, msg.timestamp || null);
+  }
+  return Array.from(byKey.values());
 }
 
 async function dbFindUserById(userId) {
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const { ok, status, json, text } = await supabaseRest(
-      `cloudsync_users?id=eq.${Number(userId)}&select=id,username,token_version&limit=1`
-    );
-    if (!ok) throw new Error(`Supabase select user failed (${status}): ${text}`);
-    return Array.isArray(json) && json[0] ? json[0] : null;
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const { ok, status, json, text } = await supabaseRest(
+        `cloudsync_users?id=eq.${Number(userId)}&select=id,username,token_version&limit=1`
+      );
+      if (!ok) throw new Error(`Supabase select user failed (${status}): ${text}`);
+      const row = Array.isArray(json) && json[0] ? json[0] : null;
+      if (row) return row;
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
   }
   const db = openCloudSyncDb(true);
   try {
@@ -1516,12 +1709,24 @@ async function dbFindUserById(userId) {
 async function dbFindUserByUsername(username) {
   const clean = String(username || "").trim();
   const lower = clean.toLowerCase();
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const { ok, status, json, text } = await supabaseRest(
-      `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id,username,password_hash,token_version&limit=1`
-    );
-    if (!ok) throw new Error(`Supabase select username failed (${status}): ${text}`);
-    return Array.isArray(json) && json[0] ? json[0] : null;
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const { ok, status, json, text } = await supabaseRest(
+        `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id,username,password_hash,token_version&limit=1`
+      );
+      if (!ok) throw new Error(`Supabase select username failed (${status}): ${text}`);
+      const row = Array.isArray(json) && json[0] ? json[0] : null;
+      if (row) {
+        mirrorLocalUserRecord({
+          username: row.username,
+          passwordHash: row.password_hash,
+          tokenVersion: row.token_version,
+        });
+        return row;
+      }
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
   }
   const db = openCloudSyncDb(true);
   try {
@@ -1538,29 +1743,35 @@ async function dbFindUserByUsername(username) {
 }
 
 async function dbCreateUser(username, passwordHash) {
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const existing = await dbFindUserByUsername(username);
-    if (existing) return { conflict: true };
-    const { ok, status, json, text } = await supabaseRest("cloudsync_users", {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        username,
-        username_lower: username.toLowerCase(),
-        password_hash: passwordHash,
-        token_version: 1,
-      }),
-    });
-    if (status === 409 || json?.code === "23505") {
-      return { conflict: true };
+  unmarkDeletedUsername(username);
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const existing = await dbFindUserByUsername(username);
+      if (existing) return { conflict: true };
+      const { ok, status, json, text } = await supabaseRest("cloudsync_users", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          username,
+          username_lower: username.toLowerCase(),
+          password_hash: passwordHash,
+          token_version: 1,
+        }),
+      });
+      if (status === 409 || json?.code === "23505") {
+        return { conflict: true };
+      }
+      if (!ok) throw new Error(`Supabase create user failed (${status}): ${text}`);
+      const created = Array.isArray(json) ? json[0] : json;
+      mirrorLocalUserRecord({ username: created.username, passwordHash, tokenVersion: 1 });
+      return {
+        conflict: false,
+        id: Number(created.id),
+        username: String(created.username),
+      };
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
     }
-    if (!ok) throw new Error(`Supabase create user failed (${status}): ${text}`);
-    const created = Array.isArray(json) ? json[0] : json;
-    return {
-      conflict: false,
-      id: Number(created.id),
-      username: String(created.username),
-    };
   }
   const db = openCloudSyncDb(false);
   try {
@@ -1581,18 +1792,30 @@ async function dbCreateUser(username, passwordHash) {
   }
 }
 
-async function dbDeleteUser(userId) {
+async function dbDeleteUser(userId, username = "") {
+  if (username) recordDeletedUsername(username);
   if (USE_SUPABASE_CLOUDSYNC) {
-    await supabaseRest(`cloudsync_sync?user_id=eq.${Number(userId)}`, { method: "DELETE" });
-    const { ok, status, text } = await supabaseRest(
-      `cloudsync_users?id=eq.${Number(userId)}`,
-      { method: "DELETE" }
-    );
-    if (!ok) throw new Error(`Supabase delete user failed (${status}): ${text}`);
-    return;
+    try {
+      await supabaseRest(`cloudsync_sync?user_id=eq.${Number(userId)}`, { method: "DELETE" });
+      const { ok, status, text } = await supabaseRest(
+        `cloudsync_users?id=eq.${Number(userId)}`,
+        { method: "DELETE" }
+      );
+      if (!ok) throw new Error(`Supabase delete user failed (${status}): ${text}`);
+    } catch (err) {
+      console.warn("[cloudsync] Supabase dbDeleteUser warning:", err?.message);
+    }
   }
   const db = openCloudSyncDb(false);
   try {
+    if (username) {
+      const localRow = db.query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
+      if (localRow?.id) {
+        db.query("DELETE FROM sync_json WHERE user_id = ?").run(localRow.id);
+        db.query("DELETE FROM sync_data WHERE user_id = ?").run(localRow.id);
+        db.query("DELETE FROM users WHERE id = ?").run(localRow.id);
+      }
+    }
     db.query("DELETE FROM sync_json WHERE user_id = ?").run(userId);
     db.query("DELETE FROM sync_data WHERE user_id = ?").run(userId);
     db.query("DELETE FROM users WHERE id = ?").run(userId);
@@ -1601,93 +1824,156 @@ async function dbDeleteUser(userId) {
   }
 }
 
-async function dbGetSyncMetaUpdatedAt(userId) {
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const { ok, status, json, text } = await supabaseRest(
-      `cloudsync_sync?user_id=eq.${Number(userId)}&select=updated_at&limit=1`
-    );
-    if (!ok) throw new Error(`Supabase meta failed (${status}): ${text}`);
-    const row = Array.isArray(json) && json[0] ? json[0] : null;
-    return row?.updated_at ? String(row.updated_at) : "";
+async function dbGetSyncMetaUpdatedAt(userId, username = "") {
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const { ok, status, json, text } = await supabaseRest(
+        `cloudsync_sync?user_id=eq.${Number(userId)}&select=updated_at&limit=1`
+      );
+      if (!ok) throw new Error(`Supabase meta failed (${status}): ${text}`);
+      const row = Array.isArray(json) && json[0] ? json[0] : null;
+      if (row?.updated_at) return String(row.updated_at);
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
   }
   const db = openCloudSyncDb(true);
   try {
+    let targetId = userId;
+    if (username) {
+      const localRow = db.query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
+      if (localRow?.id) targetId = Number(localRow.id);
+    }
     const row =
-      db.query("SELECT updated_at FROM sync_json WHERE user_id = ?").get(userId) ||
-      db.query("SELECT updated_at FROM sync_data WHERE user_id = ?").get(userId);
+      db.query("SELECT updated_at FROM sync_json WHERE user_id = ?").get(targetId) ||
+      db.query("SELECT updated_at FROM sync_data WHERE user_id = ?").get(targetId);
     return row?.updated_at ? String(row.updated_at) : "";
   } finally {
     db.close();
   }
 }
 
-async function dbGetSyncPayload(userId) {
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const { ok, status, json, text } = await supabaseRest(
-      `cloudsync_sync?user_id=eq.${Number(userId)}&select=payload_json,updated_at&limit=1`
-    );
-    if (!ok) throw new Error(`Supabase download failed (${status}): ${text}`);
-    return Array.isArray(json) && json[0] ? json[0] : null;
+async function dbGetSyncPayload(userId, username = "") {
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const { ok, status, json, text } = await supabaseRest(
+        `cloudsync_sync?user_id=eq.${Number(userId)}&select=payload_json,updated_at&limit=1`
+      );
+      if (!ok) throw new Error(`Supabase download failed (${status}): ${text}`);
+      const remoteRow = Array.isArray(json) && json[0] ? json[0] : null;
+      if (remoteRow) return remoteRow;
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
   }
   const db = openCloudSyncDb(true);
   try {
+    let targetId = userId;
+    if (username) {
+      const localRow = db.query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
+      if (localRow?.id) targetId = Number(localRow.id);
+    }
     return (
       db
         .query("SELECT payload_json, updated_at FROM sync_json WHERE user_id = ?")
-        .get(userId) || null
+        .get(targetId) || null
     );
   } finally {
     db.close();
   }
 }
 
-async function dbUpsertSyncPayload(userId, payloadJson, updatedAt) {
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const { ok, status, text } = await supabaseRest("cloudsync_sync?on_conflict=user_id", {
-      method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify({
-        user_id: Number(userId),
-        payload_json: payloadJson,
-        updated_at: updatedAt,
-      }),
-    });
-    if (!ok) throw new Error(`Supabase upload failed (${status}): ${text}`);
-    return;
+async function dbUpsertSyncPayload(userId, payloadJson, updatedAt, username = "") {
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const { ok, status, text } = await supabaseRest("cloudsync_sync?on_conflict=user_id", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          user_id: Number(userId),
+          payload_json: payloadJson,
+          updated_at: updatedAt,
+        }),
+      });
+      if (!ok) throw new Error(`Supabase upload failed (${status}): ${text}`);
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
   }
   const db = openCloudSyncDb(false);
   try {
-    db.query(
-      "INSERT OR REPLACE INTO sync_json (user_id, payload_json, updated_at) VALUES (?, ?, ?)"
-    ).run(userId, payloadJson, updatedAt);
+    let targetId = userId;
+    if (username) {
+      const localRow = db.query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
+      if (localRow?.id) targetId = Number(localRow.id);
+    }
+    const localExists = db.query("SELECT id FROM users WHERE id = ?").get(targetId);
+    if (localExists) {
+      db.query(
+        "INSERT OR REPLACE INTO sync_json (user_id, payload_json, updated_at) VALUES (?, ?, ?)"
+      ).run(targetId, payloadJson, updatedAt);
+    }
   } finally {
     db.close();
   }
 }
 
-async function dbListUsers() {
-  if (USE_SUPABASE_CLOUDSYNC) {
-    const allRows = [];
-    const pageSize = 1000;
-    for (let offset = 0; offset < 50000; offset += pageSize) {
+function getFallbackUsersCount(fallbackRows = null) {
+  const savedKv = kvGetJson(USERS_COUNT_KV_KEY, null);
+  const kvCount = Number(savedKv?.count || 0);
+  const rowsCount = Array.isArray(fallbackRows) ? fallbackRows.length : collectFallbackUserRows([]).length;
+  return Math.max(0, kvCount, rowsCount);
+}
+
+// Exact head-only Postgres count query (zero row payload, bypasses PostgREST 1,000-row cap)
+async function dbCountUsers() {
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const { ok, status, contentRange, text } = await supabaseRest(
+        "cloudsync_users?select=*",
+        {
+          method: "HEAD",
+          headers: { Prefer: "count=exact" },
+        }
+      );
+      if (!ok) throw new Error(`Supabase exact count failed (${status}): ${text}`);
+      const parsed = parseSupabaseExactCount(contentRange);
+      if (parsed === null) {
+        throw new Error(`Supabase exact count missing Content-Range: ${contentRange}`);
+      }
+      const sysAdjustment = supabaseHasAppKvTable === false && supabaseKvSysUserId ? 1 : 0;
+      const exactCount = Math.max(0, parsed - sysAdjustment);
+      localKvSetJson(USERS_COUNT_KV_KEY, { count: exactCount, updatedAt: Date.now() });
+      return exactCount;
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
+  }
+  return getFallbackUsersCount();
+}
+
+// Paginated user directory fetch strictly capped at 50 rows per query (never scans full table)
+async function dbListUsers({ limit = USERS_DIR_PAGE_SIZE, offset = 0 } = {}) {
+  const safeLimit = Math.min(Math.max(1, Number(limit) || USERS_DIR_PAGE_SIZE), USERS_DIR_PAGE_SIZE);
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
       const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?select=id,username,created_at&order=id.asc&limit=${pageSize}&offset=${offset}`
+        `cloudsync_users?select=id,username,created_at&order=id.desc&limit=${safeLimit}&offset=${safeOffset}`
       );
       if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
       const batch = Array.isArray(json) ? json : [];
-      allRows.push(...batch);
-      if (batch.length < pageSize) break;
+      saveRegisteredUsersDirCache(batch);
+      return safeOffset === 0 ? collectFallbackUserRows(batch) : batch;
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
     }
-    return allRows;
   }
-  const db = openCloudSyncDb(true);
-  try {
-    return db
-      .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
-      .all();
-  } finally {
-    db.close();
+  if (safeOffset > 0) {
+    const fallbackAll = collectFallbackUserRows([]);
+    return fallbackAll.slice(safeOffset, safeOffset + safeLimit);
   }
+  return collectFallbackUserRows([]);
 }
 
 function base64UrlEncode(input) {
@@ -1760,7 +2046,7 @@ function clearCloudSyncAuthCookie(res) {
   );
 }
 
-async function getAuthenticatedCloudSyncUser(req) {
+async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false } = {}) {
   const cookieToken = req.cookies?.token;
   const headerToken = req.headers["x-cloudsync-token"] ||
     (req.headers.authorization?.startsWith("Bearer ")
@@ -1772,18 +2058,30 @@ async function getAuthenticatedCloudSyncUser(req) {
     (headerClaims && !String(headerClaims.typ || "").startsWith("oxium_") ? headerClaims : null) ||
     (cookieClaims && !String(cookieClaims.typ || "").startsWith("oxium_") ? cookieClaims : null);
   if (!claims || !claims.id || !claims.username) return null;
+  const claimsUsername = String(claims.username).trim();
+  const claimsLower = claimsUsername.toLowerCase();
+  if (!claimsUsername || claimsLower === RESERVED_SYSTEM_KV_USERNAME) return null;
+  if (getDeletedUsersSet().has(claimsLower)) return null;
 
   try {
-    const row = await dbFindUserById(claims.id);
-    if (!row) return null;
-    if (String(row.username).toLowerCase() !== String(claims.username).toLowerCase()) {
+    let row = await dbFindUserById(claims.id);
+    if ((!row || String(row.username).toLowerCase() !== claimsLower) && claimsUsername) {
+      row = await dbFindUserByUsername(claimsUsername);
+    }
+    if (!row) {
+      if (USE_SUPABASE_CLOUDSYNC && (allowUnmirroredJwt || Date.now() < supabaseDegradedUntil)) {
+        return { id: Number(claims.id), username: claimsUsername };
+      }
+      return null;
+    }
+    if (String(row.username).toLowerCase() !== claimsLower) {
       return null;
     }
     if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
     return { id: Number(row.id), username: String(row.username) };
   } catch {
     // Transient Supabase / DB connectivity blip should not silently strip verified moderator auth
-    return { id: Number(claims.id), username: String(claims.username) };
+    return { id: Number(claims.id), username: claimsUsername };
   }
 }
 
@@ -1835,8 +2133,7 @@ app.post("/api/auth/register", async (req, res) => {
     const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
     const token = signCloudSyncJwt({ id: userId, username, v: 1, exp });
     setCloudSyncAuthCookie(res, token, req);
-    invalidateCloudSyncUsersCache();
-    await getCloudSyncUsersMapAsync(true).catch(() => {});
+    upsertUserInCaches({ id: userId, username, created_at: new Date().toISOString() }, 1);
     touchKnownUser(username);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
@@ -1887,7 +2184,7 @@ app.post("/api/auth/login", async (req, res) => {
       exp,
     });
     setCloudSyncAuthCookie(res, token, req);
-    await getCloudSyncUsersMapAsync().catch(() => {});
+    upsertUserInCaches({ id: userId, username: canonicalUsername });
     touchKnownUser(canonicalUsername);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
@@ -1928,10 +2225,11 @@ app.delete("/api/auth/me", async (req, res) => {
       .json({ success: false, user: null, error: "unauthorized" });
   }
   try {
-    await dbDeleteUser(user.id);
+    await dbDeleteUser(user.id, user.username);
     knownUsers.delete(user.username.toLowerCase());
-    invalidateCloudSyncUsersCache();
-    await getCloudSyncUsersMapAsync(true).catch(() => {});
+    userProfiles.delete(user.username.toLowerCase());
+    persistUserProfiles();
+    removeUserFromCaches(user.username);
     clearCloudSyncAuthCookie(res);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     return res.json({ success: true, user: null, error: "account deleted!" });
@@ -1950,7 +2248,7 @@ app.get("/api/sync/meta", async (req, res) => {
       .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
   }
   try {
-    const updatedAt = await dbGetSyncMetaUpdatedAt(user.id);
+    const updatedAt = await dbGetSyncMetaUpdatedAt(user.id, user.username);
     return res.json({
       success: true,
       data: null,
@@ -1974,7 +2272,7 @@ app.post("/api/sync/upload", async (req, res) => {
     const updatedAt = new Date().toISOString();
     let finalPayload = payload;
     if (payload._delta) {
-      const existingRow = await dbGetSyncPayload(user.id);
+      const existingRow = await dbGetSyncPayload(user.id, user.username);
       let baseObj = { localStorage: {}, indexedDB: {} };
       if (existingRow?.payload_json) {
         try {
@@ -1994,7 +2292,7 @@ app.post("/api/sync/upload", async (req, res) => {
       finalPayload = baseObj;
     }
 
-    await dbUpsertSyncPayload(user.id, JSON.stringify(finalPayload), updatedAt);
+    await dbUpsertSyncPayload(user.id, JSON.stringify(finalPayload), updatedAt, user.username);
     return res.json({
       success: true,
       data: null,
@@ -2016,7 +2314,7 @@ app.get("/api/sync/download", async (req, res) => {
       .json({ success: false, data: null, updated_at: null, error: "unauthorized" });
   }
   try {
-    const row = await dbGetSyncPayload(user.id);
+    const row = await dbGetSyncPayload(user.id, user.username);
     if (!row || !row.payload_json) {
       return res.json({
         success: true,
@@ -2049,12 +2347,18 @@ function isTemporaryGuestName(name) {
 }
 
 let cloudSyncUsersCache = { map: null, expiresAt: 0 };
+let cloudSyncCountCache = { count: null, expiresAt: 0, refreshPromise: null };
+let usersPageCache = new Map(); // cacheKey -> { data, expiresAt }
+const usersPageInFlight = new Map(); // cacheKey -> Promise
+const missingUserLookupCache = new Map(); // usernameLower -> expiresAt
+const singleUserLookupInFlight = new Map(); // usernameLower -> Promise
 let cloudSyncUsersLoaded = !USE_SUPABASE_CLOUDSYNC;
 let cloudSyncUsersRefreshPromise = null;
-let lastForcedUserRefreshAt = 0;
 function invalidateCloudSyncUsersCache() {
   // Keep previous map as fallback while marking expired so synchronous callers never flash empty user lists
   cloudSyncUsersCache.expiresAt = 0;
+  cloudSyncCountCache.expiresAt = 0;
+  usersPageCache.clear();
 }
 
 function buildCloudSyncUsersMap(rows) {
@@ -2073,26 +2377,132 @@ function buildCloudSyncUsersMap(rows) {
   return map;
 }
 
+function upsertUserInCaches(row, countDelta = 0) {
+  const clean = String(row?.username || "").trim();
+  const key = clean.toLowerCase();
+  if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean)) return;
+  missingUserLookupCache.delete(key);
+  saveRegisteredUsersDirCache([{ id: Number(row.id) || 0, username: clean, created_at: row.created_at || null }]);
+  const map = cloudSyncUsersCache.map || buildCloudSyncUsersMap(collectFallbackUserRows([]));
+  const isNew = !map.has(key);
+  map.set(key, {
+    id: Number(row.id) || map.get(key)?.id || 0,
+    username: clean,
+    createdAt: row.created_at || map.get(key)?.createdAt || null,
+  });
+  cloudSyncUsersCache.map = map;
+  if (!cloudSyncUsersCache.expiresAt) {
+    cloudSyncUsersCache.expiresAt = Date.now() + USERS_CACHE_TTL_MS;
+  }
+  cloudSyncUsersLoaded = true;
+  if (countDelta > 0 && isNew) {
+    const base = cloudSyncCountCache.count ?? map.size - 1;
+    cloudSyncCountCache.count = Math.max(map.size, base + countDelta);
+    localKvSetJson(USERS_COUNT_KV_KEY, { count: cloudSyncCountCache.count, updatedAt: Date.now() });
+    usersPageCache.clear();
+  }
+}
+
+function removeUserFromCaches(username) {
+  const key = String(username || "").trim().toLowerCase();
+  if (!key) return;
+  if (cloudSyncUsersCache.map) {
+    cloudSyncUsersCache.map.delete(key);
+  }
+  const base = cloudSyncCountCache.count ?? (cloudSyncUsersCache.map ? cloudSyncUsersCache.map.size + 1 : 0);
+  if (base > 0) {
+    cloudSyncCountCache.count = Math.max(0, base - 1);
+    localKvSetJson(USERS_COUNT_KV_KEY, { count: cloudSyncCountCache.count, updatedAt: Date.now() });
+  }
+  usersPageCache.clear();
+}
+
+function getCloudSyncUsersCountSync(csMap = null) {
+  const mapSize = csMap ? csMap.size : cloudSyncUsersCache.map?.size || 0;
+  const cached = Number(cloudSyncCountCache.count);
+  if (Number.isFinite(cached) && cached >= 0) {
+    return Math.max(cached, mapSize);
+  }
+  return Math.max(getFallbackUsersCount(), mapSize);
+}
+
+async function getCloudSyncUsersCountAsync(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cloudSyncCountCache.count !== null && now < cloudSyncCountCache.expiresAt) {
+    return cloudSyncCountCache.count;
+  }
+  if (cloudSyncCountCache.refreshPromise) {
+    return cloudSyncCountCache.refreshPromise;
+  }
+  if (USE_SUPABASE_CLOUDSYNC && isSupabaseDegraded()) {
+    const fallback = cloudSyncCountCache.count !== null ? cloudSyncCountCache.count : getFallbackUsersCount();
+    cloudSyncCountCache.count = fallback;
+    cloudSyncCountCache.expiresAt = Math.max(cloudSyncCountCache.expiresAt, supabaseDegradedUntil);
+    return fallback;
+  }
+  const promise = (async () => {
+    try {
+      const count = await dbCountUsers();
+      cloudSyncCountCache.count = count;
+      cloudSyncCountCache.expiresAt = Date.now() + (isSupabaseDegraded() ? SUPABASE_DEGRADED_COOLDOWN_MS : USERS_CACHE_TTL_MS);
+      return count;
+    } catch (err) {
+      markSupabaseDegraded(err?.message || "user count failed");
+      const fallback = cloudSyncCountCache.count !== null ? cloudSyncCountCache.count : getFallbackUsersCount();
+      cloudSyncCountCache.count = fallback;
+      cloudSyncCountCache.expiresAt = Date.now() + SUPABASE_DEGRADED_COOLDOWN_MS;
+      return fallback;
+    } finally {
+      if (cloudSyncCountCache.refreshPromise === promise) {
+        cloudSyncCountCache.refreshPromise = null;
+      }
+    }
+  })();
+  cloudSyncCountCache.refreshPromise = promise;
+  return promise;
+}
+
 async function getCloudSyncUsersMapAsync(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
     return cloudSyncUsersCache.map;
   }
-  if (cloudSyncUsersRefreshPromise && !forceRefresh) {
+  // Unconditionally deduplicate concurrent refreshes (even if forceRefresh is true)
+  if (cloudSyncUsersRefreshPromise) {
     return cloudSyncUsersRefreshPromise;
+  }
+  if (USE_SUPABASE_CLOUDSYNC && isSupabaseDegraded()) {
+    const map = cloudSyncUsersCache.map || buildCloudSyncUsersMap(collectFallbackUserRows([]));
+    cloudSyncUsersCache = { map, expiresAt: Math.max(cloudSyncUsersCache.expiresAt, supabaseDegradedUntil) };
+    cloudSyncUsersLoaded = true;
+    return map;
   }
   const promise = (async () => {
     try {
-      const rows = await dbListUsers();
+      const [rows] = await Promise.all([
+        dbListUsers({ limit: USERS_DIR_PAGE_SIZE, offset: 0 }),
+        getCloudSyncUsersCountAsync(forceRefresh),
+      ]);
       const map = buildCloudSyncUsersMap(rows);
-      cloudSyncUsersCache = { map, expiresAt: Date.now() + 45000 };
+      // Keep any live point-looked-up users accumulated in the current in-memory map
+      if (cloudSyncUsersCache.map) {
+        const deleted = getDeletedUsersSet();
+        for (const [k, rec] of cloudSyncUsersCache.map.entries()) {
+          if (!map.has(k) && !deleted.has(k)) map.set(k, rec);
+        }
+      }
+      cloudSyncUsersCache = {
+        map,
+        expiresAt: Date.now() + (isSupabaseDegraded() ? SUPABASE_DEGRADED_COOLDOWN_MS : USERS_CACHE_TTL_MS),
+      };
       cloudSyncUsersLoaded = true;
       return map;
     } catch (err) {
-      if (USE_SUPABASE_CLOUDSYNC) {
-        console.warn("[cloudsync] Supabase user list warning:", err.message);
-      }
-      return cloudSyncUsersCache.map || new Map();
+      markSupabaseDegraded(err?.message || "user list failed");
+      const fallback = cloudSyncUsersCache.map || buildCloudSyncUsersMap(collectFallbackUserRows([]));
+      cloudSyncUsersCache = { map: fallback, expiresAt: Date.now() + SUPABASE_DEGRADED_COOLDOWN_MS };
+      cloudSyncUsersLoaded = true;
+      return fallback;
     } finally {
       if (cloudSyncUsersRefreshPromise === promise) {
         cloudSyncUsersRefreshPromise = null;
@@ -2108,28 +2518,65 @@ function getCloudSyncUsersMap(forceRefresh = false) {
   if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
     return cloudSyncUsersCache.map;
   }
-  if (USE_SUPABASE_CLOUDSYNC) {
-    void getCloudSyncUsersMapAsync(forceRefresh);
-    return cloudSyncUsersCache.map || new Map();
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    void getCloudSyncUsersMapAsync(false);
+    if (cloudSyncUsersCache.map) return cloudSyncUsersCache.map;
   }
-  const map = new Map();
   try {
-    const db = openCloudSyncDb(true);
-    try {
-      const rows = db
-        .query("SELECT id, username, created_at FROM users ORDER BY id ASC")
-        .all();
-      const built = buildCloudSyncUsersMap(rows);
-      cloudSyncUsersCache = { map: built, expiresAt: now + 45000 };
+    const built = buildCloudSyncUsersMap(collectFallbackUserRows([]));
+    if (built.size > 0 || !USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) {
+      cloudSyncUsersCache = {
+        map: built,
+        expiresAt: now + (isSupabaseDegraded() ? SUPABASE_DEGRADED_COOLDOWN_MS : USERS_CACHE_TTL_MS),
+      };
       cloudSyncUsersLoaded = true;
       return built;
-    } finally {
-      db.close();
     }
   } catch {
     // ignore if DB not initialized yet
   }
-  return cloudSyncUsersCache.map || map;
+  return cloudSyncUsersCache.map || new Map();
+}
+
+// Single-row indexed lookup for an uncached @username (replaces full-table rescans!)
+async function ensureCloudSyncUserInMap(username) {
+  const csMap = await getCloudSyncUsersMapAsync().catch(() => getCloudSyncUsersMap());
+  const clean = String(username || "").trim();
+  const key = clean.toLowerCase();
+  if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key)) {
+    return { csMap, user: null };
+  }
+  if (csMap.has(key)) {
+    return { csMap, user: csMap.get(key) };
+  }
+  const now = Date.now();
+  if (now < (missingUserLookupCache.get(key) || 0) || (USE_SUPABASE_CLOUDSYNC && isSupabaseDegraded())) {
+    return { csMap, user: null };
+  }
+  if (singleUserLookupInFlight.has(key)) {
+    await singleUserLookupInFlight.get(key);
+    const updatedMap = getCloudSyncUsersMap();
+    return { csMap: updatedMap, user: updatedMap.get(key) || null };
+  }
+  const lookupPromise = (async () => {
+    try {
+      const row = await dbFindUserByUsername(clean);
+      if (row && row.username) {
+        upsertUserInCaches({ id: row.id, username: row.username });
+        return row;
+      }
+      missingUserLookupCache.set(key, Date.now() + 30_000);
+      return null;
+    } catch {
+      return null;
+    } finally {
+      singleUserLookupInFlight.delete(key);
+    }
+  })();
+  singleUserLookupInFlight.set(key, lookupPromise);
+  await lookupPromise;
+  const latestMap = getCloudSyncUsersMap();
+  return { csMap: latestMap, user: latestMap.get(key) || null };
 }
 
 async function getCloudSyncUserAsync(username) {
@@ -2205,20 +2652,19 @@ function getPresenceSnapshot() {
   }
 
   const onlineByUsername = new Map();
+  const deletedSet = getDeletedUsersSet();
   const considerOnlineSession = (c, maxAgeMs) => {
     if (!c || now - (c.lastSeen || 0) > maxAgeMs) return;
     const clean = String(c.username || "").trim();
     if (!clean) return;
     const key = clean.toLowerCase();
+    if (deletedSet.has(key)) return;
     const hasVerifiedSession = Boolean(c.verifiedUsername && c.verifiedUsername === key);
     if (isTemporaryGuestName(clean) && !csMap.has(key) && !hasVerifiedSession) return;
     if (usersLoaded && csMap.size > 0 && !csMap.has(key)) {
-      if (!hasVerifiedSession) {
+      const allowDegraded = isSupabaseDegraded() && !isTemporaryGuestName(clean);
+      if (!hasVerifiedSession && !allowDegraded) {
         return;
-      }
-      if (now - lastForcedUserRefreshAt > 10000) {
-        lastForcedUserRefreshAt = now;
-        void getCloudSyncUsersMapAsync(true).catch(() => {});
       }
     }
 
@@ -2296,6 +2742,7 @@ function getPresenceSnapshot() {
   return {
     snapshotAt: now,
     usersLoaded,
+    totalUsersCount: getCloudSyncUsersCountSync(csMap),
     onlineUsers,
     offlineUsers,
     registeredUsers,
@@ -2420,7 +2867,7 @@ app.post("/api/admin/verify", (req, res) => {
 
 app.get("/api/live/stream", async (req, res) => {
   const [authUser] = await Promise.all([
-    getAuthenticatedCloudSyncUser(req),
+    getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt: USE_SUPABASE_CLOUDSYNC }),
     getCloudSyncUsersMapAsync().catch(() => null),
   ]);
   if (req.destroyed || req.socket?.destroyed) return;
@@ -2433,6 +2880,9 @@ app.get("/api/live/stream", async (req, res) => {
     res.flushHeaders();
   }
 
+  if (authUser) {
+    upsertUserInCaches({ id: authUser.id, username: authUser.username });
+  }
   const clientId = (req.query.id || Math.random().toString(36).substring(2, 10)).toString();
   const instanceId = String(req.query.instance || "").trim().slice(0, 64);
   const username = authUser
@@ -2499,7 +2949,7 @@ app.get("/api/live/stream", async (req, res) => {
 
 app.post("/api/live/heartbeat", async (req, res) => {
   const [authUser] = await Promise.all([
-    getAuthenticatedCloudSyncUser(req).catch(() => null),
+    getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt: USE_SUPABASE_CLOUDSYNC }).catch(() => null),
     USE_SUPABASE_CLOUDSYNC && !cloudSyncUsersLoaded
       ? getCloudSyncUsersMapAsync().catch(() => null)
       : Promise.resolve(null),
@@ -2510,6 +2960,9 @@ app.post("/api/live/heartbeat", async (req, res) => {
   const rawUser = String(username || "").trim();
   const effectiveUser = authUser ? authUser.username : rawUser;
   const verifiedLower = authUser ? authUser.username.toLowerCase() : null;
+  if (authUser) {
+    upsertUserInCaches({ id: authUser.id, username: authUser.username });
+  }
   let changed = false;
 
   if (clientId && liveClients.has(clientId)) {
@@ -3746,6 +4199,7 @@ app.get("/api/chat/state", async (req, res) => {
     hasMoreMessages: visibleMessages.length > 200,
     presenceAt: presence.snapshotAt,
     usersLoaded: presence.usersLoaded,
+    totalUsersCount: presence.totalUsersCount,
     groups: userGroups,
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
@@ -3759,6 +4213,73 @@ app.get("/api/chat/state", async (req, res) => {
   });
 });
 
+// Lightweight exact user count endpoint (HEAD count=exact, 60s server cache, 25s degraded fallback)
+app.get("/api/users/count", async (_req, res) => {
+  const count = await getCloudSyncUsersCountAsync().catch(() => getCloudSyncUsersCountSync());
+  res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=45");
+  res.json({
+    success: true,
+    count,
+    cachedUntil: cloudSyncCountCache.expiresAt || Date.now() + USERS_CACHE_TTL_MS,
+  });
+});
+
+// Paginated user directory endpoint (strict max limit=50, 60s per-page cache)
+app.get(["/api/users", "/api/cloudsync/users"], async (req, res) => {
+  const limit = Math.min(Math.max(1, Number(req.query.limit) || USERS_DIR_PAGE_SIZE), USERS_DIR_PAGE_SIZE);
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const offset =
+    req.query.offset !== undefined
+      ? Math.max(0, Number(req.query.offset) || 0)
+      : (page - 1) * limit;
+  const cacheKey = `${limit}:${offset}`;
+  const now = Date.now();
+  const cachedPage = usersPageCache.get(cacheKey);
+  if (cachedPage && now < cachedPage.expiresAt) {
+    res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=45");
+    return res.json(cachedPage.data);
+  }
+  let pagePromise = usersPageInFlight.get(cacheKey);
+  if (!pagePromise) {
+    pagePromise = (async () => {
+      try {
+        const [totalCount, rows] = await Promise.all([
+          getCloudSyncUsersCountAsync().catch(() => getCloudSyncUsersCountSync()),
+          isSupabaseDegraded() && cachedPage
+            ? Promise.resolve(cachedPage.data.users)
+            : dbListUsers({ limit, offset }).catch(() => cachedPage?.data?.users || []),
+        ]);
+        const users = (rows || []).map((r) => ({
+          id: Number(r.id) || 0,
+          username: String(r.username || "").trim(),
+          createdAt: r.created_at || r.createdAt || null,
+        })).filter((u) => u.username && u.username.toLowerCase() !== RESERVED_SYSTEM_KV_USERNAME);
+        const payload = {
+          success: true,
+          users,
+          totalCount,
+          page,
+          limit,
+          offset,
+          hasMore: offset + users.length < totalCount,
+        };
+        if (usersPageCache.size > 100) usersPageCache.clear();
+        usersPageCache.set(cacheKey, {
+          data: payload,
+          expiresAt: Date.now() + (isSupabaseDegraded() ? SUPABASE_DEGRADED_COOLDOWN_MS : USERS_CACHE_TTL_MS),
+        });
+        return payload;
+      } finally {
+        usersPageInFlight.delete(cacheKey);
+      }
+    })();
+    usersPageInFlight.set(cacheKey, pagePromise);
+  }
+  const payload = await pagePromise;
+  res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=45");
+  return res.json(payload);
+});
+
 app.get("/api/chat/user-profile", async (req, res) => {
   await ensureChatMetaReadyAsync();
   const rawTarget = (req.query.username || req.query.user || "").toString().trim();
@@ -3766,13 +4287,8 @@ app.get("/api/chat/user-profile", async (req, res) => {
     return res.status(400).json({ success: false, exists: false, error: "username is required" });
   }
 
-  let csMap = await getCloudSyncUsersMapAsync();
   const key = rawTarget.toLowerCase();
-  let csUser = csMap.get(key) || null;
-  if (!csUser) {
-    csMap = await getCloudSyncUsersMapAsync(true);
-    csUser = csMap.get(key) || null;
-  }
+  const { csMap, user: csUser } = await ensureCloudSyncUserInMap(rawTarget);
 
   // Cross-check against CloudSync database
   if (csMap.size > 0 && !csUser) {
@@ -3875,10 +4391,7 @@ app.post("/api/chat/user-profile", async (req, res) => {
     if (authUser.username.toLowerCase() !== key) {
       return res.status(403).json({ success: false, error: "You can only edit your own profile" });
     }
-    let csMap = await getCloudSyncUsersMapAsync();
-    if (!csMap.has(key)) {
-      csMap = await getCloudSyncUsersMapAsync(true);
-    }
+    const { csMap } = await ensureCloudSyncUserInMap(cleanUser);
     if (csMap.size > 0 && !csMap.has(key)) {
       return res.status(404).json({ success: false, error: "User not found in CloudSync" });
     }
@@ -4076,12 +4589,18 @@ app.post("/api/chat/send", async (req, res) => {
       if (!parts.includes(authUser.username.toLowerCase())) {
         return res.status(403).json({ success: false, error: "Cannot send DM into another user's channel" });
       }
-      let csMap = await getCloudSyncUsersMapAsync();
-      if (csMap.size > 0) {
+      const initialMap = await getCloudSyncUsersMapAsync();
+      if (initialMap.size > 0) {
         for (const cleanPart of parts) {
-          if (!cleanPart || !csMap.has(cleanPart)) {
-            csMap = await getCloudSyncUsersMapAsync(true);
-            if (!cleanPart || !csMap.has(cleanPart)) {
+          if (!cleanPart) {
+            return res.status(404).json({
+              success: false,
+              error: `user "@${cleanPart}" does not exist in cloudsync`,
+            });
+          }
+          if (!initialMap.has(cleanPart)) {
+            const { user: lookedUp } = await ensureCloudSyncUserInMap(cleanPart);
+            if (!lookedUp) {
               return res.status(404).json({
                 success: false,
                 error: `user "@${cleanPart}" does not exist in cloudsync`,
@@ -4319,12 +4838,12 @@ app.post("/api/chat/groups/create", async (req, res) => {
       return res.status(400).json({ success: false, error: "Add at least 1 other user to start a group chat" });
     }
 
-    let csMap = await getCloudSyncUsersMapAsync();
-    if (csMap.size > 0) {
+    const initialMap = await getCloudSyncUsersMapAsync();
+    if (initialMap.size > 0) {
       for (const m of memberSet) {
-        if (!csMap.has(m)) {
-          csMap = await getCloudSyncUsersMapAsync(true);
-          if (!csMap.has(m)) {
+        if (!initialMap.has(m)) {
+          const { user: lookedUp } = await ensureCloudSyncUserInMap(m);
+          if (!lookedUp) {
             return res.status(404).json({
               success: false,
               error: `user "@${m}" does not exist in cloudsync`,
@@ -4407,10 +4926,10 @@ app.post("/api/chat/groups/members", async (req, res) => {
     } else if (action === "add") {
       if (!targetUsername) return res.status(400).json({ success: false, error: "username required" });
       if (grp.members.length >= 20) return res.status(400).json({ success: false, error: "Group limit is 20 members" });
-      let csMap = await getCloudSyncUsersMapAsync();
-      if (csMap.size > 0 && !csMap.has(targetUsername)) {
-        csMap = await getCloudSyncUsersMapAsync(true);
-        if (!csMap.has(targetUsername)) {
+      const initialMap = await getCloudSyncUsersMapAsync();
+      if (initialMap.size > 0 && !initialMap.has(targetUsername)) {
+        const { user: lookedUp } = await ensureCloudSyncUserInMap(targetUsername);
+        if (!lookedUp) {
           return res.status(404).json({ success: false, error: `user "@${targetUsername}" does not exist in cloudsync` });
         }
       }
@@ -4545,6 +5064,7 @@ app.get("/api/chat/staff", async (req, res) => {
     staffMods: getCanonicalStaffMods(csMap),
     goatUsers: getCanonicalGoatUsers(csMap),
     registeredUsers,
+    totalUsersCount: getCloudSyncUsersCountSync(csMap),
     timeouts: timeoutsList,
     actorRole: actor.role,
   });
@@ -4575,7 +5095,7 @@ app.post("/api/chat/staff", async (req, res) => {
     let csMap = await getCloudSyncUsersMapAsync();
     if (action === "add") {
       if (csMap.size > 0 && !csMap.has(key)) {
-        csMap = await getCloudSyncUsersMapAsync(true);
+        ({ csMap } = await ensureCloudSyncUserInMap(rawUsername));
       }
       if (csMap.size > 0 && !csMap.has(key) && !knownUsers.has(key)) {
         return res.status(404).json({
@@ -4643,7 +5163,7 @@ app.post("/api/chat/mod/goat", async (req, res) => {
     const key = rawUsername.toLowerCase();
     let csMap = await getCloudSyncUsersMapAsync();
     if (csMap.size > 0 && !csMap.has(key)) {
-      csMap = await getCloudSyncUsersMapAsync(true);
+      ({ csMap } = await ensureCloudSyncUserInMap(rawUsername));
     }
     if (csMap.size > 0 && !csMap.has(key) && !knownUsers.has(key)) {
       return res.status(404).json({

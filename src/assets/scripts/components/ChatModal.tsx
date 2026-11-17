@@ -432,6 +432,7 @@ export default function ChatModal() {
   const [serverOnlineUsers, setServerOnlineUsers] = useState<OnlineUser[]>([]);
   const [serverOfflineUsers, setServerOfflineUsers] = useState<OnlineUser[]>([]);
   const [registeredCloudSyncUsers, setRegisteredCloudSyncUsers] = useState<string[]>([]);
+  const [serverTotalUsersCount, setServerTotalUsersCount] = useState<number>(0);
 
   // User Profile Modal & Staff/Mod state
   const [viewingProfileUsername, setViewingProfileUsername] = useState<string | null>(null);
@@ -495,6 +496,9 @@ export default function ChatModal() {
   const pendingMessageIdsRef = useRef<Set<string>>(new Set());
   const lastPresenceAtRef = useRef<number>(0);
   const initialStateLoadedRef = useRef(false);
+  const lastStateFetchAtRef = useRef<number>(0);
+  const blockedUsersRef = useRef<string[]>(blockedUsers);
+  blockedUsersRef.current = blockedUsers;
 
   // WebRTC & WebAudio refs
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -1522,8 +1526,13 @@ export default function ChatModal() {
 
   // Poll chat & presence state gently (SSE handles real-time push; background poll acts as sync safety net)
   useEffect(() => {
-    const fetchChatAndPresenceState = () => {
+    const fetchChatAndPresenceState = (force = false) => {
       if (document.hidden && initialStateLoadedRef.current) return;
+      const nowReq = Date.now();
+      if (!force && initialStateLoadedRef.current && nowReq - lastStateFetchAtRef.current < 4000) {
+        return;
+      }
+      lastStateFetchAtRef.current = nowReq;
       const isInitial = !initialStateLoadedRef.current;
       let authToken = "";
       try { authToken = localStorage.getItem("auth_token") || ""; } catch {}
@@ -1536,6 +1545,9 @@ export default function ChatModal() {
         .then((data) => {
           if (!data) return;
           initialStateLoadedRef.current = true;
+          if (typeof data.totalUsersCount === "number" && Number.isFinite(data.totalUsersCount)) {
+            setServerTotalUsersCount(data.totalUsersCount);
+          }
           if (Array.isArray(data.messages)) {
             const serverMsgs = data.messages as ChatMessage[];
             const hasMore = Boolean(data.hasMoreMessages);
@@ -1551,7 +1563,7 @@ export default function ChatModal() {
                 const parts = m.channel.slice(3).split(":");
                 if (!parts.includes(myLower)) continue;
                 const partner = parts[0] === myLower ? parts[1] : parts[0];
-                if (partner && !blockedUsers.includes(partner.toLowerCase())) {
+                if (partner && !blockedUsersRef.current.includes(partner.toLowerCase())) {
                   setDmPeers((prev) => {
                     if (prev.some((p) => p.toLowerCase() === partner.toLowerCase())) return prev;
                     const next = [partner, ...prev];
@@ -1773,7 +1785,7 @@ export default function ChatModal() {
         .catch(() => {});
     };
 
-    fetchChatAndPresenceState();
+    fetchChatAndPresenceState(true);
     const onVisWake = () => {
       if (!document.hidden) fetchChatAndPresenceState();
     };
@@ -1785,26 +1797,26 @@ export default function ChatModal() {
     const pollInterval = window.setInterval(() => {
       const sseOpen = isLiveStreamConnected();
       const targetInterval = !initialStateLoadedRef.current
-        ? 2500
-        : isOpen
+        ? 4000
+        : isOpenRef.current
           ? sseOpen
-            ? 12000
-            : 3500
+            ? 20000
+            : 5000
           : sseOpen
-            ? 40000
-            : 12000;
+            ? 60000
+            : 20000;
       if (Date.now() - lastPollAt >= targetInterval - 200) {
         lastPollAt = Date.now();
         fetchChatAndPresenceState();
       }
-    }, 2500);
+    }, 4000);
     return () => {
       window.clearInterval(pollInterval);
       document.removeEventListener("visibilitychange", onVisWake);
       window.removeEventListener("sunshine-sse-open", onSyncWake);
       window.removeEventListener("online", onSyncWake);
     };
-  }, [cloudUser, isOpen, blockedUsers]);
+  }, [cloudUser]);
 
   useEffect(() => {
     setReplyingTo(null);
@@ -1993,6 +2005,9 @@ export default function ChatModal() {
       }
       if (Array.isArray(detail.registeredUsers) && (usersLoaded || detail.registeredUsers.length > 0)) {
         setRegisteredCloudSyncUsers(detail.registeredUsers);
+      }
+      if (typeof detail.totalUsersCount === "number" && Number.isFinite(detail.totalUsersCount)) {
+        setServerTotalUsersCount(detail.totalUsersCount);
       }
       if (cloudUser && (Array.isArray(detail.ownerUsers) || Array.isArray(detail.staffMods))) {
         const lower = cloudUser.toLowerCase();
@@ -4516,11 +4531,30 @@ export default function ChatModal() {
             )}
 
             {/* Offline Users Section */}
-            <div class="chat-offline-section">
-              <div class="chat-section-sub-header">
-                <span>offline · {offlineUsers.length}</span>
-              </div>
-              {offlineUsers.length === 0 ? (
+            {(() => {
+              const onlineRegisteredCount = onlineUsers.filter(
+                (u) => !/^guest[-_]/i.test(u.username) && u.username.toLowerCase() !== "guest"
+              ).length;
+              const totalSignedUp = Math.max(
+                serverTotalUsersCount,
+                registeredCloudSyncUsers.length,
+                onlineRegisteredCount + offlineUsers.length
+              );
+              const displayOfflineCount = Math.max(
+                offlineUsers.length,
+                Math.max(0, totalSignedUp - onlineRegisteredCount)
+              );
+              return (
+                <div class="chat-offline-section">
+                  <div class="chat-section-sub-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                    <span>offline · {displayOfflineCount}</span>
+                    {totalSignedUp > 0 && (
+                      <span style={{ fontSize: "10px", opacity: 0.72 }}>
+                        total · {totalSignedUp}
+                      </span>
+                    )}
+                  </div>
+                  {offlineUsers.length === 0 ? (
                 <div
                   style={{
                     padding: "6px 8px",
@@ -4614,7 +4648,9 @@ export default function ChatModal() {
                   );
                 })
               )}
-            </div>
+                </div>
+              );
+            })()}
 
             {/* Blocked Users Management Section */}
             {blockedUsers.length > 0 && (

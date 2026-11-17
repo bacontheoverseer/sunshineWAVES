@@ -10,7 +10,7 @@ import {
   syncAdFreeDomClass,
   isCookieMasterActive,
 } from "../core/cookieCoins.ts";
-import { getClientId, executeTrollAction } from "../core/liveClient.ts";
+import { getClientId, executeTrollAction, isLiveStreamConnected } from "../core/liveClient.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
 
 interface ShopTrollItem {
@@ -238,6 +238,8 @@ export default function ShopPage() {
 
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trollBcRef = useRef<BroadcastChannel | null>(null);
+  const selectedTargetRef = useRef<string>(selectedTarget);
+  selectedTargetRef.current = selectedTarget;
 
   const hide = useCallback(() => {
     if (!document.body.classList.contains("shop-view")) return;
@@ -338,41 +340,62 @@ export default function ShopPage() {
     };
   }, [show, hide, toggle]);
 
-  // Fetch online users list when shop is open
+  const applyOnlineList = useCallback((rawOnlineUsers: unknown) => {
+    const meUser = getActiveUser();
+    const myId = getClientId();
+    const list: OnlineTargetUser[] = [];
+    if (Array.isArray(rawOnlineUsers)) {
+      for (const u of rawOnlineUsers) {
+        if (u?.username && !list.some((x) => x.username === u.username)) {
+          list.push({ id: u.id || u.username, username: u.username });
+        }
+      }
+    }
+    if (!list.some((x) => x.username.toLowerCase() === meUser.toLowerCase())) {
+      list.unshift({ id: myId, username: `${meUser} (you)` });
+    }
+    setOnlineTargets(list);
+    if (!selectedTargetRef.current && list.length > 0) {
+      setSelectedTarget(list[0].username.replace(" (you)", ""));
+    }
+  }, []);
+
+  // Fetch online users list when shop is open (SSE pushes real-time updates; gentle fallback poll)
   const fetchOnlineUsers = useCallback(() => {
+    if (document.hidden) return;
     const meUser = getActiveUser();
     const myId = getClientId();
     fetch(`/api/chat/state?user=${encodeURIComponent(meUser)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const list: OnlineTargetUser[] = [];
-        if (Array.isArray(data?.onlineUsers)) {
-          for (const u of data.onlineUsers) {
-            if (u.username && !list.some((x) => x.username === u.username)) {
-              list.push({ id: u.id || u.username, username: u.username });
-            }
-          }
-        }
-        if (!list.some((x) => x.username.toLowerCase() === meUser.toLowerCase())) {
-          list.unshift({ id: myId, username: `${meUser} (you)` });
-        }
-        setOnlineTargets(list);
-        if (!selectedTarget && list.length > 0) {
-          setSelectedTarget(list[0].username.replace(" (you)", ""));
-        }
+        applyOnlineList(data?.onlineUsers);
       })
       .catch(() => {
         setOnlineTargets([{ id: myId, username: `${meUser} (you)` }]);
-        if (!selectedTarget) setSelectedTarget(meUser);
+        if (!selectedTargetRef.current) setSelectedTarget(meUser);
       });
-  }, [selectedTarget]);
+  }, [applyOnlineList]);
 
   useEffect(() => {
     if (!visible || shopTab !== "trolls") return;
     fetchOnlineUsers();
-    const timer = window.setInterval(fetchOnlineUsers, 6000);
-    return () => window.clearInterval(timer);
-  }, [visible, shopTab, fetchOnlineUsers]);
+    const onPresence = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (Array.isArray(detail?.onlineUsers)) {
+        applyOnlineList(detail.onlineUsers);
+      }
+    };
+    window.addEventListener("sunshine-presence-event", onPresence);
+    const timer = window.setInterval(() => {
+      if (!document.hidden && !isLiveStreamConnected()) {
+        fetchOnlineUsers();
+      }
+    }, 25000);
+    return () => {
+      window.removeEventListener("sunshine-presence-event", onPresence);
+      window.clearInterval(timer);
+    };
+  }, [visible, shopTab, fetchOnlineUsers, applyOnlineList]);
 
   const handleBuyAdFreePass = (pass: AdFreePass) => {
     if (coins < pass.cost) {

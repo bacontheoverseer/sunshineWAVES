@@ -113,6 +113,8 @@ export class CloudSync {
   _deltaCount: number;
   _pollInterval: number;
   _checkIntervalId: ReturnType<typeof setInterval> | null;
+  _authCheckPromise: Promise<void> | null;
+  _lastAuthCheckAt: number;
 
   constructor() {
     this.user = JSON.parse(localStorage.getItem("auth_user") || "{}");
@@ -137,6 +139,8 @@ export class CloudSync {
     this._deltaCount = 0;
     this._pollInterval = POLL_INTERVAL;
     this._checkIntervalId = null;
+    this._authCheckPromise = null;
+    this._lastAuthCheckAt = 0;
 
     this.init();
   }
@@ -207,7 +211,7 @@ export class CloudSync {
         this.updateStatus("reconnecting...", "info");
         setTimeout(() => {
           void this.checkAuthStatus();
-        }, 5000);
+        }, 15000);
       }
       this.updateModalState();
 
@@ -245,7 +249,7 @@ export class CloudSync {
         this.updateStatus("reconnecting...", "info");
         setTimeout(() => {
           void this.checkAuthStatus();
-        }, 5000);
+        }, 15000);
       }
     } finally {
       if (safetyTimer) clearTimeout(safetyTimer);
@@ -328,28 +332,44 @@ export class CloudSync {
   }
 
   async checkAuthStatus(): Promise<void> {
-    try {
-      const res = await fetchWithTimeout("/api/auth/me", { cache: "no-store" });
-      if (res.ok) {
-        const data = await res.json();
-        this.user = data.user;
-        this.isAuthenticated = true;
-        localStorage.setItem("auth_user", JSON.stringify(this.user));
-        this.startPolling();
-      } else if (res.status === 401 || res.status === 403) {
-        this.isAuthenticated = false;
-        this.user = {};
-        localStorage.removeItem("auth_user");
-        localStorage.removeItem("auth_token");
-        window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
-      } else {
-        this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
-      }
-      this.updateModalState();
-    } catch (e) {
-      console.warn("auth check failed!", e);
-      this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+    if (this._authCheckPromise) {
+      return this._authCheckPromise;
     }
+    const now = Date.now();
+    if (now - this._lastAuthCheckAt < 4000) {
+      return;
+    }
+    this._lastAuthCheckAt = now;
+    const p = (async () => {
+      try {
+        const res = await fetchWithTimeout("/api/auth/me", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          this.user = data.user;
+          this.isAuthenticated = true;
+          localStorage.setItem("auth_user", JSON.stringify(this.user));
+          this.startPolling();
+        } else if (res.status === 401 || res.status === 403) {
+          this.isAuthenticated = false;
+          this.user = {};
+          localStorage.removeItem("auth_user");
+          localStorage.removeItem("auth_token");
+          window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+        } else {
+          this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+        }
+        this.updateModalState();
+      } catch (e) {
+        console.warn("auth check failed!", e);
+        this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+      } finally {
+        if (this._authCheckPromise === p) {
+          this._authCheckPromise = null;
+        }
+      }
+    })();
+    this._authCheckPromise = p;
+    return p;
   }
 
   saveMeta(): void {
