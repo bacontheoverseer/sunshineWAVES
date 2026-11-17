@@ -1723,7 +1723,6 @@ export default function ChatModal() {
           setSelfTimeout(data.selfTimeout || null);
 
           if (cloudUser && hydratedLocalCustomForRef.current !== cloudUser.toLowerCase()) {
-            hydratedLocalCustomForRef.current = cloudUser.toLowerCase();
             const myRecord =
               (Array.isArray(data.onlineUsers) ? data.onlineUsers : []).find(
                 (u: any) => u?.username?.toLowerCase() === cloudUser.toLowerCase()
@@ -1733,26 +1732,34 @@ export default function ChatModal() {
               );
             const localCustom = loadLocalProfileCustomization(cloudUser);
             if (myRecord?.customization) {
+              hydratedLocalCustomForRef.current = cloudUser.toLowerCase();
               const sanitized = sanitizeCustomization(myRecord.customization, cloudUser);
               setEditingCustom(sanitized);
               saveLocalProfileCustomization(cloudUser, sanitized);
             } else if (localCustom) {
               setEditingCustom(localCustom);
-              if (authToken) {
-                fetch("/api/chat/user-profile", {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${authToken}`,
-                  },
-                  body: JSON.stringify({
-                    bio: myRecord?.bio || "",
-                    statusText: myRecord?.statusText || "",
-                    customization: localCustom,
-                  }),
-                }).catch(() => {});
+              // Only auto-upload cached local customization after server hydration finishes and the user has a meaningful customization
+              if (usersLoaded && myRecord) {
+                hydratedLocalCustomForRef.current = cloudUser.toLowerCase();
+                if (authToken && !isStaleUninitializedCustom(localCustom)) {
+                  fetch("/api/chat/user-profile", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      Authorization: `Bearer ${authToken}`,
+                    },
+                    body: JSON.stringify({
+                      bio: myRecord?.bio || "",
+                      statusText: myRecord?.statusText || "",
+                      customization: localCustom,
+                    }),
+                  }).catch(() => {});
+                }
               }
             } else {
+              if (usersLoaded) {
+                hydratedLocalCustomForRef.current = cloudUser.toLowerCase();
+              }
               setEditingCustom(getDefaultCustomization(cloudUser));
             }
             if (typeof myRecord?.bio === "string") setEditingBio(myRecord.bio);

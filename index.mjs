@@ -1084,9 +1084,16 @@ function mergeStudioProfilesLists(...lists) {
 }
 let supabaseHasAppKvTable = null; // null = probe on first sync, true/false once probed
 let supabaseKvSysUserId = null;
+let hasLoadedRemoteKvSuccessfully = !USE_SUPABASE_CLOUDSYNC;
 let supabaseMetaHydrated = false;
 let supabaseMetaHydratePromise = null;
 let isHydratingSupabaseKv = false;
+let localProfileRecoveryDone = false;
+let supabaseProfilesBackfillStarted = false;
+let lastRemoteUserProfilesSnapshot = {};
+const locallyDirtyProfileKeys = new Set();
+const deletedProfileKeys = new Set();
+const singleProfileSyncRecoveryChecked = new Map(); // usernameLower -> ts
 const pendingSupabaseKvTimers = new Map();
 
 function kvGetJson(key, fallback) {
@@ -1215,6 +1222,365 @@ function sanitizeProfileCustomizationServer(raw) {
   };
 }
 
+const DEFAULT_CUSTOM_SENTINELS = {
+  avatarSecondary: "#18181b",
+  avatarDecoration: "none",
+  bannerStyle: "solid",
+  nameStyle: "default",
+  nameFont: "default",
+  nameplate: "none",
+  profileEffect: "none",
+  cardTheme: "obsidian",
+  bioStyle: "frosted",
+  presenceStatus: "online",
+};
+
+function hasMeaningfulCustomization(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  const c = sanitizeProfileCustomizationServer(raw);
+  if (
+    c.displayName ||
+    c.pronouns ||
+    c.customTag ||
+    c.avatarUrl ||
+    c.bannerUrl ||
+    c.decorationUrl ||
+    c.profileEffectUrl ||
+    c.nameplateUrl ||
+    c.cardFrameUrl ||
+    c.cardFrameId ||
+    c.avatarColor ||
+    c.cardBgColor ||
+    c.avatarEmoji
+  ) {
+    return true;
+  }
+  for (const [k, def] of Object.entries(DEFAULT_CUSTOM_SENTINELS)) {
+    if (c[k] && c[k] !== def) return true;
+  }
+  return false;
+}
+
+function mergeCustomizationObjects(baseRaw, incomingRaw) {
+  const base = sanitizeProfileCustomizationServer(baseRaw);
+  const inc = sanitizeProfileCustomizationServer(incomingRaw);
+  const out = { ...base };
+  for (const [k, val] of Object.entries(inc)) {
+    const def = DEFAULT_CUSTOM_SENTINELS[k] ?? "";
+    const incHasValue = val !== undefined && val !== null && val !== "" && val !== def;
+    const baseHasValue = out[k] !== undefined && out[k] !== null && out[k] !== "" && out[k] !== def;
+    if (incHasValue || !baseHasValue) {
+      out[k] = val;
+    }
+  }
+  return out;
+}
+
+function mergeSingleUserProfileEntry(existing, incoming, { preferIncoming = false } = {}) {
+  if (!existing || typeof existing !== "object") return incoming;
+  if (!incoming || typeof incoming !== "object") return existing;
+  const exTs = Date.parse(existing.updatedAt || "") || 0;
+  const incTs = Date.parse(incoming.updatedAt || "") || 0;
+  const pickIncomingPrimary = preferIncoming ? true : incTs >= exTs;
+  const primary = pickIncomingPrimary ? incoming : existing;
+  const secondary = pickIncomingPrimary ? existing : incoming;
+  const mergedCustom = mergeCustomizationObjects(secondary.customization, primary.customization);
+  const bio =
+    typeof primary.bio === "string" && primary.bio.trim()
+      ? primary.bio
+      : typeof secondary.bio === "string"
+        ? secondary.bio
+        : "";
+  const statusText =
+    typeof primary.statusText === "string" && primary.statusText.trim()
+      ? primary.statusText
+      : typeof secondary.statusText === "string"
+        ? secondary.statusText
+        : "";
+  const newestTs = Math.max(exTs, incTs);
+  return {
+    bio,
+    statusText,
+    customization: mergedCustom,
+    updatedAt: newestTs > 0 ? new Date(newestTs).toISOString() : primary.updatedAt || secondary.updatedAt || new Date().toISOString(),
+  };
+}
+
+function mergeUserProfilesDict(remoteObj, localObj, { deletedKeys = new Set(), dirtyKeys = new Set() } = {}) {
+  const out = {};
+  if (remoteObj && typeof remoteObj === "object" && !Array.isArray(remoteObj)) {
+    for (const [k, v] of Object.entries(remoteObj)) {
+      const lower = String(k || "").trim().toLowerCase();
+      if (!lower || deletedKeys.has(lower) || !v || typeof v !== "object") continue;
+      out[lower] = v;
+    }
+  }
+  if (localObj && typeof localObj === "object" && !Array.isArray(localObj)) {
+    for (const [k, v] of Object.entries(localObj)) {
+      const lower = String(k || "").trim().toLowerCase();
+      if (!lower || deletedKeys.has(lower) || !v || typeof v !== "object") continue;
+      out[lower] = mergeSingleUserProfileEntry(out[lower], v, {
+        preferIncoming: dirtyKeys.has(lower),
+      });
+    }
+  }
+  return out;
+}
+
+function mergeKvValueBeforeRemoteWrite(key, remoteVal, localVal) {
+  if (remoteVal === null || remoteVal === undefined) return localVal;
+  const k = String(key);
+  if (k === "user_profiles_v2") {
+    const deletedSet = new Set([...getDeletedUsersSet(), ...deletedProfileKeys]);
+    return mergeUserProfilesDict(remoteVal, localVal, {
+      deletedKeys: deletedSet,
+      dirtyKeys: locallyDirtyProfileKeys,
+    });
+  }
+  if (k === STUDIO_GAMES_KV_KEY) {
+    return mergeStudioGamesLists(Array.isArray(remoteVal) ? remoteVal : [], Array.isArray(localVal) ? localVal : []);
+  }
+  if (k === STUDIO_PROFILES_KV_KEY) {
+    return mergeStudioProfilesLists(Array.isArray(remoteVal) ? remoteVal : [], Array.isArray(localVal) ? localVal : []);
+  }
+  if (k === "chat_groups_v1" && typeof remoteVal === "object" && typeof localVal === "object") {
+    return { ...remoteVal, ...localVal };
+  }
+  if (k === "chat_timeouts_v1" && typeof remoteVal === "object" && typeof localVal === "object") {
+    const now = Date.now();
+    const merged = { ...remoteVal, ...localVal };
+    for (const [uk, tv] of Object.entries(merged)) {
+      if (!tv || (tv.until !== -1 && Number(tv.until) <= now)) delete merged[uk];
+    }
+    return merged;
+  }
+  if (k === "chat_history_v1" && Array.isArray(remoteVal) && Array.isArray(localVal)) {
+    const byId = new Map();
+    for (const m of [...remoteVal, ...localVal]) {
+      if (!m || !m.id) continue;
+      const prev = byId.get(m.id);
+      if (!prev || Number(m.editedAt || 0) >= Number(prev.editedAt || 0)) byId.set(m.id, m);
+    }
+    return Array.from(byId.values())
+      .sort((a, b) => (Date.parse(a.timestamp || "") || 0) - (Date.parse(b.timestamp || "") || 0))
+      .slice(-250);
+  }
+  if ((k === "staff_moderators_v1" || k === "goat_users_v1" || k === "deleted_users_v1") && Array.isArray(remoteVal) && Array.isArray(localVal)) {
+    return Array.from(new Set([...remoteVal, ...localVal].map((s) => String(s || "").trim().toLowerCase()).filter(Boolean)));
+  }
+  if (remoteVal && typeof remoteVal === "object" && !Array.isArray(remoteVal) && localVal && typeof localVal === "object" && !Array.isArray(localVal)) {
+    return { ...remoteVal, ...localVal };
+  }
+  return localVal;
+}
+
+function extractCustomizationFromSyncPayload(username, payloadJsonOrObj) {
+  const lower = String(username || "").trim().toLowerCase();
+  if (!lower || !payloadJsonOrObj) return null;
+  let parsedPayload = payloadJsonOrObj;
+  if (typeof payloadJsonOrObj === "string") {
+    try {
+      parsedPayload = JSON.parse(payloadJsonOrObj);
+    } catch {
+      return null;
+    }
+  }
+  const ls = parsedPayload?.localStorage && typeof parsedPayload.localStorage === "object"
+    ? parsedPayload.localStorage
+    : parsedPayload;
+  if (!ls || typeof ls !== "object") return null;
+
+  const exactKey = `cookie_profile_custom_v1:${lower}`;
+  let rawVal = ls[exactKey];
+  if (!rawVal) {
+    for (const [k, v] of Object.entries(ls)) {
+      if (typeof k === "string" && k.toLowerCase() === exactKey && v) {
+        rawVal = v;
+        break;
+      }
+    }
+  }
+  if (!rawVal) return null;
+  let parsedCustom = rawVal;
+  if (typeof rawVal === "string") {
+    try {
+      parsedCustom = JSON.parse(rawVal);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsedCustom || typeof parsedCustom !== "object") return null;
+  const sanitized = sanitizeProfileCustomizationServer(parsedCustom);
+  return hasMeaningfulCustomization(sanitized) ? sanitized : null;
+}
+
+function recoverUserProfileFromSyncPayload(username, payloadJsonOrObj, updatedAt = "") {
+  const clean = String(username || "").trim();
+  const key = clean.toLowerCase();
+  if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key) || deletedProfileKeys.has(key)) {
+    return false;
+  }
+  const custom = extractCustomizationFromSyncPayload(clean, payloadJsonOrObj);
+  if (!custom) return false;
+  const existing = userProfiles.get(key);
+  if (existing && hasMeaningfulCustomization(existing.customization)) {
+    // Only fill missing sub-fields if recovered backup is newer or fills missing media
+    const merged = mergeSingleUserProfileEntry(
+      existing,
+      { bio: existing.bio || "", statusText: existing.statusText || "", customization: custom, updatedAt: updatedAt || existing.updatedAt || "" },
+      { preferIncoming: false }
+    );
+    if (JSON.stringify(merged.customization) === JSON.stringify(existing.customization)) {
+      return false;
+    }
+    userProfiles.set(key, merged);
+    locallyDirtyProfileKeys.add(key);
+    return true;
+  }
+  userProfiles.set(key, {
+    bio: existing?.bio || "",
+    statusText: existing?.statusText || "",
+    customization: custom,
+    updatedAt: updatedAt || existing?.updatedAt || new Date().toISOString(),
+  });
+  locallyDirtyProfileKeys.add(key);
+  return true;
+}
+
+function recoverProfilesFromChatHistory(messages = (typeof chatHistory !== "undefined" ? chatHistory : [])) {
+  let recoveredCount = 0;
+  const deleted = getDeletedUsersSet();
+  if (Array.isArray(messages)) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const author = String(msg?.author || "").trim();
+      const key = author.toLowerCase();
+      if (!author || isTemporaryGuestName(author) || deleted.has(key) || deletedProfileKeys.has(key)) continue;
+      if (msg?.customization && hasMeaningfulCustomization(msg.customization)) {
+        const sanitized = sanitizeProfileCustomizationServer(msg.customization);
+        const existing = userProfiles.get(key);
+        if (!existing || !hasMeaningfulCustomization(existing.customization)) {
+          userProfiles.set(key, {
+            bio: existing?.bio || "",
+            statusText: existing?.statusText || "",
+            customization: sanitized,
+            updatedAt: existing?.updatedAt || msg.timestamp || new Date().toISOString(),
+          });
+          locallyDirtyProfileKeys.add(key);
+          recoveredCount++;
+        }
+      }
+    }
+  }
+  return recoveredCount;
+}
+
+function recoverProfilesFromLocalSqliteAndHistory() {
+  if (localProfileRecoveryDone) return 0;
+  localProfileRecoveryDone = true;
+  const deleted = getDeletedUsersSet();
+
+  // 1. Recover any non-default profile customizations stored on recent chat messages
+  let recoveredCount = recoverProfilesFromChatHistory();
+
+  // 2. Recover saved cookie_profile_custom_v1:* blobs from local SQLite sync_json & legacy app_kv backups
+  try {
+    const db = openCloudSyncDb(true);
+    try {
+      const syncRows = db
+        .query("SELECT u.username, sj.payload_json, sj.updated_at FROM sync_json sj JOIN users u ON u.id = sj.user_id")
+        .all();
+      for (const sr of syncRows || []) {
+        if (sr?.username && sr?.payload_json) {
+          if (recoverUserProfileFromSyncPayload(sr.username, sr.payload_json, sr.updated_at || "")) {
+            recoveredCount++;
+          }
+        }
+      }
+      const backupKvRows = db
+        .query("SELECT k, v FROM app_kv WHERE k LIKE 'user_profiles%'")
+        .all();
+      for (const bkv of backupKvRows || []) {
+        if (!bkv?.v || typeof bkv.v !== "string") continue;
+        try {
+          const parsed = JSON.parse(bkv.v);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            for (const [pk, pv] of Object.entries(parsed)) {
+              const lower = String(pk || "").trim().toLowerCase();
+              if (!lower || deleted.has(lower) || deletedProfileKeys.has(lower) || !pv || typeof pv !== "object") continue;
+              const merged = mergeSingleUserProfileEntry(userProfiles.get(lower), pv, { preferIncoming: false });
+              if (!userProfiles.has(lower) || (!hasMeaningfulCustomization(userProfiles.get(lower)?.customization) && hasMeaningfulCustomization(merged?.customization))) {
+                userProfiles.set(lower, merged);
+                locallyDirtyProfileKeys.add(lower);
+                recoveredCount++;
+              }
+            }
+          }
+        } catch {}
+      }
+    } finally {
+      db.close();
+    }
+  } catch {}
+
+  if (recoveredCount > 0) {
+    persistUserProfilesLocalOnly();
+  }
+  return recoveredCount;
+}
+
+async function recoverMissingProfilesFromSupabaseSyncAsync() {
+  if (!USE_SUPABASE_CLOUDSYNC || !hasLoadedRemoteKvSuccessfully || isSupabaseDegraded() || supabaseProfilesBackfillStarted) {
+    return 0;
+  }
+  supabaseProfilesBackfillStarted = true;
+  try {
+    const csMap = await getCloudSyncUsersMapAsync().catch(() => new Map());
+    const deleted = getDeletedUsersSet();
+    const candidates = [];
+    for (const [k, rec] of csMap.entries()) {
+      const uid = Number(rec?.id) || 0;
+      if (uid <= 0 || deleted.has(k) || deletedProfileKeys.has(k)) continue;
+      const existing = userProfiles.get(k);
+      if (!existing || !hasMeaningfulCustomization(existing.customization)) {
+        candidates.push({ id: uid, username: rec.username, key: k });
+      }
+    }
+    if (candidates.length === 0) return 0;
+
+    let recovered = 0;
+    const batchSize = 15;
+    const maxBatches = 4; // Up to 60 missing profiles per startup to protect Supabase Disk IO
+    for (let i = 0; i < candidates.length && i < batchSize * maxBatches; i += batchSize) {
+      if (isSupabaseDegraded()) break;
+      const batch = candidates.slice(i, i + batchSize);
+      const idToUser = new Map(batch.map((c) => [c.id, c.username]));
+      const idsParam = batch.map((c) => c.id).join(",");
+      const { ok, json } = await supabaseRest(
+        `cloudsync_sync?user_id=in.(${idsParam})&select=user_id,payload_json,updated_at`,
+        { timeoutMs: 10000 }
+      ).catch(() => ({ ok: false, json: null }));
+      if (!ok || !Array.isArray(json)) break;
+      for (const row of json) {
+        const uname = idToUser.get(Number(row?.user_id));
+        if (uname && row?.payload_json) {
+          if (recoverUserProfileFromSyncPayload(uname, row.payload_json, row.updated_at || "")) {
+            recovered++;
+          }
+        }
+      }
+    }
+    if (recovered > 0) {
+      console.log(`[profiles] Recovered ${recovered} user profile customization(s) from cloudsync_sync`);
+      persistUserProfiles();
+      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    }
+    return recovered;
+  } catch {
+    return 0;
+  }
+}
+
 function applyChatMetaKvMap(kvMap) {
   const mods = kvMap.staff_moderators_v1;
   if (Array.isArray(mods)) {
@@ -1232,10 +1598,15 @@ function applyChatMetaKvMap(kvMap) {
   }
   const profs = kvMap.user_profiles_v2;
   if (profs && typeof profs === "object") {
+    const deleted = getDeletedUsersSet();
     for (const [k, v] of Object.entries(profs)) {
-      if (k && v && typeof v === "object") {
-        userProfiles.set(k.toLowerCase(), v);
-      }
+      const lower = String(k || "").trim().toLowerCase();
+      if (!lower || deleted.has(lower) || deletedProfileKeys.has(lower) || !v || typeof v !== "object") continue;
+      lastRemoteUserProfilesSnapshot[lower] = v;
+      userProfiles.set(
+        lower,
+        mergeSingleUserProfileEntry(userProfiles.get(lower), v, { preferIncoming: false })
+      );
     }
   }
   const tms = kvMap.chat_timeouts_v1;
@@ -1256,6 +1627,9 @@ function applyChatMetaKvMap(kvMap) {
         chatHistory.push(m);
       }
     }
+  }
+  if (Array.isArray(hist)) {
+    recoverProfilesFromChatHistory(hist);
   }
   const grps = kvMap.chat_groups_v1;
   if (grps && typeof grps === "object") {
@@ -1305,6 +1679,7 @@ function ensureChatMetaLoaded() {
     [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
     [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
   });
+  recoverProfilesFromLocalSqliteAndHistory();
 }
 
 async function getOrCreateSupabaseSystemKvUserId() {
@@ -1329,21 +1704,52 @@ async function getOrCreateSupabaseSystemKvUserId() {
 
 async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
   if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return { ok: false };
-  const val = kvGetJson(key, null);
+  const k = String(key);
+  let val = kvGetJson(k, null);
   if (val === null || val === undefined) return { ok: false };
+
+  // Never overwrite remote Supabase app_kv before initial remote load succeeds!
+  // If remote hasn't been hydrated yet, fetch & deep-merge the remote key first, or block the write if remote fails.
+  if (!hasLoadedRemoteKvSuccessfully) {
+    await ensureChatMetaReadyAsync();
+  }
+  if (!hasLoadedRemoteKvSuccessfully || k === "user_profiles_v2") {
+    const remoteVal = await fetchSupabaseKvKeyAsync(k, { timeoutMs: Math.min(timeoutMs, 12000) });
+    if (remoteVal === undefined) {
+      if (!hasLoadedRemoteKvSuccessfully) {
+        console.warn(`[kv] Blocked Supabase write to "${k}" until remote app_kv loads safely`);
+        return { ok: false, blocked: "remote_kv_not_loaded" };
+      }
+    } else if (remoteVal !== null) {
+      val = mergeKvValueBeforeRemoteWrite(k, remoteVal, val);
+      isHydratingSupabaseKv = true;
+      try {
+        applyChatMetaKvMap({ [k]: val });
+        localKvSetJson(k, val);
+      } finally {
+        isHydratingSupabaseKv = false;
+      }
+    }
+  }
+
+  if (isSupabaseDegraded()) return { ok: false };
   if (supabaseHasAppKvTable !== false) {
     const res = await supabaseRest("app_kv?on_conflict=k", {
       method: "POST",
       timeoutMs,
       headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify({
-        k: String(key),
+        k,
         v: JSON.stringify(val),
         updated_at: new Date().toISOString(),
       }),
     });
     if (res.ok) {
       supabaseHasAppKvTable = true;
+      if (k === "user_profiles_v2") {
+        lastRemoteUserProfilesSnapshot = val && typeof val === "object" ? { ...val } : {};
+        locallyDirtyProfileKeys.clear();
+      }
       return { ok: true };
     }
     if (res.status >= 500 || res.status === 429 || isSupabaseDegraded()) {
@@ -1359,26 +1765,32 @@ async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
   const sysId = await getOrCreateSupabaseSystemKvUserId();
   if (!sysId) return { ok: false };
   const snapshot = {};
-  for (const k of CHAT_META_KV_KEYS) {
-    const localVal = kvGetJson(k, null);
-    if (localVal !== null && localVal !== undefined) snapshot[k] = localVal;
+  for (const ck of CHAT_META_KV_KEYS) {
+    const localVal = kvGetJson(ck, null);
+    if (localVal !== null && localVal !== undefined) snapshot[ck] = localVal;
   }
-  snapshot[String(key)] = val;
+  snapshot[k] = val;
   await dbUpsertSyncPayload(sysId, JSON.stringify({ kv: snapshot }), new Date().toISOString());
+  if (!isSupabaseDegraded() && k === "user_profiles_v2") {
+    lastRemoteUserProfilesSnapshot = val && typeof val === "object" ? { ...val } : {};
+    locallyDirtyProfileKeys.clear();
+  }
   return { ok: !isSupabaseDegraded() };
 }
 
 async function ensureChatMetaReadyAsync() {
   ensureChatMetaLoaded();
-  if (!USE_SUPABASE_CLOUDSYNC || supabaseMetaHydrated || isSupabaseDegraded()) return;
+  if (!USE_SUPABASE_CLOUDSYNC || hasLoadedRemoteKvSuccessfully || isSupabaseDegraded()) return;
   if (!supabaseMetaHydratePromise) {
     supabaseMetaHydratePromise = (async () => {
+      let fetchSucceeded = false;
       try {
         let remoteKv = {};
         if (supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
-          const res = await supabaseRest("app_kv?select=k,v");
+          const res = await supabaseRest("app_kv?select=k,v", { timeoutMs: 12000 });
           if (res.ok && Array.isArray(res.json)) {
             supabaseHasAppKvTable = true;
+            fetchSucceeded = true;
             for (const row of res.json) {
               if (row?.k && typeof row.v === "string") {
                 try {
@@ -1395,6 +1807,7 @@ async function ensureChatMetaReadyAsync() {
           if (sysUser?.id) {
             supabaseKvSysUserId = Number(sysUser.id);
             const row = await dbGetSyncPayload(supabaseKvSysUserId);
+            if (!isSupabaseDegraded()) fetchSucceeded = true;
             if (row?.payload_json) {
               try {
                 const parsed = JSON.parse(String(row.payload_json));
@@ -1403,9 +1816,12 @@ async function ensureChatMetaReadyAsync() {
                 }
               } catch {}
             }
+          } else if (!isSupabaseDegraded()) {
+            // Table fallback responded cleanly with no system KV record yet
+            fetchSucceeded = true;
           }
         }
-        if (Object.keys(remoteKv).length > 0) {
+        if (fetchSucceeded && Object.keys(remoteKv).length > 0) {
           isHydratingSupabaseKv = true;
           try {
             applyChatMetaKvMap(remoteKv);
@@ -1418,17 +1834,31 @@ async function ensureChatMetaReadyAsync() {
                 if (customStudios.length > 0) localKvSetJson(STUDIO_PROFILES_KV_KEY, customStudios);
                 continue;
               }
-              if (remoteKv[k] !== undefined) kvSetJson(k, remoteKv[k]);
+              if (k === "user_profiles_v2") {
+                localKvSetJson("user_profiles_v2", buildUserProfilesObject());
+                continue;
+              }
+              if (remoteKv[k] !== undefined) localKvSetJson(k, remoteKv[k]);
             }
           } finally {
             isHydratingSupabaseKv = false;
           }
         }
+        if (fetchSucceeded) {
+          hasLoadedRemoteKvSuccessfully = true;
+          supabaseMetaHydrated = true;
+          invalidateCloudSyncUsersCache();
+          if (locallyDirtyProfileKeys.size > 0) {
+            scheduleSupabaseKvSync("user_profiles_v2");
+          }
+          void recoverMissingProfilesFromSupabaseSyncAsync().catch(() => {});
+        }
       } catch (e) {
         console.warn("Supabase chat meta hydrate warning:", e?.message);
       } finally {
-        supabaseMetaHydrated = true;
-        invalidateCloudSyncUsersCache();
+        if (!fetchSucceeded) {
+          supabaseMetaHydratePromise = null;
+        }
       }
     })();
   }
@@ -1500,14 +1930,36 @@ function getCanonicalGoatUsers(csMap = getCloudSyncUsersMap()) {
   return Array.from(goatUsers).map((u) => csMap.get(u)?.username || u);
 }
 
-function persistUserProfiles() {
+function buildUserProfilesObject() {
   const out = {};
   let count = 0;
   for (const [k, v] of userProfiles.entries()) {
     out[k] = v;
-    if (++count >= 1000) break;
+    if (++count >= 10000) break;
   }
-  kvSetJson("user_profiles_v2", out);
+  return out;
+}
+
+function persistUserProfilesLocalOnly() {
+  localKvSetJson("user_profiles_v2", buildUserProfilesObject());
+}
+
+function persistUserProfiles({ updatedKey = "", deletedKey = "" } = {}) {
+  if (updatedKey) {
+    const clean = String(updatedKey).trim().toLowerCase();
+    if (clean) {
+      locallyDirtyProfileKeys.add(clean);
+      deletedProfileKeys.delete(clean);
+    }
+  }
+  if (deletedKey) {
+    const clean = String(deletedKey).trim().toLowerCase();
+    if (clean) {
+      deletedProfileKeys.add(clean);
+      locallyDirtyProfileKeys.delete(clean);
+    }
+  }
+  kvSetJson("user_profiles_v2", buildUserProfilesObject());
 }
 
 function persistChatTimeouts() {
@@ -2438,7 +2890,7 @@ app.delete("/api/auth/me", async (req, res) => {
     await dbDeleteUser(user.id, user.username);
     knownUsers.delete(user.username.toLowerCase());
     userProfiles.delete(user.username.toLowerCase());
-    persistUserProfiles();
+    persistUserProfiles({ deletedKey: user.username.toLowerCase() });
     removeUserFromCaches(user.username);
     clearCloudSyncAuthCookie(res);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
@@ -2503,6 +2955,9 @@ app.post("/api/sync/upload", async (req, res) => {
     }
 
     await dbUpsertSyncPayload(user.id, JSON.stringify(finalPayload), updatedAt, user.username);
+    if (recoverUserProfileFromSyncPayload(user.username, finalPayload, updatedAt)) {
+      persistUserProfiles({ updatedKey: user.username.toLowerCase() });
+    }
     return res.json({
       success: true,
       data: null,
@@ -2533,10 +2988,15 @@ app.get("/api/sync/download", async (req, res) => {
         error: null,
       });
     }
+    const parsedData = JSON.parse(String(row.payload_json));
+    const rowUpdatedAt = String(row.updated_at || "");
+    if (recoverUserProfileFromSyncPayload(user.username, parsedData, rowUpdatedAt)) {
+      persistUserProfiles({ updatedKey: user.username.toLowerCase() });
+    }
     return res.json({
       success: true,
-      data: JSON.parse(String(row.payload_json)),
-      updated_at: String(row.updated_at || ""),
+      data: parsedData,
+      updated_at: rowUpdatedAt,
       error: null,
     });
   } catch {
@@ -3131,12 +3591,10 @@ setInterval(() => {
           if (ts > 0 && now - ts > 24 * 60 * 60 * 1000) knownUsers.delete(uname);
         }
       }
-      if (userProfiles.size > 1000) {
-        for (const [uname] of userProfiles.entries()) {
-          if (!knownUsers.has(uname)) userProfiles.delete(uname);
-          if (userProfiles.size <= 1000) break;
+      for (const [uname, info] of activeUsers.entries()) {
+        if (!info || now - Number(info.lastSeen || 0) > ACTIVE_USER_TTL_MS) {
+          activeUsers.delete(uname);
         }
-        persistUserProfiles();
       }
     }
     if (heartbeatTick % 20 === 0 && sharedCloudSyncDb) {
@@ -4606,10 +5064,31 @@ app.get("/api/chat/user-profile", async (req, res) => {
   }
 
   const canonicalName = csUser ? csUser.username : rawTarget;
+  let prof = userProfiles.get(key) || {};
+  if (
+    (!prof || !hasMeaningfulCustomization(prof.customization)) &&
+    csUser?.id > 0 &&
+    !isSupabaseDegraded()
+  ) {
+    const nowTs = Date.now();
+    const lastChecked = Number(singleProfileSyncRecoveryChecked.get(key) || 0);
+    if (nowTs - lastChecked > 60_000) {
+      singleProfileSyncRecoveryChecked.set(key, nowTs);
+      try {
+        const syncRow = await dbGetSyncPayload(csUser.id, canonicalName);
+        if (
+          syncRow?.payload_json &&
+          recoverUserProfileFromSyncPayload(canonicalName, syncRow.payload_json, syncRow.updated_at || "")
+        ) {
+          persistUserProfiles({ updatedKey: key });
+          prof = userProfiles.get(key) || {};
+        }
+      } catch {}
+    }
+  }
   const presence = getPresenceSnapshot();
   const onlineEntry = presence.onlineUsers.find((u) => u.username.toLowerCase() === key);
   const offlineEntry = presence.offlineUsers.find((u) => u.username.toLowerCase() === key);
-  const prof = userProfiles.get(key) || {};
   const timeoutEntry = getActiveTimeout(key);
 
   // Gather per-game leaderboard stats for this user
@@ -4682,7 +5161,7 @@ app.get("/api/chat/user-profile", async (req, res) => {
 });
 
 app.post("/api/chat/user-profile", async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
     if (!authUser) {
@@ -4738,7 +5217,11 @@ app.post("/api/chat/user-profile", async (req, res) => {
       updatedAt: new Date().toISOString(),
     };
     userProfiles.set(key, updated);
-    persistUserProfiles();
+    persistUserProfiles({ updatedKey: key });
+    await flushKvKeyToSqliteAndSupabaseAsync("user_profiles_v2", buildUserProfilesObject(), {
+      awaitRemote: true,
+      timeoutMs: 12000,
+    });
 
     // Update cached recent messages authored by this user so avatars/names reflect changes
     for (let i = 0; i < chatHistory.length; i++) {
