@@ -344,10 +344,14 @@ export class CloudSync {
       try {
         const res = await fetchWithTimeout("/api/auth/me", { cache: "no-store" });
         if (res.ok) {
+          const prevName = this.user?.username;
           const data = await res.json();
           this.user = data.user;
           this.isAuthenticated = true;
           localStorage.setItem("auth_user", JSON.stringify(this.user));
+          if (prevName !== this.user?.username) {
+            window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: this.user }));
+          }
           this.startPolling();
         } else if (res.status === 401 || res.status === 403) {
           this.isAuthenticated = false;

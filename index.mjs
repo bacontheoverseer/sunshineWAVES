@@ -1617,29 +1617,67 @@ function mirrorLocalUserRecord({ username, passwordHash = "", tokenVersion = 1 }
   }
 }
 
+// Maps stale/old lowercase usernames (from local SQLite or pre-rename cache) -> latest canonical { id, username }
+const staleUsernameAliases = new Map();
+
 function saveRegisteredUsersDirCache(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return;
   const deleted = getDeletedUsersSet();
   const byKey = new Map();
+  const incomingById = new Map();
+  const incomingKeys = new Set();
+
+  for (const r of rows) {
+    const clean = String(r?.username || "").trim();
+    const k = clean.toLowerCase();
+    const id = Number(r?.id) || 0;
+    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    incomingKeys.add(k);
+    if (id > 0) incomingById.set(id, { id, username: clean, created_at: r.created_at || null });
+    // Clear any prior alias if this exact username is now active in Supabase
+    staleUsernameAliases.delete(k);
+  }
+
   const prev = kvGetJson(USERS_DIR_KV_KEY, []);
   if (Array.isArray(prev)) {
     for (const r of prev) {
       const clean = String(r?.username || "").trim();
       const k = clean.toLowerCase();
+      const id = Number(r?.id) || 0;
       if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
-      byKey.set(k, { id: Number(r.id) || 0, username: clean, created_at: r.created_at || null });
+      if (id > 0 && incomingById.has(id)) {
+        const fresh = incomingById.get(id);
+        if (fresh.username.toLowerCase() !== k && !incomingKeys.has(k)) {
+          // User renamed in Supabase (same id, new username) -> drop stale cached record & remember alias
+          staleUsernameAliases.set(k, { id: fresh.id, username: fresh.username });
+          continue;
+        }
+      }
+      byKey.set(k, { id, username: clean, created_at: r.created_at || null });
     }
   }
+
+  // Deduplicate by both id and username_lower: incoming Supabase rows always overwrite matching id/key entries
   for (const r of rows) {
     const clean = String(r?.username || "").trim();
     const k = clean.toLowerCase();
+    const id = Number(r?.id) || 0;
     if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    if (id > 0) {
+      for (const [existingKey, existingRec] of byKey.entries()) {
+        if (existingKey !== k && existingRec.id === id && !incomingKeys.has(existingKey)) {
+          staleUsernameAliases.set(existingKey, { id, username: clean });
+          byKey.delete(existingKey);
+        }
+      }
+    }
     byKey.set(k, {
-      id: Number(r.id) || byKey.get(k)?.id || 0,
+      id: id || byKey.get(k)?.id || 0,
       username: clean,
       created_at: r.created_at || byKey.get(k)?.created_at || null,
     });
   }
+
   const merged = Array.from(byKey.values());
   localKvSetJson(USERS_DIR_KV_KEY, merged);
 }
@@ -1648,35 +1686,98 @@ function collectFallbackUserRows(primaryRows = []) {
   ensureChatMetaLoaded();
   const deleted = getDeletedUsersSet();
   const byKey = new Map();
-  const addRow = (id, username, createdAt = null) => {
+  const byId = new Map();
+  const primaryKeys = new Set();
+  const primaryById = new Map();
+
+  for (const r of primaryRows || []) {
+    const clean = String(r?.username || "").trim();
+    const k = clean.toLowerCase();
+    const id = Number(r?.id) || 0;
+    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    primaryKeys.add(k);
+    if (id > 0) primaryById.set(id, { id, username: clean, created_at: r.created_at || null });
+  }
+
+  const addRow = (id, username, createdAt = null, { isPrimary = false } = {}) => {
     const clean = String(username || "").trim();
     const k = clean.toLowerCase();
+    const numId = Number(id) || 0;
     if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) {
       return;
     }
-    if (!byKey.has(k)) {
-      byKey.set(k, { id: Number(id) || 0, username: clean, created_at: createdAt || null });
+    if (!isPrimary && staleUsernameAliases.has(k)) {
+      return;
+    }
+    if (!isPrimary && numId > 0 && primaryById.has(numId)) {
+      const fresh = primaryById.get(numId);
+      if (fresh.username.toLowerCase() !== k && !primaryKeys.has(k)) {
+        staleUsernameAliases.set(k, { id: fresh.id, username: fresh.username });
+        return;
+      }
+    }
+    if (!isPrimary && numId > 0 && byId.has(numId)) {
+      const existing = byId.get(numId);
+      if (existing.username.toLowerCase() !== k && !primaryKeys.has(k)) {
+        return;
+      }
+    }
+    const existingByKey = byKey.get(k);
+    if (!existingByKey || (isPrimary && numId > 0 && !existingByKey.id)) {
+      const rec = { id: numId, username: clean, created_at: createdAt || existingByKey?.created_at || null };
+      byKey.set(k, rec);
+      if (numId > 0) byId.set(numId, rec);
     }
   };
 
+  // 1. Live Supabase rows take strict precedence
   for (const r of primaryRows || []) {
-    addRow(r?.id, r?.username, r?.created_at);
+    addRow(r?.id, r?.username, r?.created_at, { isPrimary: true });
   }
-  try {
-    const db = openCloudSyncDb(true);
-    const localRows = db.query("SELECT id, username, created_at FROM users ORDER BY id ASC").all();
-    for (const r of localRows || []) addRow(r?.id, r?.username, r?.created_at);
-  } catch {}
+
+  // 2. Cached Supabase directory (preserved for partial/outage continuity, deduplicated by id & username_lower)
   const cachedDir = kvGetJson(USERS_DIR_KV_KEY, []);
   if (Array.isArray(cachedDir)) {
     for (const r of cachedDir) addRow(r?.id, r?.username, r?.created_at);
   }
-  for (const k of userProfiles.keys()) addRow(0, k);
-  for (const k of OWNER_USERNAMES) addRow(0, k);
-  for (const k of staffModerators) addRow(0, k);
-  for (const k of goatUsers) addRow(0, k);
-  for (const msg of chatHistory || []) {
-    if (msg?.author) addRow(0, msg.author, msg.timestamp || null);
+
+  // 3. Local SQLite users table (deduplicated against Supabase id & username_lower so stale local usernames never duplicate)
+  try {
+    const db = openCloudSyncDb(true);
+    const localRows = db.query("SELECT id, username, created_at FROM users ORDER BY id ASC").all();
+    for (const r of localRows || []) {
+      const clean = String(r?.username || "").trim();
+      const k = clean.toLowerCase();
+      const localId = Number(r?.id) || 0;
+      if (!clean || deleted.has(k)) continue;
+      // When Supabase directory succeeded, skip stale pre-Supabase SQLite rows whose id is canonicalized in Supabase
+      if (localId > 0 && primaryById.has(localId)) {
+        const fresh = primaryById.get(localId);
+        if (fresh.username.toLowerCase() !== k && !primaryKeys.has(k)) {
+          staleUsernameAliases.set(k, { id: fresh.id, username: fresh.username });
+          continue;
+        }
+      }
+      // If running with Supabase primary rows and this local SQLite user isn't in Supabase/cache, only include when degraded/local
+      if (USE_SUPABASE_CLOUDSYNC && (primaryRows || []).length > 0 && !isSupabaseDegraded() && !byKey.has(k)) {
+        if (localId > 0 && byId.has(localId)) {
+          staleUsernameAliases.set(k, { id: localId, username: byId.get(localId).username });
+        }
+        continue;
+      }
+      addRow(localId, clean, r?.created_at);
+    }
+  } catch {}
+
+  // 4. Only synthesize accounts from chat metadata / OWNER_USERNAMES when in local SQLite mode or empty Supabase outage
+  if (!USE_SUPABASE_CLOUDSYNC || ((primaryRows || []).length === 0 && byKey.size === 0)) {
+    for (const k of userProfiles.keys()) addRow(0, k);
+    for (const k of OWNER_USERNAMES) addRow(0, k);
+    for (const k of staffModerators) addRow(0, k);
+    for (const k of goatUsers) addRow(0, k);
+    for (const msg of chatHistory || []) {
+      if (msg?.author) addRow(0, msg.author, msg.timestamp || null);
+    }
   }
   return Array.from(byKey.values());
 }
@@ -1689,7 +1790,7 @@ async function dbFindUserById(userId) {
       );
       if (!ok) throw new Error(`Supabase select user failed (${status}): ${text}`);
       const row = Array.isArray(json) && json[0] ? json[0] : null;
-      if (row) return row;
+      return row;
     } catch (err) {
       markSupabaseDegraded(err?.message);
     }
@@ -1722,8 +1823,8 @@ async function dbFindUserByUsername(username) {
           passwordHash: row.password_hash,
           tokenVersion: row.token_version,
         });
-        return row;
       }
+      return row;
     } catch (err) {
       markSupabaseDegraded(err?.message);
     }
@@ -2064,11 +2165,22 @@ async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false }
   if (getDeletedUsersSet().has(claimsLower)) return null;
 
   try {
-    let row = await dbFindUserById(claims.id);
+    const byIdRow = await dbFindUserById(claims.id);
+    let row = byIdRow;
     if ((!row || String(row.username).toLowerCase() !== claimsLower) && claimsUsername) {
       row = await dbFindUserByUsername(claimsUsername);
     }
     if (!row) {
+      if (byIdRow && !isSupabaseDegraded() && Number(byIdRow.token_version || 1) === Number(claims.v || 1)) {
+        staleUsernameAliases.set(claimsLower, {
+          id: Number(byIdRow.id),
+          username: String(byIdRow.username),
+        });
+        if (allowUnmirroredJwt) {
+          return { id: Number(byIdRow.id), username: String(byIdRow.username) };
+        }
+        return null;
+      }
       if (USE_SUPABASE_CLOUDSYNC && (allowUnmirroredJwt || Date.now() < supabaseDegradedUntil)) {
         return { id: Number(claims.id), username: claimsUsername };
       }
@@ -2353,25 +2465,35 @@ const usersPageInFlight = new Map(); // cacheKey -> Promise
 const missingUserLookupCache = new Map(); // usernameLower -> expiresAt
 const singleUserLookupInFlight = new Map(); // usernameLower -> Promise
 let cloudSyncUsersLoaded = !USE_SUPABASE_CLOUDSYNC;
+let cloudSyncDirectorySyncedAt = !USE_SUPABASE_CLOUDSYNC ? Date.now() : 0;
 let cloudSyncUsersRefreshPromise = null;
 function invalidateCloudSyncUsersCache() {
   // Keep previous map as fallback while marking expired so synchronous callers never flash empty user lists
   cloudSyncUsersCache.expiresAt = 0;
   cloudSyncCountCache.expiresAt = 0;
+  cloudSyncDirectorySyncedAt = !USE_SUPABASE_CLOUDSYNC ? Date.now() : 0;
   usersPageCache.clear();
 }
 
 function buildCloudSyncUsersMap(rows) {
   const map = new Map();
+  const keyById = new Map();
+  const deleted = getDeletedUsersSet();
   for (const r of rows || []) {
     if (r && r.username) {
       const clean = String(r.username).trim();
-      if (!clean || clean.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) continue;
-      map.set(clean.toLowerCase(), {
-        id: Number(r.id),
+      const k = clean.toLowerCase();
+      if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || staleUsernameAliases.has(k)) continue;
+      const numId = Number(r.id) || 0;
+      if (numId > 0 && keyById.has(numId) && keyById.get(numId) !== k) {
+        continue;
+      }
+      map.set(k, {
+        id: numId,
         username: clean,
         createdAt: r.created_at || null,
       });
+      if (numId > 0) keyById.set(numId, k);
     }
   }
   return map;
@@ -2380,21 +2502,37 @@ function buildCloudSyncUsersMap(rows) {
 function upsertUserInCaches(row, countDelta = 0) {
   const clean = String(row?.username || "").trim();
   const key = clean.toLowerCase();
+  const numId = Number(row?.id) || 0;
   if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean)) return;
   missingUserLookupCache.delete(key);
-  saveRegisteredUsersDirCache([{ id: Number(row.id) || 0, username: clean, created_at: row.created_at || null }]);
+  staleUsernameAliases.delete(key);
+  saveRegisteredUsersDirCache([{ id: numId, username: clean, created_at: row.created_at || null }]);
   const map = cloudSyncUsersCache.map || buildCloudSyncUsersMap(collectFallbackUserRows([]));
+  // Deduplicate by positive user id if user renamed
+  if (numId > 0) {
+    for (const [existingKey, existingRec] of map.entries()) {
+      if (existingKey !== key && existingRec.id === numId) {
+        staleUsernameAliases.set(existingKey, { id: numId, username: clean });
+        map.delete(existingKey);
+        knownUsers.delete(existingKey);
+      }
+    }
+  }
   const isNew = !map.has(key);
   map.set(key, {
-    id: Number(row.id) || map.get(key)?.id || 0,
+    id: numId || map.get(key)?.id || 0,
     username: clean,
     createdAt: row.created_at || map.get(key)?.createdAt || null,
   });
   cloudSyncUsersCache.map = map;
-  if (!cloudSyncUsersCache.expiresAt) {
-    cloudSyncUsersCache.expiresAt = Date.now() + USERS_CACHE_TTL_MS;
+  // Only extend cache expiry if the baseline 50-user directory has already synced (or local SQLite mode),
+  // so logging in or opening SSE on startup never skips loading the 50 baseline offline users!
+  if (!USE_SUPABASE_CLOUDSYNC || cloudSyncDirectorySyncedAt > 0) {
+    if (!cloudSyncUsersCache.expiresAt) {
+      cloudSyncUsersCache.expiresAt = Date.now() + USERS_CACHE_TTL_MS;
+    }
+    cloudSyncUsersLoaded = true;
   }
-  cloudSyncUsersLoaded = true;
   if (countDelta > 0 && isNew) {
     const base = cloudSyncCountCache.count ?? map.size - 1;
     cloudSyncCountCache.count = Math.max(map.size, base + countDelta);
@@ -2464,7 +2602,8 @@ async function getCloudSyncUsersCountAsync(forceRefresh = false) {
 
 async function getCloudSyncUsersMapAsync(forceRefresh = false) {
   const now = Date.now();
-  if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
+  const baselineReady = !USE_SUPABASE_CLOUDSYNC || cloudSyncDirectorySyncedAt > 0;
+  if (!forceRefresh && cloudSyncUsersCache.map && baselineReady && now < cloudSyncUsersCache.expiresAt) {
     return cloudSyncUsersCache.map;
   }
   // Unconditionally deduplicate concurrent refreshes (even if forceRefresh is true)
@@ -2484,12 +2623,24 @@ async function getCloudSyncUsersMapAsync(forceRefresh = false) {
         getCloudSyncUsersCountAsync(forceRefresh),
       ]);
       const map = buildCloudSyncUsersMap(rows);
-      // Keep any live point-looked-up users accumulated in the current in-memory map
+      const mapById = new Map();
+      for (const [k, rec] of map.entries()) {
+        if (rec.id > 0) mapById.set(rec.id, k);
+      }
+      // Keep valid live point-looked-up users unless deleted or superseded by a renamed canonical id
       if (cloudSyncUsersCache.map) {
         const deleted = getDeletedUsersSet();
         for (const [k, rec] of cloudSyncUsersCache.map.entries()) {
-          if (!map.has(k) && !deleted.has(k)) map.set(k, rec);
+          if (map.has(k) || deleted.has(k) || staleUsernameAliases.has(k)) continue;
+          if (rec.id > 0 && mapById.has(rec.id) && mapById.get(rec.id) !== k) {
+            staleUsernameAliases.set(k, { id: rec.id, username: map.get(mapById.get(rec.id)).username });
+            continue;
+          }
+          map.set(k, rec);
         }
+      }
+      if (!USE_SUPABASE_CLOUDSYNC || !isSupabaseDegraded()) {
+        cloudSyncDirectorySyncedAt = Date.now();
       }
       cloudSyncUsersCache = {
         map,
@@ -2515,7 +2666,8 @@ async function getCloudSyncUsersMapAsync(forceRefresh = false) {
 
 function getCloudSyncUsersMap(forceRefresh = false) {
   const now = Date.now();
-  if (!forceRefresh && cloudSyncUsersCache.map && now < cloudSyncUsersCache.expiresAt) {
+  const baselineReady = !USE_SUPABASE_CLOUDSYNC || cloudSyncDirectorySyncedAt > 0;
+  if (!forceRefresh && cloudSyncUsersCache.map && baselineReady && now < cloudSyncUsersCache.expiresAt) {
     return cloudSyncUsersCache.map;
   }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
@@ -2527,9 +2679,14 @@ function getCloudSyncUsersMap(forceRefresh = false) {
     if (built.size > 0 || !USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) {
       cloudSyncUsersCache = {
         map: built,
-        expiresAt: now + (isSupabaseDegraded() ? SUPABASE_DEGRADED_COOLDOWN_MS : USERS_CACHE_TTL_MS),
+        expiresAt:
+          !USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()
+            ? now + (isSupabaseDegraded() ? SUPABASE_DEGRADED_COOLDOWN_MS : USERS_CACHE_TTL_MS)
+            : 0,
       };
-      cloudSyncUsersLoaded = true;
+      if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) {
+        cloudSyncUsersLoaded = true;
+      }
       return built;
     }
   } catch {
@@ -2597,8 +2754,11 @@ function getCloudSyncUser(username) {
 
 function touchKnownUser(username, extra = {}) {
   if (!username) return;
-  const clean = String(username).trim();
-  if (!clean) return;
+  const rawClean = String(username).trim();
+  if (!rawClean) return;
+  const rawKey = rawClean.toLowerCase();
+  const alias = staleUsernameAliases.get(rawKey);
+  const clean = alias ? alias.username : rawClean;
   const key = clean.toLowerCase();
   const csMap = getCloudSyncUsersMap();
   if (isTemporaryGuestName(clean) && !csMap.has(key)) return;
@@ -2624,19 +2784,27 @@ function touchKnownUser(username, extra = {}) {
 function getPresenceSnapshot() {
   ensureChatMetaLoaded();
   const csMap = getCloudSyncUsersMap();
+  const csById = new Map();
+  for (const rec of csMap.values()) {
+    const uid = Number(rec?.id) || 0;
+    if (uid > 0 && !csById.has(uid)) csById.set(uid, rec);
+  }
   const now = Date.now();
   const usersLoaded = Boolean(!USE_SUPABASE_CLOUDSYNC || cloudSyncUsersLoaded);
+  const deletedSet = getDeletedUsersSet();
 
-  // Prune stale non-CloudSync entries only after the authoritative user directory has loaded
-  if (usersLoaded) {
-    for (const [k] of knownUsers.entries()) {
-      if ((csMap.size > 0 && !csMap.has(k)) || (isTemporaryGuestName(k) && !csMap.has(k))) {
-        knownUsers.delete(k);
-      }
+  // Prune stale, deleted, aliased, or non-CloudSync entries once directory is loaded
+  for (const [k] of knownUsers.entries()) {
+    if (
+      deletedSet.has(k) ||
+      staleUsernameAliases.has(k) ||
+      (usersLoaded && ((csMap.size > 0 && !csMap.has(k)) || (isTemporaryGuestName(k) && !csMap.has(k))))
+    ) {
+      knownUsers.delete(k);
     }
   }
 
-  // Ensure every registered CloudSync user is in knownUsers
+  // Ensure every registered CloudSync user is in knownUsers (keeping canonical username)
   for (const [k, csUser] of csMap.entries()) {
     if (!knownUsers.has(k)) {
       knownUsers.set(k, {
@@ -2651,38 +2819,61 @@ function getPresenceSnapshot() {
     }
   }
 
-  const onlineByUsername = new Map();
-  const deletedSet = getDeletedUsersSet();
+  const onlineByAccount = new Map();
+  const onlineUsernameKeys = new Set();
   const considerOnlineSession = (c, maxAgeMs) => {
     if (!c || now - (c.lastSeen || 0) > maxAgeMs) return;
-    const clean = String(c.username || "").trim();
-    if (!clean) return;
-    const key = clean.toLowerCase();
+    const rawClean = String(c.username || "").trim();
+    if (!rawClean) return;
+    const rawKey = rawClean.toLowerCase();
+    if (deletedSet.has(rawKey)) return;
+
+    const alias = staleUsernameAliases.get(rawKey);
+    const sessionUserId = Number(c.userId) || 0;
+    // Only remap via userId when rawKey is absent from csMap (renamed/stale tab) or already matches that id
+    let csRecord = alias ? csMap.get(alias.username.toLowerCase()) || alias : csMap.get(rawKey) || null;
+    if (!csRecord && sessionUserId > 0 && csById.has(sessionUserId)) {
+      csRecord = csById.get(sessionUserId);
+    }
+    const key = csRecord ? csRecord.username.toLowerCase() : rawKey;
     if (deletedSet.has(key)) return;
-    const hasVerifiedSession = Boolean(c.verifiedUsername && c.verifiedUsername === key);
-    if (isTemporaryGuestName(clean) && !csMap.has(key) && !hasVerifiedSession) return;
+
+    const hasVerifiedSession = Boolean(
+      c.verifiedUsername && (c.verifiedUsername === rawKey || c.verifiedUsername === key)
+    );
+    if (isTemporaryGuestName(rawClean) && !csMap.has(key) && !hasVerifiedSession) return;
     if (usersLoaded && csMap.size > 0 && !csMap.has(key)) {
-      const allowDegraded = isSupabaseDegraded() && !isTemporaryGuestName(clean);
+      const allowDegraded = isSupabaseDegraded() && !isTemporaryGuestName(rawClean);
       if (!hasVerifiedSession && !allowDegraded) {
         return;
       }
     }
 
-    const csRecord = csMap.get(key);
-    const canonicalName = csRecord ? csRecord.username : clean;
-    const prof = userProfiles.get(key) || {};
-    const timeoutEntry = getActiveTimeout(key);
+    const canonicalName = csRecord ? csRecord.username : rawClean;
+    const canonicalKey = canonicalName.toLowerCase();
+    const resolvedId = Number(csRecord?.id || sessionUserId || 0);
+    const dedupKey = resolvedId > 0 ? `id:${resolvedId}` : `name:${canonicalKey}`;
+    onlineUsernameKeys.add(canonicalKey);
+    onlineUsernameKeys.add(rawKey);
+
+    const prof = userProfiles.get(canonicalKey) || userProfiles.get(rawKey) || {};
+    const timeoutEntry = getActiveTimeout(canonicalKey) || getActiveTimeout(rawKey);
     const role = getUserChatRole(canonicalName);
-    const existing = onlineByUsername.get(key);
+    const existing = onlineByAccount.get(dedupKey);
     const cIdle = Boolean(c.isIdle);
-    // Prefer an active (non-idle) session, or playing a game, or most recently seen
+    const incomingMatchesCanonical = rawKey === canonicalKey;
+    const existingMatchesCanonical = existing ? existing.username.toLowerCase() === canonicalKey : false;
+    // Prefer latest canonical username session, then active (non-idle), playing game, or most recent heartbeat
     const preferIncoming =
       !existing ||
-      (Boolean(existing.isIdle) && !cIdle) ||
-      (existing.isIdle === cIdle && ((c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen));
+      (incomingMatchesCanonical && !existingMatchesCanonical) ||
+      (incomingMatchesCanonical === existingMatchesCanonical &&
+        ((Boolean(existing.isIdle) && !cIdle) ||
+          (existing.isIdle === cIdle && ((c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen))));
     if (preferIncoming) {
-      onlineByUsername.set(key, {
+      onlineByAccount.set(dedupKey, {
         id: c.id,
+        userId: resolvedId || undefined,
         username: canonicalName,
         online: true,
         isIdle: cIdle,
@@ -2695,7 +2886,7 @@ function getPresenceSnapshot() {
         statusText: prof.statusText || "",
         customization: prof.customization || null,
         role,
-        isGoat: goatUsers.has(key),
+        isGoat: goatUsers.has(canonicalKey),
         isTimedOut: Boolean(timeoutEntry),
         timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
         createdAt: csRecord?.createdAt || null,
@@ -2711,31 +2902,36 @@ function getPresenceSnapshot() {
     considerOnlineSession(hb, HTTP_HEARTBEAT_PRESENCE_TTL_MS);
   }
 
-  const onlineUsers = Array.from(onlineByUsername.values());
+  const onlineUsers = Array.from(onlineByAccount.values());
   const offlineUsers = [];
+  const seenOfflineKeys = new Set();
   for (const [key, u] of knownUsers.entries()) {
-    if (!onlineByUsername.has(key)) {
-      const csRecord = csMap.get(key);
-      const prof = userProfiles.get(key) || {};
-      const canonicalName = csRecord ? csRecord.username : u.username;
-      const timeoutEntry = getActiveTimeout(key);
-      offlineUsers.push({
-        username: canonicalName,
-        online: false,
-        game: "",
-        isPlayingGame: false,
-        gameStartedAt: 0,
-        lastSeen: u.lastSeen || 0,
-        bio: prof.bio || "",
-        statusText: prof.statusText || "",
-        customization: prof.customization || null,
-        role: getUserChatRole(canonicalName),
-        isGoat: goatUsers.has(key),
-        isTimedOut: Boolean(timeoutEntry),
-        timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
-        createdAt: csRecord?.createdAt || null,
-      });
-    }
+    if (deletedSet.has(key) || staleUsernameAliases.has(key)) continue;
+    const csRecord = csMap.get(key);
+    if (csRecord?.id > 0 && onlineByAccount.has(`id:${csRecord.id}`)) continue;
+    if (onlineUsernameKeys.has(key) || onlineByAccount.has(`name:${key}`)) continue;
+    const prof = userProfiles.get(key) || {};
+    const canonicalName = csRecord ? csRecord.username : u.username;
+    const canonicalKey = canonicalName.toLowerCase();
+    if (onlineUsernameKeys.has(canonicalKey) || seenOfflineKeys.has(canonicalKey)) continue;
+    seenOfflineKeys.add(canonicalKey);
+    const timeoutEntry = getActiveTimeout(canonicalKey);
+    offlineUsers.push({
+      username: canonicalName,
+      online: false,
+      game: "",
+      isPlayingGame: false,
+      gameStartedAt: 0,
+      lastSeen: u.lastSeen || 0,
+      bio: prof.bio || "",
+      statusText: prof.statusText || "",
+      customization: prof.customization || null,
+      role: getUserChatRole(canonicalName),
+      isGoat: goatUsers.has(canonicalKey),
+      isTimedOut: Boolean(timeoutEntry),
+      timeoutUntil: timeoutEntry ? timeoutEntry.until : 0,
+      createdAt: csRecord?.createdAt || null,
+    });
   }
 
   const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
@@ -2898,6 +3094,7 @@ app.get("/api/live/stream", async (req, res) => {
     res,
     id: clientId,
     instanceId,
+    userId: authUser ? Number(authUser.id) || 0 : 0,
     username,
     verifiedUsername: authUser ? authUser.username.toLowerCase() : null,
     ip,
@@ -2960,6 +3157,7 @@ app.post("/api/live/heartbeat", async (req, res) => {
   const rawUser = String(username || "").trim();
   const effectiveUser = authUser ? authUser.username : rawUser;
   const verifiedLower = authUser ? authUser.username.toLowerCase() : null;
+  const authUserId = authUser ? Number(authUser.id) || 0 : 0;
   if (authUser) {
     upsertUserInCaches({ id: authUser.id, username: authUser.username });
   }
@@ -2968,11 +3166,13 @@ app.post("/api/live/heartbeat", async (req, res) => {
   if (clientId && liveClients.has(clientId)) {
     const client = liveClients.get(clientId);
     if (cleanInstance) client.instanceId = cleanInstance;
+    if (authUserId > 0) client.userId = authUserId;
     if (verifiedLower && client.verifiedUsername !== verifiedLower) {
       client.verifiedUsername = verifiedLower;
       changed = true;
     } else if (!authUser && isTemporaryGuestName(rawUser) && client.verifiedUsername) {
       client.verifiedUsername = null;
+      client.userId = 0;
       changed = true;
     }
     if (effectiveUser && client.username !== effectiveUser) {
@@ -3028,6 +3228,7 @@ app.post("/api/live/heartbeat", async (req, res) => {
     httpHeartbeats.set(clientId, {
       id: String(clientId),
       instanceId: cleanInstance || prevHb?.instanceId || "",
+      userId: authUserId || (isTemporaryGuestName(rawUser) ? 0 : prevHb?.userId || 0),
       username: effectiveUser,
       verifiedUsername: verifiedLower,
       page: typeof page === "string" ? page.slice(0, 200) : "/",
