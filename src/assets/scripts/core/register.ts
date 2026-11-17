@@ -80,6 +80,7 @@ class sunshineConnectionManager {
   _retryCount: number;
   _isRecovering: boolean;
   _tabWasHiddenWhileConnected: boolean;
+  _hiddenAtMs: number;
   _swEnsurePromises: Map<string, Promise<ServiceWorkerRegistration>>;
   _inRetryBackoff: boolean;
 
@@ -94,6 +95,7 @@ class sunshineConnectionManager {
     this._retryCount = 0;
     this._isRecovering = false;
     this._tabWasHiddenWhileConnected = false;
+    this._hiddenAtMs = 0;
     this._swEnsurePromises = new Map();
     this._inRetryBackoff = false;
 
@@ -804,14 +806,18 @@ class sunshineConnectionManager {
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         this._tabWasHiddenWhileConnected = this.state === STATES.CONNECTED;
+        this._hiddenAtMs = Date.now();
       } else {
         const resumeFromHidden = this._tabWasHiddenWhileConnected;
+        const hiddenDurationMs = this._hiddenAtMs ? Date.now() - this._hiddenAtMs : 0;
         this._tabWasHiddenWhileConnected = false;
-        if (resumeFromHidden && this.state === STATES.CONNECTED) {
+        this._hiddenAtMs = 0;
+        const shouldForceReapply = resumeFromHidden && hiddenDurationMs >= 25000;
+        if (shouldForceReapply && this.state === STATES.CONNECTED) {
           this._resetTransportReady();
         }
         setTimeout(
-          () => void this.recoverOnWake(resumeFromHidden ? { forceReapply: true } : undefined),
+          () => void this.recoverOnWake(shouldForceReapply ? { forceReapply: true } : undefined),
           0,
         );
       }

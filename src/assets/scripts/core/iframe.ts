@@ -317,12 +317,16 @@ async function prepareProxyNavigation(
     ]);
     const resolvedWaitTransport =
       (app?.["waitForTransport"] as typeof waitTransportFn) || waitTransportFn;
+    let transportReady = true;
     if (typeof resolvedWaitTransport === "function") {
-      await resolvedWaitTransport(4500).catch((err: unknown) => {
-        if (err instanceof Error && err.message) failureReason = err.message;
-      });
+      transportReady = await resolvedWaitTransport(4500)
+        .then(() => true)
+        .catch((err: unknown) => {
+          if (err instanceof Error && err.message) failureReason = err.message;
+          return false;
+        });
     }
-    if (await isActiveServiceWorkerForScope(targetScope)) {
+    if (transportReady && (await isActiveServiceWorkerForScope(targetScope))) {
       return { ready: true };
     }
   } catch (e: unknown) {
@@ -644,7 +648,9 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
       (!!doc.getElementById("msgBox") ||
         bodyText.includes("Your content will be available very soon"));
     const isProxyTransientError =
-      newTitle === "Scramjet" || newTitle === "Error";
+      (newTitle === "Scramjet" && bodyText.includes("Initializing proxy")) ||
+      ((newTitle === "Error" || newTitle === "504") &&
+        bodyText.includes("gateway timeout"));
     const currentUrl = iframe.dataset.manualUrl || iframe.src;
     const isProxyTarget = !!getProxyScopeFromUrl(currentUrl);
     const shouldRecoverProxy =

@@ -4,6 +4,7 @@ import {
   getClientId,
   detectCurrentGameSession,
   isClientAutoIdle,
+  isLiveStreamConnected,
 } from "../core/liveClient.ts";
 import { formatPlayTime } from "../core/cookieCoins.ts";
 import {
@@ -491,6 +492,8 @@ export default function ChatModal() {
   const isOpenRef = useRef(isOpen);
   isOpenRef.current = isOpen;
   const seenMessageIdsRef = useRef<Set<string>>(new Set(messages.map((m) => m.id)));
+  const pendingMessageIdsRef = useRef<Set<string>>(new Set());
+  const lastPresenceAtRef = useRef<number>(0);
   const initialStateLoadedRef = useRef(false);
 
   // WebRTC & WebAudio refs
@@ -896,13 +899,16 @@ export default function ChatModal() {
             existing &&
             incoming.edited &&
             (existing.text !== incoming.text || !existing.edited || existing.editedAt !== incoming.editedAt);
+          const reactionsChanged =
+            existing &&
+            JSON.stringify(existing.reactions || {}) !== JSON.stringify(incoming.reactions || {});
           const metaChanged =
             existing &&
             (existing.role !== incoming.role ||
               existing.avatarColor !== incoming.avatarColor ||
               JSON.stringify(existing.customization || null) !==
                 JSON.stringify(incoming.customization || null));
-          if (editChanged || metaChanged) {
+          if (editChanged || reactionsChanged || metaChanged) {
             const next = prev.slice();
             next[existingIdx] = {
               ...existing,
@@ -913,6 +919,7 @@ export default function ChatModal() {
                     ...(incoming.editedAt ? { editedAt: incoming.editedAt } : {}),
                   }
                 : {}),
+              ...(reactionsChanged ? { reactions: incoming.reactions || {} } : {}),
               ...(incoming.role ? { role: incoming.role } : {}),
               ...(incoming.avatarColor ? { avatarColor: incoming.avatarColor } : {}),
               ...(incoming.customization ? { customization: incoming.customization } : {}),
@@ -924,7 +931,23 @@ export default function ChatModal() {
           }
           return prev;
         }
-        const updated = [...prev, incoming].slice(-250);
+        const incomingTs = Number(new Date(incoming.timestamp).getTime()) || 0;
+        let updated: ChatMessage[];
+        if (
+          prev.length > 0 &&
+          incomingTs > 0 &&
+          incomingTs < (Number(new Date(prev[prev.length - 1]!.timestamp).getTime()) || 0)
+        ) {
+          updated = [...prev, incoming]
+            .sort(
+              (a, b) =>
+                (Number(new Date(a.timestamp).getTime()) || 0) -
+                (Number(new Date(b.timestamp).getTime()) || 0),
+            )
+            .slice(-250);
+        } else {
+          updated = [...prev, incoming].slice(-250);
+        }
         try {
           localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(updated));
         } catch {}
@@ -1506,6 +1529,7 @@ export default function ChatModal() {
       try { authToken = localStorage.getItem("auth_token") || ""; } catch {}
       fetch(`/api/chat/state?username=${encodeURIComponent(cloudUser || "")}`, {
         credentials: "same-origin",
+        cache: "no-store",
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
       })
         .then((r) => (r.ok ? r.json() : null))
@@ -1513,8 +1537,142 @@ export default function ChatModal() {
           if (!data) return;
           initialStateLoadedRef.current = true;
           if (Array.isArray(data.messages)) {
-            for (const m of data.messages) {
-              ingestIncomingMessage(m, { silent: isInitial });
+            const serverMsgs = data.messages as ChatMessage[];
+            const hasMore = Boolean(data.hasMoreMessages);
+            const myLower = (cloudUser || "guest").toLowerCase();
+            const serverIds = new Set<string>();
+            const newlyArrived: ChatMessage[] = [];
+            let minServerTs = Infinity;
+            const nowTs = Date.now();
+
+            for (const m of serverMsgs) {
+              if (!m || !m.id) continue;
+              if (m.channel?.startsWith("dm:")) {
+                const parts = m.channel.slice(3).split(":");
+                if (!parts.includes(myLower)) continue;
+                const partner = parts[0] === myLower ? parts[1] : parts[0];
+                if (partner && !blockedUsers.includes(partner.toLowerCase())) {
+                  setDmPeers((prev) => {
+                    if (prev.some((p) => p.toLowerCase() === partner.toLowerCase())) return prev;
+                    const next = [partner, ...prev];
+                    try {
+                      localStorage.setItem("cookie_chat_dm_peers_v1", JSON.stringify(next));
+                    } catch {}
+                    return next;
+                  });
+                }
+              }
+              serverIds.add(m.id);
+              const ts = Number(new Date(m.timestamp).getTime()) || 0;
+              if (ts > 0 && ts < minServerTs) minServerTs = ts;
+              if (!seenMessageIdsRef.current.has(m.id)) {
+                seenMessageIdsRef.current.add(m.id);
+                newlyArrived.push(m);
+              }
+            }
+
+            setMessages((prev) => {
+              let changed = false;
+              const byServerId = new Map<string, ChatMessage>();
+              for (const m of serverMsgs) {
+                if (m?.id && serverIds.has(m.id)) byServerId.set(m.id, m);
+              }
+
+              const kept: ChatMessage[] = [];
+              const seenKept = new Set<string>();
+              for (const existing of prev) {
+                const srv = byServerId.get(existing.id);
+                if (srv) {
+                  seenKept.add(existing.id);
+                  const editChanged =
+                    Boolean(srv.edited) !== Boolean(existing.edited) ||
+                    existing.text !== srv.text ||
+                    existing.editedAt !== srv.editedAt;
+                  const reactionsChanged =
+                    JSON.stringify(existing.reactions || {}) !==
+                    JSON.stringify(srv.reactions || {});
+                  const metaChanged =
+                    existing.role !== srv.role ||
+                    existing.avatarColor !== srv.avatarColor ||
+                    JSON.stringify(existing.customization || null) !==
+                      JSON.stringify(srv.customization || null);
+                  if (editChanged || reactionsChanged || metaChanged) {
+                    changed = true;
+                    kept.push({
+                      ...existing,
+                      text: srv.text,
+                      ...(srv.edited !== undefined ? { edited: srv.edited } : {}),
+                      ...(srv.editedAt !== undefined ? { editedAt: srv.editedAt } : {}),
+                      reactions: srv.reactions || {},
+                      ...(srv.role ? { role: srv.role } : {}),
+                      ...(srv.avatarColor ? { avatarColor: srv.avatarColor } : {}),
+                      ...(srv.customization ? { customization: srv.customization } : {}),
+                    });
+                  } else {
+                    kept.push(existing);
+                  }
+                } else {
+                  const exTs = Number(new Date(existing.timestamp).getTime()) || 0;
+                  const isPending =
+                    pendingMessageIdsRef.current.has(existing.id) ||
+                    (exTs > 0 && nowTs - exTs < 5000);
+                  const withinServerWindow =
+                    !hasMore || (minServerTs < Infinity && exTs > 0 && exTs >= minServerTs);
+                  if (!isPending && withinServerWindow) {
+                    changed = true;
+                  } else {
+                    kept.push(existing);
+                  }
+                }
+              }
+
+              for (const srv of serverMsgs) {
+                if (srv?.id && serverIds.has(srv.id) && !seenKept.has(srv.id)) {
+                  changed = true;
+                  kept.push(srv);
+                }
+              }
+
+              if (!changed) return prev;
+              const sorted = kept
+                .sort(
+                  (a, b) =>
+                    (Number(new Date(a.timestamp).getTime()) || 0) -
+                    (Number(new Date(b.timestamp).getTime()) || 0),
+                )
+                .slice(-250);
+              try {
+                localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(sorted));
+              } catch {}
+              return sorted;
+            });
+
+            if (!isInitial && newlyArrived.length > 0) {
+              for (const msg of newlyArrived) {
+                const authorLower = (msg.author || "").toLowerCase();
+                if (authorLower === myLower || blockedUsers.includes(authorLower)) continue;
+                if (!isOpenRef.current || msg.channel !== activeChannelRef.current) {
+                  setUnreadCounts((prev) => ({
+                    ...prev,
+                    [msg.channel]: (prev[msg.channel] || 0) + 1,
+                  }));
+                }
+                const isDm = msg.channel.startsWith("dm:");
+                const isMention = Boolean(
+                  cloudUser && msg.text.toLowerCase().includes(`@${cloudUser.toLowerCase()}`),
+                );
+                if (
+                  (isDm || isMention) &&
+                  (!isOpenRef.current || activeChannelRef.current !== msg.channel)
+                ) {
+                  const toastPreview = msg.text.trim() || (msg.gifUrl ? "[gif]" : "");
+                  notifyDmOrMentionToast(msg.author, toastPreview, isDm, () => {
+                    setActiveChannel(msg.channel);
+                    setIsOpen(true);
+                    setUnreadCounts((prev) => ({ ...prev, [msg.channel]: 0 }));
+                  });
+                }
+              }
             }
           }
           if (Array.isArray(data.groups)) {
@@ -1523,11 +1681,15 @@ export default function ChatModal() {
           if (data.voiceRooms && typeof data.voiceRooms === "object") {
             setVoiceRooms((prev) => ({ ...prev, ...data.voiceRooms }));
           }
-          if (Array.isArray(data.onlineUsers)) {
-            setServerOnlineUsers(data.onlineUsers);
-          }
-          if (Array.isArray(data.offlineUsers)) {
-            setServerOfflineUsers(data.offlineUsers);
+          const incomingPresenceAt = Number(data.presenceAt || 0);
+          if (!incomingPresenceAt || incomingPresenceAt >= lastPresenceAtRef.current) {
+            if (incomingPresenceAt) lastPresenceAtRef.current = incomingPresenceAt;
+            if (Array.isArray(data.onlineUsers)) {
+              setServerOnlineUsers(data.onlineUsers);
+            }
+            if (Array.isArray(data.offlineUsers)) {
+              setServerOfflineUsers(data.offlineUsers);
+            }
           }
           if (Array.isArray(data.staffMods)) {
             setStaffMods(data.staffMods);
@@ -1612,16 +1774,26 @@ export default function ChatModal() {
     const onVisWake = () => {
       if (!document.hidden) fetchChatAndPresenceState();
     };
+    const onSyncWake = () => fetchChatAndPresenceState();
     document.addEventListener("visibilitychange", onVisWake);
-    const pollInterval = window.setInterval(
-      fetchChatAndPresenceState,
-      isOpen ? 8000 : 45000
-    );
+    window.addEventListener("sunshine-sse-open", onSyncWake);
+    window.addEventListener("online", onSyncWake);
+    let lastPollAt = Date.now();
+    const pollInterval = window.setInterval(() => {
+      const sseOpen = isLiveStreamConnected();
+      const targetInterval = isOpen ? (sseOpen ? 12000 : 3500) : sseOpen ? 40000 : 12000;
+      if (Date.now() - lastPollAt >= targetInterval - 200) {
+        lastPollAt = Date.now();
+        fetchChatAndPresenceState();
+      }
+    }, 3500);
     return () => {
       window.clearInterval(pollInterval);
       document.removeEventListener("visibilitychange", onVisWake);
+      window.removeEventListener("sunshine-sse-open", onSyncWake);
+      window.removeEventListener("online", onSyncWake);
     };
-  }, [cloudUser, isOpen, ingestIncomingMessage]);
+  }, [cloudUser, isOpen, blockedUsers]);
 
   useEffect(() => {
     setReplyingTo(null);
@@ -1765,6 +1937,9 @@ export default function ChatModal() {
     const onSsePresence = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
+      const incomingAt = Number(detail.snapshotAt || 0);
+      if (incomingAt && incomingAt < lastPresenceAtRef.current) return;
+      if (incomingAt) lastPresenceAtRef.current = incomingAt;
       if (Array.isArray(detail.onlineUsers)) {
         setServerOnlineUsers(detail.onlineUsers);
       }
@@ -1783,7 +1958,7 @@ export default function ChatModal() {
           if (!match) return prev;
           const isOnline = Array.isArray(detail.onlineUsers)
             ? detail.onlineUsers.some((u: OnlineUser) => u.username?.toLowerCase() === lower)
-            : prev.isOnline;
+            : prev.online;
           return {
             ...prev,
             online: isOnline,
@@ -1830,37 +2005,6 @@ export default function ChatModal() {
     window.addEventListener("sunshine-voice-event", onSseVoice);
     window.addEventListener("sunshine-presence-event", onSsePresence);
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen) {
-        if (editingMessageId) {
-          setEditingMessageId(null);
-        } else if (reactPickerMessageId) {
-          setReactPickerMessageId(null);
-        } else if (reactingMessageId) {
-          setReactingMessageId(null);
-        } else if (groupModalMode) {
-          setGroupModalMode(null);
-        } else if (confirmDeleteChat) {
-          setConfirmDeleteChat(null);
-        } else if (showStaffModal) {
-          setShowStaffModal(false);
-        } else if (showCustomizer) {
-          setShowCustomizer(false);
-        } else if (showGifPicker) {
-          setShowGifPicker(false);
-        } else if (showEmojiPicker) {
-          setShowEmojiPicker(false);
-        } else if (replyingTo) {
-          setReplyingTo(null);
-        } else if (viewingProfileUsername) {
-          setViewingProfileUsername(null);
-        } else {
-          setIsOpen(false);
-        }
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-
     try {
       const bc = new BroadcastChannel("cookie_chat_v2_channel");
       bc.onmessage = (event) => {
@@ -1874,6 +2018,11 @@ export default function ChatModal() {
             text: typeof event.data.text === "string" ? event.data.text : m.text,
             edited: true,
             ...(event.data.editedAt ? { editedAt: Number(event.data.editedAt) } : {}),
+          }));
+        } else if (event.data?.type === "MESSAGE_REACTED" && event.data.messageId) {
+          updateMessageLocally(String(event.data.messageId), (m) => ({
+            ...m,
+            reactions: event.data.reactions && typeof event.data.reactions === "object" ? event.data.reactions : {},
           }));
         } else if (event.data?.type === "CHANNEL_CLEARED" && event.data.channel) {
           filterMessagesLocally((m) => m.channel !== event.data.channel);
@@ -1899,9 +2048,50 @@ export default function ChatModal() {
       window.removeEventListener("sunshine-chat-event", onSseChat);
       window.removeEventListener("sunshine-voice-event", onSseVoice);
       window.removeEventListener("sunshine-presence-event", onSsePresence);
-      window.removeEventListener("keydown", handleKeyDown);
       broadcastRef.current?.close();
     };
+  }, [
+    cloudUser,
+    ingestIncomingMessage,
+    filterMessagesLocally,
+    updateMessageLocally,
+    applyProfileUpdateLocally,
+    handleVoiceEvent,
+    handleOpenCustomizer,
+  ]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (editingMessageId) {
+        setEditingMessageId(null);
+      } else if (reactPickerMessageId) {
+        setReactPickerMessageId(null);
+      } else if (reactingMessageId) {
+        setReactingMessageId(null);
+      } else if (groupModalMode) {
+        setGroupModalMode(null);
+      } else if (confirmDeleteChat) {
+        setConfirmDeleteChat(null);
+      } else if (showStaffModal) {
+        setShowStaffModal(false);
+      } else if (showCustomizer) {
+        setShowCustomizer(false);
+      } else if (showGifPicker) {
+        setShowGifPicker(false);
+      } else if (showEmojiPicker) {
+        setShowEmojiPicker(false);
+      } else if (replyingTo) {
+        setReplyingTo(null);
+      } else if (viewingProfileUsername) {
+        setViewingProfileUsername(null);
+      } else {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     isOpen,
     editingMessageId,
@@ -1915,13 +2105,6 @@ export default function ChatModal() {
     showGifPicker,
     showEmojiPicker,
     viewingProfileUsername,
-    cloudUser,
-    ingestIncomingMessage,
-    filterMessagesLocally,
-    updateMessageLocally,
-    applyProfileUpdateLocally,
-    handleVoiceEvent,
-    handleOpenCustomizer,
   ]);
 
   const fetchKlipyGifs = useCallback(
@@ -2127,6 +2310,7 @@ export default function ChatModal() {
         recipient,
       };
 
+      pendingMessageIdsRef.current.add(newMsg.id);
       ingestIncomingMessage(newMsg);
       if (text) setInputText("");
       if (activeReply) setReplyingTo(null);
@@ -2142,6 +2326,7 @@ export default function ChatModal() {
       try { sendToken = localStorage.getItem("auth_token") || ""; } catch {}
       fetch("/api/chat/send", {
         method: "POST",
+        credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
           ...(sendToken ? { Authorization: `Bearer ${sendToken}` } : {}),
@@ -2151,6 +2336,7 @@ export default function ChatModal() {
         }),
       })
         .then(async (res) => {
+          pendingMessageIdsRef.current.delete(newMsg.id);
           if (!res.ok) {
             filterMessagesLocally((m) => m.id !== newMsg.id);
             const errData = await res.json().catch(() => null);
@@ -2160,9 +2346,16 @@ export default function ChatModal() {
             if (errData?.error) {
               notifyToast(errData.error, "error");
             }
+          } else {
+            const okData = await res.json().catch(() => null);
+            if (okData?.message) {
+              ingestIncomingMessage(okData.message);
+            }
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          pendingMessageIdsRef.current.delete(newMsg.id);
+        });
     } finally {
       setIsSending(false);
     }
@@ -2386,6 +2579,13 @@ export default function ChatModal() {
         }
         if (data.reactions) {
           updateMessageLocally(messageId, (m) => ({ ...m, reactions: data.reactions }));
+          try {
+            broadcastRef.current?.postMessage({
+              type: "MESSAGE_REACTED",
+              messageId,
+              reactions: data.reactions,
+            });
+          } catch {}
         }
       } catch {}
     },

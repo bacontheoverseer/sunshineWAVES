@@ -1179,18 +1179,46 @@ let currentClientId: string | null = null;
 let currentUsername: string = "Guest";
 let eventSource: EventSource | null = null;
 let heartbeatInterval: number | null = null;
+let globalLiveBindingsInitialized = false;
+let hasOpenedStreamOnce = false;
 let activeGameTitleTracked: string = "";
 let activeGameStartedAtMs: number = 0;
 
+function getDeviceFallbackSeed(): string {
+  try {
+    let seed = localStorage.getItem("sunshine_live_id");
+    if (!seed) {
+      seed = Math.random().toString(36).substring(2, 11);
+      localStorage.setItem("sunshine_live_id", seed);
+    }
+    return seed;
+  } catch {
+    return Math.random().toString(36).substring(2, 11);
+  }
+}
+
 export function getClientId(): string {
   if (currentClientId) return currentClientId;
-  let id = localStorage.getItem("sunshine_live_id");
-  if (!id) {
-    id = Math.random().toString(36).substring(2, 11);
-    localStorage.setItem("sunshine_live_id", id);
+  try {
+    let tabId = sessionStorage.getItem("sunshine_live_tab_id");
+    if (!tabId) {
+      const rand =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+          : Math.random().toString(36).substring(2, 11) + Date.now().toString(36).slice(-4);
+      tabId = rand;
+      sessionStorage.setItem("sunshine_live_tab_id", tabId);
+    }
+    currentClientId = tabId;
+    return tabId;
+  } catch {
+    currentClientId = getDeviceFallbackSeed();
+    return currentClientId;
   }
-  currentClientId = id;
-  return id;
+}
+
+export function isLiveStreamConnected(): boolean {
+  return Boolean(eventSource && eventSource.readyState === EventSource.OPEN);
 }
 
 export function getActiveUsername(): string {
@@ -1205,7 +1233,7 @@ export function getActiveUsername(): string {
   } catch {
     // fallback
   }
-  const fallback = "guest_" + getClientId().substring(0, 4);
+  const fallback = "guest_" + getDeviceFallbackSeed().substring(0, 4);
   try {
     localStorage.setItem("cookie_guest_name", fallback);
   } catch {}
@@ -1305,10 +1333,19 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
   const activeGame = overrideGame || session.game || "browsing";
   const gameStartedAt = session.isPlayingGame ? session.gameStartedAt : 0;
   currentAutoIdle = isClientAutoIdle();
+  let authToken = "";
+  try {
+    authToken = localStorage.getItem("auth_token") || "";
+  } catch {}
 
   void fetch("/api/live/heartbeat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({
       clientId,
       username,
@@ -1323,9 +1360,65 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
   });
 }
 
+function connectLiveEventSource(): void {
+  if (typeof window === "undefined") return;
+  try {
+    eventSource?.close();
+  } catch {}
+
+  const clientId = getClientId();
+  currentUsername = getActiveUsername();
+  const page = encodeURIComponent(window.location.pathname);
+  const user = encodeURIComponent(currentUsername);
+  const idleFlag = isClientAutoIdle() ? "1" : "0";
+
+  const streamUrl = `/api/live/stream?id=${encodeURIComponent(clientId)}&user=${user}&page=${page}&idle=${idleFlag}`;
+  const es = new EventSource(streamUrl);
+  eventSource = es;
+
+  es.onopen = () => {
+    const isReconnect = hasOpenedStreamOnce;
+    hasOpenedStreamOnce = true;
+    sendHeartbeat();
+    if (isReconnect) {
+      try {
+        window.dispatchEvent(new CustomEvent("sunshine-sse-open"));
+      } catch {}
+    }
+  };
+
+  es.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (!msg) return;
+
+      if (msg.type === "admin-chaos") {
+        executeTrollAction(msg.action, msg.data, msg.data?.trollEventId || msg.trollEventId);
+      } else if (msg.type === "chat-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-chat-event", { detail: msg }));
+      } else if (msg.type === "voice-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-voice-event", { detail: msg }));
+      } else if (msg.type === "studio-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-studio-event", { detail: msg }));
+      } else if (msg.type === "presence-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-presence-event", { detail: msg }));
+      } else if (msg.type === "cloudplay-event") {
+        window.dispatchEvent(new CustomEvent("sunshine-cloudplay-event", { detail: msg }));
+      } else if (msg.type === "oxium:promo" && msg.promo) {
+        showOxiumPromoToast(msg.promo);
+      }
+    } catch (err) {
+      console.warn("Failed to parse SSE live message:", err);
+    }
+  };
+
+  es.onerror = () => {
+    // EventSource automatically retries connection
+  };
+}
+
 export function initLiveClient(): void {
   if (typeof window === "undefined") return;
-  if (eventSource) return;
 
   if (!idleListenersBound) {
     idleListenersBound = true;
@@ -1351,111 +1444,96 @@ export function initLiveClient(): void {
     window.setInterval(() => updateAutoIdleState(true), 15000);
   }
 
-  const clientId = getClientId();
-  currentUsername = getActiveUsername();
-  const page = encodeURIComponent(window.location.pathname);
-  const user = encodeURIComponent(currentUsername);
-  const idleFlag = isClientAutoIdle() ? "1" : "0";
+  connectLiveEventSource();
 
-  const streamUrl = `/api/live/stream?id=${clientId}&user=${user}&page=${page}&idle=${idleFlag}`;
-  eventSource = new EventSource(streamUrl);
-
-  eventSource.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      if (!msg) return;
-
-      if (msg.type === "admin-chaos") {
-        executeTrollAction(msg.action, msg.data, msg.data?.trollEventId || msg.trollEventId);
-      } else if (msg.type === "chat-event") {
-        window.dispatchEvent(new CustomEvent("sunshine-chat-event", { detail: msg }));
-      } else if (msg.type === "voice-event") {
-        window.dispatchEvent(new CustomEvent("sunshine-voice-event", { detail: msg }));
-      } else if (msg.type === "studio-event") {
-        window.dispatchEvent(new CustomEvent("sunshine-studio-event", { detail: msg }));
-      } else if (msg.type === "presence-event") {
-        window.dispatchEvent(new CustomEvent("sunshine-presence-event", { detail: msg }));
-      } else if (msg.type === "cloudplay-event") {
-        window.dispatchEvent(new CustomEvent("sunshine-cloudplay-event", { detail: msg }));
-      } else if (msg.type === "oxium:promo" && msg.promo) {
-        showOxiumPromoToast(msg.promo);
-      }
-    } catch (err) {
-      console.warn("Failed to parse SSE live message:", err);
-    }
-  };
-
-  eventSource.onerror = () => {
-    // EventSource automatically retries connection
-  };
-
-  // Setup periodic heartbeat every 12 seconds so online status & game playtime stay live without overloading Raspberry Pi
+  // Setup periodic heartbeat every 12 seconds so online status & game playtime stay live
   if (heartbeatInterval) window.clearInterval(heartbeatInterval);
   heartbeatInterval = window.setInterval(() => {
     sendHeartbeat();
   }, 12000);
 
-  document.addEventListener("visibilitychange", () => {
-    sendHeartbeat();
-  });
+  if (!globalLiveBindingsInitialized) {
+    globalLiveBindingsInitialized = true;
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && (!eventSource || eventSource.readyState === EventSource.CLOSED)) {
+        connectLiveEventSource();
+      }
+      sendHeartbeat();
+    });
+
+    // Listen for storage changes in case user signs in/out in another tab
+    window.addEventListener("storage", (e) => {
+      if (e.key === "auth_user" || e.key === "auth_token") {
+        connectLiveEventSource();
+        sendHeartbeat();
+      }
+    });
+
+    window.addEventListener("cloudsync-auth-changed", () => {
+      connectLiveEventSource();
+      sendHeartbeat();
+    });
+
+    window.addEventListener("online", () => {
+      connectLiveEventSource();
+      sendHeartbeat();
+    });
+
+    window.addEventListener("pagehide", (ev: PageTransitionEvent) => {
+      if (ev.persisted) return;
+      try {
+        const blob = new Blob([JSON.stringify({ clientId: getClientId() })], {
+          type: "application/json",
+        });
+        navigator.sendBeacon?.("/api/live/offline", blob);
+      } catch {}
+    });
+
+    // Listen for custom game change events
+    window.addEventListener("game-switched", ((e: CustomEvent) => {
+      if (e.detail?.gameTitle) {
+        activeGameTitleTracked = String(e.detail.gameTitle).toLowerCase();
+        activeGameStartedAtMs = Date.now();
+      }
+      sendHeartbeat(undefined, e.detail?.gameTitle);
+    }) as EventListener);
+
+    // Listen for targeted shop trolls over BroadcastChannel as a fast multi-tab fallback
+    try {
+      const trollBc = new BroadcastChannel("cookie_live_troll_channel");
+      trollBc.onmessage = (ev) => {
+        const msg = ev.data;
+        if (!msg || msg.type !== "SHOP_TROLL") return;
+        const myId = getClientId();
+        const myUser = getActiveUsername().toLowerCase();
+        const normTarget = (msg.targetUsername || "").trim().toLowerCase();
+        const matchId = msg.targetClientId && msg.targetClientId === myId;
+        const matchUser =
+          normTarget &&
+          (normTarget === myUser ||
+            normTarget.replace(/[-_]/g, "") === myUser.replace(/[-_]/g, ""));
+        if (!matchId && !matchUser) return;
+
+        executeTrollAction(msg.action, msg.data, msg.trollEventId || msg.data?.trollEventId);
+      };
+    } catch {}
+
+    // Check active Oxium Network promo once on session init
+    window.setTimeout(() => {
+      fetch("/api/oxium/announcements?site=operation-cookie")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data && Array.isArray(data.promos) && data.promos.length > 0) {
+            showOxiumPromoToast(data.promos[0]);
+          }
+        })
+        .catch(() => {});
+    }, 2200);
+  }
 
   // Send initial heartbeat
   sendHeartbeat();
-
-  // Listen for storage changes in case user signs in to CloudSync
-  window.addEventListener("storage", (e) => {
-    if (e.key === "auth_user") {
-      sendHeartbeat();
-    }
-  });
-  window.addEventListener("cloudsync-auth-changed", () => {
-    try {
-      eventSource?.close();
-    } catch {}
-    eventSource = null;
-    initLiveClient();
-  });
-
-  // Listen for custom game change events
-  window.addEventListener("game-switched", ((e: CustomEvent) => {
-    if (e.detail?.gameTitle) {
-      activeGameTitleTracked = String(e.detail.gameTitle).toLowerCase();
-      activeGameStartedAtMs = Date.now();
-    }
-    sendHeartbeat(undefined, e.detail?.gameTitle);
-  }) as EventListener);
-
-  // Listen for targeted shop trolls over BroadcastChannel as a fast multi-tab fallback
-  try {
-    const trollBc = new BroadcastChannel("cookie_live_troll_channel");
-    trollBc.onmessage = (ev) => {
-      const msg = ev.data;
-      if (!msg || msg.type !== "SHOP_TROLL") return;
-      const myId = getClientId();
-      const myUser = getActiveUsername().toLowerCase();
-      const normTarget = (msg.targetUsername || "").trim().toLowerCase();
-      const matchId = msg.targetClientId && msg.targetClientId === myId;
-      const matchUser =
-        normTarget &&
-        (normTarget === myUser ||
-          normTarget.replace(/[-_]/g, "") === myUser.replace(/[-_]/g, ""));
-      if (!matchId && !matchUser) return;
-
-      executeTrollAction(msg.action, msg.data, msg.trollEventId || msg.data?.trollEventId);
-    };
-  } catch {}
-
-  // Check active Oxium Network promo once on session init
-  window.setTimeout(() => {
-    fetch("/api/oxium/announcements?site=operation-cookie")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data && Array.isArray(data.promos) && data.promos.length > 0) {
-          showOxiumPromoToast(data.promos[0]);
-        }
-      })
-      .catch(() => {});
-  }, 2200);
 }
 
 function showOxiumPromoToast(promo: {

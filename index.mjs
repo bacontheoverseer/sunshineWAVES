@@ -105,7 +105,9 @@ function sendCached(res, absPath, cacheControl, extraHeaders) {
   if (!buf) return false;
   const ext = path.extname(absPath).toLowerCase();
   res.setHeader("Content-Type", MIME_TYPES[ext] || "application/octet-stream");
-  res.setHeader("Cache-Control", cacheControl);
+  if (!res.getHeader("Cache-Control")) {
+    res.setHeader("Cache-Control", cacheControl);
+  }
   if (extraHeaders)
     for (const [k, v] of Object.entries(extraHeaders)) res.setHeader(k, v);
   res.setHeader("X-File-Cache", "HIT");
@@ -597,8 +599,15 @@ const NO_CACHE_CC = "public, max-age=0, must-revalidate";
 const SW_SCRIPT_PATH_RE = /^\/b\/(?:sw\.js|[a-f0-9]{10}\.js)$/;
 
 app.use("/b", (req, res, next) => {
-  if (SW_SCRIPT_PATH_RE.test(req.path) || SW_SCRIPT_PATH_RE.test(req.originalUrl.split("?")[0])) {
+  const cleanUrlPath = (req.originalUrl || "").split("?")[0];
+  if (SW_SCRIPT_PATH_RE.test(req.path) || SW_SCRIPT_PATH_RE.test(cleanUrlPath)) {
     res.setHeader("Service-Worker-Allowed", "/");
+    res.setHeader("Cache-Control", NO_CACHE_CC);
+  } else if (
+    cleanUrlPath === "/b/s/jetty.all.js" ||
+    cleanUrlPath === "/b/s/jetty.sync.js" ||
+    cleanUrlPath === "/b/all.js"
+  ) {
     res.setHeader("Cache-Control", NO_CACHE_CC);
   }
   next();
@@ -885,6 +894,9 @@ const ENV_STAFF_MODS = (process.env.STAFF_MODERATORS || "")
   .filter(Boolean);
 
 const liveClients = new Map();
+const httpHeartbeats = new Map(); // clientId -> { id, username, verifiedUsername, page, game, isPlayingGame, gameStartedAt, isIdle, lastSeen }
+const LIVE_SSE_PRESENCE_TTL_MS = 135000; // Covers Chrome background timer throttling without dropping open SSE tabs
+const HTTP_HEARTBEAT_PRESENCE_TTL_MS = 35000; // Keeps HTTP-heartbeating tabs online across SSE reconnects/blocks
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
 const userProfiles = new Map(); // usernameLower -> { bio, statusText, customization, updatedAt }
 const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
@@ -2170,15 +2182,13 @@ function getPresenceSnapshot() {
   }
 
   const onlineByUsername = new Map();
-  for (const c of liveClients.values()) {
-    if (c.res?.writableEnded || c.res?.destroyed) continue;
-    // Allow 75s so Chrome background-tab timer throttling (up to 60s) never drops live users offline
-    if (now - (c.lastSeen || 0) > 75000) continue;
+  const considerOnlineSession = (c, maxAgeMs) => {
+    if (!c || now - (c.lastSeen || 0) > maxAgeMs) return;
     const clean = String(c.username || "").trim();
-    if (!clean) continue;
+    if (!clean) return;
     const key = clean.toLowerCase();
-    if (isTemporaryGuestName(clean) && !csMap.has(key)) continue;
-    if (csMap.size > 0 && !csMap.has(key)) continue;
+    if (isTemporaryGuestName(clean) && !csMap.has(key)) return;
+    if (csMap.size > 0 && !csMap.has(key)) return;
 
     const csRecord = csMap.get(key);
     const canonicalName = csRecord ? csRecord.username : clean;
@@ -2213,6 +2223,14 @@ function getPresenceSnapshot() {
         createdAt: csRecord?.createdAt || null,
       });
     }
+  };
+
+  for (const c of liveClients.values()) {
+    if (c.res?.writableEnded || c.res?.destroyed) continue;
+    considerOnlineSession(c, LIVE_SSE_PRESENCE_TTL_MS);
+  }
+  for (const hb of httpHeartbeats.values()) {
+    considerOnlineSession(hb, HTTP_HEARTBEAT_PRESENCE_TTL_MS);
   }
 
   const onlineUsers = Array.from(onlineByUsername.values());
@@ -2244,6 +2262,7 @@ function getPresenceSnapshot() {
 
   const registeredUsers = Array.from(csMap.values()).map((u) => u.username);
   return {
+    snapshotAt: now,
     onlineUsers,
     offlineUsers,
     registeredUsers,
@@ -2281,19 +2300,38 @@ function broadcastToClients(actionPayload, target = "all") {
 
 // Keep-alive heartbeat & low-RAM stale state cleanup every 15s
 let heartbeatTick = 0;
+let lastBroadcastOnlineKey = "";
 setInterval(() => {
   const now = Date.now();
   heartbeatTick++;
+  let prunedAny = false;
   for (const [id, client] of liveClients.entries()) {
     if (client.res?.writableEnded || client.res?.destroyed || now - (client.lastSeen || 0) > 300000) {
       liveClients.delete(id);
+      prunedAny = true;
       continue;
     }
     try {
       client.res.write(": keepalive\n\n");
     } catch {
       liveClients.delete(id);
+      prunedAny = true;
     }
+  }
+  for (const [id, hb] of httpHeartbeats.entries()) {
+    if (!hb || now - (hb.lastSeen || 0) > HTTP_HEARTBEAT_PRESENCE_TTL_MS) {
+      httpHeartbeats.delete(id);
+      prunedAny = true;
+    }
+  }
+  const snap = getPresenceSnapshot();
+  const nextOnlineKey = snap.onlineUsers
+    .map((u) => `${u.username.toLowerCase()}:${u.isIdle ? 1 : 0}:${u.game || ""}`)
+    .sort()
+    .join("|");
+  if (prunedAny || nextOnlineKey !== lastBroadcastOnlineKey) {
+    lastBroadcastOnlineKey = nextOnlineKey;
+    broadcastToClients({ type: "presence-event", ...snap }, "all");
   }
   if (heartbeatTick % 4 === 0) {
     // Prune disconnected peers from voiceRooms & cap knownUsers
@@ -2381,22 +2419,38 @@ app.get("/api/live/stream", async (req, res) => {
   broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
   req.on("close", () => {
-    const rec = liveClients.get(clientId);
-    if (rec?.username) {
-      touchKnownUser(rec.username, { isPlayingGame: false, gameStartedAt: 0 });
+    if (liveClients.get(clientId) === clientRecord) {
+      liveClients.delete(clientId);
+      const activeHb = httpHeartbeats.get(clientId);
+      if (!activeHb || Date.now() - (activeHb.lastSeen || 0) > 15000) {
+        httpHeartbeats.delete(clientId);
+      }
+      touchKnownUser(clientRecord.username, { isPlayingGame: false, gameStartedAt: 0 });
+      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     }
-    liveClients.delete(clientId);
-    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
   });
 });
 
-app.post("/api/live/heartbeat", (req, res) => {
+app.post("/api/live/heartbeat", async (req, res) => {
+  const authUser = await getAuthenticatedCloudSyncUser(req).catch(() => null);
   const { clientId, username, page, game, isPlayingGame, gameStartedAt, idle } = req.body || {};
+  const now = Date.now();
+  const rawUser = String(username || "").trim();
+  const effectiveUser = authUser ? authUser.username : rawUser;
+  const verifiedLower = authUser ? authUser.username.toLowerCase() : null;
   let changed = false;
+
   if (clientId && liveClients.has(clientId)) {
     const client = liveClients.get(clientId);
-    if (username && client.username !== username) {
-      client.username = username;
+    if (verifiedLower && client.verifiedUsername !== verifiedLower) {
+      client.verifiedUsername = verifiedLower;
+      changed = true;
+    } else if (!authUser && isTemporaryGuestName(rawUser) && client.verifiedUsername) {
+      client.verifiedUsername = null;
+      changed = true;
+    }
+    if (effectiveUser && client.username !== effectiveUser) {
+      client.username = effectiveUser;
       changed = true;
     }
     if (page) client.page = page;
@@ -2405,6 +2459,7 @@ app.post("/api/live/heartbeat", (req, res) => {
       changed = true;
     }
     if (typeof isPlayingGame === "boolean") {
+      if (client.isPlayingGame !== isPlayingGame) changed = true;
       client.isPlayingGame = isPlayingGame;
     }
     if (typeof gameStartedAt === "number") {
@@ -2414,23 +2469,75 @@ app.post("/api/live/heartbeat", (req, res) => {
       client.isIdle = idle;
       changed = true;
     }
-    client.lastSeen = Date.now();
+    if (now - (client.lastSeen || 0) > LIVE_SSE_PRESENCE_TTL_MS - 15000) {
+      changed = true;
+    }
+    client.lastSeen = now;
     touchKnownUser(client.username, {
       game: client.game,
       isPlayingGame: client.isPlayingGame,
       gameStartedAt: client.gameStartedAt,
     });
-  } else if (username) {
-    touchKnownUser(username, {
+  } else if (effectiveUser) {
+    touchKnownUser(effectiveUser, {
       game: game || "browsing",
       isPlayingGame: Boolean(isPlayingGame),
       gameStartedAt: Number(gameStartedAt) || 0,
     });
     changed = true;
   }
+
+  if (clientId && effectiveUser) {
+    const prevHb = httpHeartbeats.get(clientId);
+    if (
+      !prevHb ||
+      prevHb.username !== effectiveUser ||
+      prevHb.isIdle !== Boolean(idle) ||
+      prevHb.game !== (typeof game === "string" ? game : "browsing")
+    ) {
+      changed = true;
+    }
+    httpHeartbeats.set(clientId, {
+      id: String(clientId),
+      username: effectiveUser,
+      verifiedUsername: verifiedLower,
+      page: typeof page === "string" ? page.slice(0, 200) : "/",
+      game: typeof game === "string" ? game.slice(0, 120) : "browsing",
+      isPlayingGame: Boolean(isPlayingGame),
+      gameStartedAt: Number(gameStartedAt) || 0,
+      isIdle: Boolean(idle),
+      lastSeen: now,
+    });
+  }
+
   if (changed) {
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
   }
+  res.json({ success: true });
+});
+
+app.post("/api/live/offline", (req, res) => {
+  try {
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
+    }
+    const clientId = String(body?.clientId || req.query?.id || "").trim();
+    if (clientId) {
+      const rec = liveClients.get(clientId);
+      if (rec?.username) {
+        touchKnownUser(rec.username, { isPlayingGame: false, gameStartedAt: 0 });
+      }
+      const hadAny = liveClients.delete(clientId) || httpHeartbeats.delete(clientId);
+      if (hadAny) {
+        broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+      }
+    }
+  } catch {}
   res.json({ success: true });
 });
 
@@ -3522,9 +3629,12 @@ app.get("/api/chat/state", async (req, res) => {
   const selfRole = authUser ? getUserChatRole(authUser.username) : "member";
   const selfTimeout = authUser ? getActiveTimeout(authUser.username) : null;
 
+  res.setHeader("Cache-Control", "no-store, max-age=0");
   res.json({
     success: true,
     messages: visibleMessages.slice(-200),
+    hasMoreMessages: visibleMessages.length > 200,
+    presenceAt: presence.snapshotAt,
     groups: userGroups,
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
