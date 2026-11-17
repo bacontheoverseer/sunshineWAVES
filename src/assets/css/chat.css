@@ -262,6 +262,8 @@
 }
 
 .chat-voice-sidebar-avatar {
+  position: relative;
+  flex-shrink: 0;
   width: 20px;
   height: 20px;
   border-radius: 50%;
@@ -1889,6 +1891,7 @@
 .chat-entry-avatar,
 .chat-user-avatar,
 .chat-voice-card-avatar,
+.chat-voice-sidebar-avatar,
 .chat-profile-avatar-lg,
 .top-auth-avatar {
   position: relative;
@@ -1929,6 +1932,10 @@
 
 .chat-voice-card-avatar .avatar-dec-ring {
   inset: -5px;
+}
+
+.chat-voice-sidebar-avatar .avatar-dec-ring {
+  inset: -2.5px;
 }
 
 .avatar-dec-ring.dec-cyber-ring {
@@ -2060,6 +2067,8 @@
 .chat-entry-avatar .avatar-dec-ring.dec-kitty-neon::after,
 .chat-user-avatar .avatar-dec-ring.dec-kitty-neon::before,
 .chat-user-avatar .avatar-dec-ring.dec-kitty-neon::after,
+.chat-voice-sidebar-avatar .avatar-dec-ring.dec-kitty-neon::before,
+.chat-voice-sidebar-avatar .avatar-dec-ring.dec-kitty-neon::after,
 .top-auth-avatar .avatar-dec-ring.dec-kitty-neon::before,
 .top-auth-avatar .avatar-dec-ring.dec-kitty-neon::after {
   width: 6px;
@@ -2828,6 +2837,7 @@
 }
 
 .chat-reply-mini-avatar {
+  position: relative;
   width: 15px;
   height: 15px;
   border-radius: 50%;

@@ -3913,7 +3913,11 @@ export default function ChatModal() {
                 const replyAuthorLabel =
                   replyMeta?.customization?.displayName?.trim() || replyRef?.author || "";
                 const replyMiniCustom = replyMeta?.customization
-                  ? { ...replyMeta.customization, avatarDecoration: "none" as const }
+                  ? {
+                      ...replyMeta.customization,
+                      avatarDecoration: "none" as const,
+                      decorationUrl: "",
+                    }
                   : null;
                 const isEditingThis = editingMessageId === msg.id;
 

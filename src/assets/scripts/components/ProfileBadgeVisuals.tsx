@@ -38,6 +38,7 @@ export function UserAvatar({
     <div
       class={className}
       style={{
+        position: "relative",
         background: `linear-gradient(135deg, ${bg1}, ${bg2})`,
         ...(opacity !== undefined ? { opacity } : {}),
         ...(onClick ? { cursor: "pointer" } : {}),
