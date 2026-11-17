@@ -1,6 +1,7 @@
 import {
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
+import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 import {
   findFrameLayers,
   findProfileEffectLayers,
@@ -52,6 +53,7 @@ export function ProfileEffectLayer({
             src={src}
             alt=""
             class="chat-profile-effect-img"
+            loading={isChromebookModeEnabled() ? "lazy" : undefined}
             decoding="async"
           />
         ))}
@@ -161,6 +163,7 @@ export function ProfileFrameLayer({
           src={src}
           alt=""
           class="chat-profile-frame-img frame-slot-f"
+          loading={isChromebookModeEnabled() ? "lazy" : undefined}
           decoding="async"
         />
       </div>
@@ -180,6 +183,7 @@ export function ProfileFrameLayer({
             src={src}
             alt=""
             class={`chat-profile-frame-img frame-slot-${slot}`}
+            loading={isChromebookModeEnabled() ? "lazy" : undefined}
             decoding="async"
           />
         );

@@ -131,7 +131,13 @@ function tick(time: number): void {
 }
 
 function onClick(e: MouseEvent): void {
-  if (prefersReducedMotion()) return;
+  if (
+    prefersReducedMotion() ||
+    document.documentElement.classList.contains("chromebook-mode") ||
+    document.body.classList.contains("game-active-perf-mode")
+  ) {
+    return;
+  }
   ensureCanvas();
   spawnBurst(e.clientX, e.clientY);
   if (raf === null) {

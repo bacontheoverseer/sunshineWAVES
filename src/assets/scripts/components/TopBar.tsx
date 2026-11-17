@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { getCookieCoins, isCookieMasterActive } from "../core/cookieCoins.ts";
+import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 import {
   type ProfileCustomization,
   getSafeMediaProxySrc,
@@ -262,6 +263,7 @@ export default function TopBar() {
                     src={bannerImgSrc}
                     alt=""
                     class="top-auth-banner-img"
+                    loading={isChromebookModeEnabled() ? "lazy" : undefined}
                     decoding="async"
                   />
                 ) : null}

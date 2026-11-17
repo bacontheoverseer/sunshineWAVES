@@ -79,7 +79,9 @@ export function attachSearchLight(searchBar: HTMLElement): void {
 
   searchBar.addEventListener("mouseenter", () => {
     const lowPower =
-      document.documentElement.classList.contains("low-power-device");
+      document.documentElement.classList.contains("low-power-device") ||
+      document.documentElement.classList.contains("chromebook-mode") ||
+      document.body.classList.contains("game-active-perf-mode");
     isHovering = true;
     updateRect();
 

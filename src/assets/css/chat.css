@@ -2791,6 +2791,73 @@
   }
 }
 
+/* Chromebook Mode: eliminate blurs, heavy drop/box-shadows & animated chat effects */
+html.chromebook-mode .chat-modal-overlay,
+html.chromebook-mode .chat-profile-modal-backdrop,
+html.chromebook-mode .chat-crop-backdrop {
+  backdrop-filter: none !important;
+  background-color: rgba(15, 18, 28, 0.95) !important;
+  transition: none !important;
+}
+
+:root.chromebook-mode .chat-modal-overlay,
+:root.chromebook-mode .chat-profile-modal-backdrop,
+:root.chromebook-mode .chat-crop-backdrop {
+  -webkit-backdrop-filter: none !important;
+}
+
+html.chromebook-mode .chat-app-window,
+html.chromebook-mode .chat-profile-modal,
+html.chromebook-mode .chat-crop-modal,
+html.chromebook-mode .chat-staff-modal,
+html.chromebook-mode .chat-entry,
+html.chromebook-mode .chat-entry-actions,
+html.chromebook-mode .chat-user-item,
+html.chromebook-mode .chat-channel-item,
+html.chromebook-mode .chat-role-badge,
+html.chromebook-mode .chat-role-badge.goat,
+html.chromebook-mode .chat-profile-card.effect-lightning-border,
+html.chromebook-mode .chat-emoji-picker,
+html.chromebook-mode .chat-gif-picker,
+html.chromebook-mode .chat-quick-react-bar,
+html.chromebook-mode .chat-collectible-card,
+html.chromebook-mode .avatar-dec-ring {
+  box-shadow: none !important;
+  filter: none !important;
+  transition: none !important;
+}
+
+html.chromebook-mode .avatar-dec-ring,
+html.chromebook-mode .chat-profile-banner,
+html.chromebook-mode .name-animated-rainbow,
+html.chromebook-mode .name-animated-fire,
+html.chromebook-mode .name-animated-cyber,
+html.chromebook-mode .name-animated-galaxy,
+html.chromebook-mode .name-animated-gold,
+html.chromebook-mode .chat-user-item.has-nameplate,
+html.chromebook-mode .top-auth-pill-bg,
+html.chromebook-mode .chat-profile-card.effect-lightning-border,
+html.chromebook-mode .chat-role-badge.goat,
+html.chromebook-mode .chat-effect-particle {
+  animation: none !important;
+  filter: none !important;
+}
+
+html.chromebook-mode .chat-profile-effect-layer {
+  display: none !important;
+}
+
+html.chromebook-mode .chat-entry {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  contain: layout style;
+}
+
+html.chromebook-mode .chat-user-item {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  content-visibility: auto;
+  contain-intrinsic-size: 240px 44px;
+}
+
 /* Discord-style Inline Replies, Message Editing, Highlight & Delete Chat UI */
 .chat-entry.has-reply {
   flex-direction: column;
@@ -3671,4 +3738,316 @@
 .chat-customizer-preview-panel .chat-profile-card.preview-only {
   margin: 18px auto 12px;
   overflow: visible;
+}
+
+/* ── Chat Image Upload, Drag-Drop, Lightbox & In-Site Camera Modal ── */
+.chat-main.is-drag-over {
+  outline: 2px dashed rgba(56, 189, 248, 0.75);
+  outline-offset: -8px;
+  background-color: rgba(56, 189, 248, 0.05);
+}
+
+.chat-media-toggle-btn {
+  background-color: var(--bg-surface-5);
+  border: 1px solid var(--bg-surface-10);
+  color: var(--color-sublabel);
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 15px;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.chat-media-toggle-btn:hover:not(:disabled),
+.chat-media-toggle-btn.active {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border-color: var(--btn-primary-bg);
+}
+
+.chat-media-toggle-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.chat-pending-image-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 16px;
+  background-color: var(--bg-surface-3);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+}
+
+.chat-pending-image-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.chat-pending-image-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+  object-fit: cover;
+  border: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-4);
+  flex-shrink: 0;
+}
+
+.chat-pending-image-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-pending-image-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-pending-image-size {
+  font-size: 10.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}
+
+.chat-entry-image-wrap {
+  margin-top: 6px;
+}
+
+.chat-entry-image-btn {
+  display: inline-block;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: zoom-in;
+  border-radius: 12px;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.chat-entry-image {
+  display: block;
+  max-width: 340px;
+  max-height: 270px;
+  width: auto;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-3);
+  object-fit: contain;
+}
+
+.chat-camera-modal {
+  width: min(560px, 94vw);
+  max-height: 90vh;
+  background-color: var(--bg-body);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 18px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.78);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text-primary);
+}
+
+.chat-camera-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-2);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.chat-camera-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  max-height: 55vh;
+  background-color: #05070e;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.chat-camera-video,
+.chat-camera-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.chat-camera-video.is-mirrored {
+  transform: scaleX(-1);
+}
+
+.chat-camera-overlay-msg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(5, 7, 14, 0.72);
+  font-size: 13px;
+  color: var(--text-primary);
+  text-transform: lowercase;
+}
+
+.chat-camera-countdown {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 68px;
+  font-weight: 800;
+  color: #ffffff;
+  background: rgba(0, 0, 0, 0.32);
+  text-shadow: 0 4px 18px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+
+.chat-camera-error {
+  padding: 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}
+
+.chat-camera-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-2);
+}
+
+.chat-camera-tools,
+.chat-camera-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.chat-camera-meta {
+  font-size: 11px;
+  color: var(--color-sublabel);
+}
+
+.chat-camera-shutter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 18px;
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: lowercase;
+}
+
+.chat-camera-shutter-btn:hover:not(:disabled) {
+  background-color: var(--btn-primary-hover);
+}
+
+.chat-camera-shutter-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.chat-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000010;
+  background: rgba(6, 8, 14, 0.88);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+:root.chromebook-mode .chat-lightbox-backdrop {
+  -webkit-backdrop-filter: none !important;
+}
+
+html.chromebook-mode .chat-lightbox-backdrop {
+  backdrop-filter: none !important;
+  background: rgba(10, 12, 20, 0.96) !important;
+}
+
+html.chromebook-mode .chat-camera-modal,
+html.chromebook-mode .chat-lightbox-card,
+html.chromebook-mode .chat-media-toggle-btn {
+  box-shadow: none !important;
+  transition: none !important;
+}
+
+.chat-lightbox-card {
+  max-width: 92vw;
+  max-height: 90vh;
+  background-color: var(--bg-body);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.82);
+}
+
+.chat-lightbox-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--bg-surface-10);
+  background-color: var(--bg-surface-2);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.chat-lightbox-img {
+  max-width: 90vw;
+  max-height: 80vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  background-color: #05070e;
 }

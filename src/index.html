@@ -74,6 +74,9 @@
         if (localStorage.getItem("darkMode") === "true") {
           document.documentElement.classList.add("dark-mode");
         }
+        if (localStorage.getItem("chromebookMode") === "true") {
+          document.documentElement.classList.add("chromebook-mode");
+        }
       })();
       var _revealed = false;
       var _title = "Operation Cookie";

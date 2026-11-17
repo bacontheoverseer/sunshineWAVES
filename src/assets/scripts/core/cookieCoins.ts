@@ -3,6 +3,11 @@
  * (Strictly real user data — no fake players)
  */
 
+import {
+  batchedLocalStorageGet,
+  batchedLocalStorageSet,
+} from "./chromebookMode.ts";
+
 export interface StudioProfile {
   id: string;
   name: string;
@@ -263,12 +268,12 @@ export function getActiveUser(): string {
 
 export function getCookieCoins(): number {
   try {
-    const raw = localStorage.getItem(COINS_STORAGE_KEY);
+    const raw = batchedLocalStorageGet(COINS_STORAGE_KEY);
     if (raw !== null) {
       const n = parseInt(raw, 10);
       if (!Number.isNaN(n)) return Math.max(0, n);
     }
-    localStorage.setItem(COINS_STORAGE_KEY, "150");
+    batchedLocalStorageSet(COINS_STORAGE_KEY, "150");
     return 150;
   } catch {
     return 150;
@@ -278,7 +283,7 @@ export function getCookieCoins(): number {
 export function setCookieCoins(nextBalance: number): number {
   const clean = Math.max(0, Math.floor(nextBalance));
   try {
-    localStorage.setItem(COINS_STORAGE_KEY, String(clean));
+    batchedLocalStorageSet(COINS_STORAGE_KEY, String(clean));
   } catch {}
   window.dispatchEvent(new CustomEvent("cookie-coins-updated", { detail: { balance: clean } }));
   return clean;
@@ -354,7 +359,7 @@ export function getLocalLeaderboard(gameName: string): LeaderboardEntry[] {
   const key = (gameName || "").trim().toLowerCase();
   if (!key || isWebsiteNotGame(key)) return [];
   try {
-    const raw = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
+    const raw = batchedLocalStorageGet(LEADERBOARD_STORAGE_KEY);
     const all: Record<string, LeaderboardEntry[]> = raw ? JSON.parse(raw) : {};
     const list = all[key] || [];
     return [...list].sort((a, b) => b.seconds - a.seconds || b.plays - a.plays);
@@ -375,7 +380,7 @@ export function recordLocalGameTick(
   const userLower = username.toLowerCase();
 
   try {
-    const raw = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
+    const raw = batchedLocalStorageGet(LEADERBOARD_STORAGE_KEY);
     const all: Record<string, LeaderboardEntry[]> = raw ? JSON.parse(raw) : {};
     const list: LeaderboardEntry[] = all[key] || [];
 
@@ -397,7 +402,7 @@ export function recordLocalGameTick(
 
     list.sort((a, b) => b.seconds - a.seconds || b.plays - a.plays);
     all[key] = list;
-    localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(all));
+    batchedLocalStorageSet(LEADERBOARD_STORAGE_KEY, JSON.stringify(all));
     return [...list];
   } catch {
     return [];

@@ -6,6 +6,7 @@ import {
   matchesCollectibleFilter,
 } from "../core/collectibleCatalog.ts";
 import { getSafeMediaProxySrc } from "../core/profileCustomization.ts";
+import { useChromebookMode } from "../core/chromebookMode.ts";
 
 const STORAGE_KEY = "sunshine_home_decorations_v1";
 const BETA_KEY = "betaHomepageDecorations";
@@ -284,6 +285,8 @@ export default function HomepageDecorations() {
     };
   }, [editMode]);
 
+  const chromebookMode = useChromebookMode();
+
   const filteredCatalog = useMemo(() => {
     return getCatalogDecorations().filter((x) =>
       matchesCollectibleFilter(x.n, x.a, query, vibe),
@@ -352,6 +355,10 @@ export default function HomepageDecorations() {
 
   if (!betaEnabled || !onHome) return null;
 
+  if (chromebookMode && document.body.classList.contains("game-active-perf-mode")) {
+    return null;
+  }
+
   const shownCatalog = filteredCatalog.slice(0, visibleCount);
   const remainingCatalog = Math.max(0, filteredCatalog.length - shownCatalog.length);
 
@@ -410,6 +417,7 @@ export default function HomepageDecorations() {
                 src={safeSrc}
                 alt={item.name}
                 draggable={false}
+                loading={chromebookMode ? "lazy" : undefined}
                 decoding="async"
                 class="home-decor-img"
               />

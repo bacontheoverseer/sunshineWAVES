@@ -220,8 +220,18 @@ server.on("upgrade", (req, socket, head) => {
 const pageCache = new LRUCache({ max: parseInt(process.env.PAGE_CACHE_MAX || "50", 10), ttl: 1000 * 60 * 5 });
 
 app.use((req, res, next) => {
-  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-  res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+  const proto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const isTrustworthyOrigin =
+    req.secure ||
+    proto === "https" ||
+    req.hostname === "localhost" ||
+    req.hostname === "127.0.0.1";
+  if (isTrustworthyOrigin) {
+    if (!req.path.startsWith("/p/")) {
+      res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    }
+    res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+  }
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   next();
 });
@@ -587,6 +597,391 @@ app.use((req, res, next) => {
   req.pipe(proxyReq);
 });
 
+// Server-side SSRF-safe HTTP rewriting proxy (`/p/<token>/`) so plain HTTP origins
+// (where browsers block Service Workers) can still search and browse websites cleanly.
+function encodeMochiToken(rawUrl) {
+  const buf = Buffer.from(encodeURIComponent(String(rawUrl)), "utf8");
+  for (let i = 0; i < buf.length; i++) {
+    buf[i] ^= MOCHI_XOR_KEY[i % MOCHI_XOR_KEY.length];
+  }
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function toHttpProxyUrl(rawRef, baseUrl) {
+  if (!rawRef || typeof rawRef !== "string") return rawRef;
+  const trimmed = rawRef.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("#") ||
+    trimmed.startsWith("/p/") ||
+    trimmed.startsWith("/!!/") ||
+    /^(?:data|blob|javascript|mailto|tel|sms|about):/i.test(trimmed)
+  ) {
+    return rawRef;
+  }
+  try {
+    const resolved = new URL(trimmed, baseUrl);
+    if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+      return rawRef;
+    }
+    return `/p/${encodeMochiToken(resolved.href)}/`;
+  } catch {
+    return rawRef;
+  }
+}
+
+function decodeHttpProxyTarget(reqUrl) {
+  const qIdx = reqUrl.indexOf("?");
+  const rawPath = qIdx >= 0 ? reqUrl.slice(0, qIdx) : reqUrl;
+  const searchPart = qIdx >= 0 ? reqUrl.slice(qIdx) : "";
+  const cleanPath = rawPath.replace(/^\/+/, "");
+  if (!cleanPath) return null;
+
+  const slashIdx = cleanPath.indexOf("/");
+  const token = slashIdx === -1 ? cleanPath : cleanPath.slice(0, slashIdx);
+  const subPath = slashIdx === -1 ? "" : cleanPath.slice(slashIdx + 1);
+
+  let baseDecoded = decodeMochiToken(token);
+  if (!baseDecoded) {
+    try {
+      const candidate = decodeURIComponent(token);
+      if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+        baseDecoded = candidate;
+      }
+    } catch {}
+  }
+  if (!baseDecoded) return null;
+
+  try {
+    const targetObj = subPath
+      ? new URL(subPath, baseDecoded)
+      : new URL(baseDecoded);
+    if (searchPart) {
+      if (subPath) {
+        return new URL(subPath + searchPart, baseDecoded).href;
+      }
+      const incomingParams = new URLSearchParams(searchPart.slice(1));
+      for (const key of new Set(incomingParams.keys())) {
+        targetObj.searchParams.delete(key);
+        for (const val of incomingParams.getAll(key)) {
+          targetObj.searchParams.append(key, val);
+        }
+      }
+    }
+    return targetObj.href;
+  } catch {
+    return baseDecoded;
+  }
+}
+
+function rewriteCssUrls(cssText, baseUrl) {
+  if (!cssText) return cssText;
+  let out = cssText.replace(
+    /@import\s+(["'])([^"']+)\1/gi,
+    (_m, q, ref) => `@import ${q}${toHttpProxyUrl(ref, baseUrl)}${q}`
+  );
+  out = out.replace(
+    /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']+))\s*\)/gi,
+    (m, dq, sq, uq) => {
+      const ref = dq ?? sq ?? uq ?? "";
+      const rewritten = toHttpProxyUrl(ref, baseUrl);
+      if (rewritten === ref) return m;
+      return `url("${rewritten}")`;
+    }
+  );
+  return out;
+}
+
+function buildHttpProxyClientShim(realUrl) {
+  const escapedUrl = JSON.stringify(String(realUrl)).replace(/</g, "\\u003c");
+  return `<script data-sunshine-http-proxy="1">(function(){
+var R=${escapedUrl},K="q7Zx!9pL";
+function enc(u){
+if(!u)return u;var s=String(u).trim();
+if(!s||s.charAt(0)==="#"||s.indexOf("/p/")===0||s.indexOf("/!!/")===0||/^(?:data|blob|javascript|mailto|tel|sms|about):/i.test(s))return u;
+try{
+var b=s.charAt(0)==="/"?(function(){try{return new URL(R).origin+s}catch(e){return s}})():s;
+var ab=new URL(b,R);if(ab.protocol!=="http:"&&ab.protocol!=="https:")return u;
+var p=encodeURIComponent(ab.href),bytes=new TextEncoder().encode(p),out=new Uint8Array(bytes.length);
+for(var i=0;i<bytes.length;i++)out[i]=bytes[i]^K.charCodeAt(i%K.length);
+var bin="";for(var j=0;j<out.length;j++)bin+=String.fromCharCode(out[j]);
+return "/p/"+btoa(bin).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"")+"/";
+}catch(e){return u;}
+}
+var ofetch=window.fetch;
+if(typeof ofetch==="function"){
+window.fetch=function(input,init){
+try{
+if(typeof input==="string")input=enc(input);
+else if(input&&typeof input==="object"&&input.url)input=new Request(enc(input.url),input);
+}catch(e){}
+return ofetch.call(this,input,init);
+};
+}
+var oxhr=XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open=function(m,u){
+var args=[].slice.call(arguments);
+try{if(typeof u==="string")args[1]=enc(u);}catch(e){}
+return oxhr.apply(this,args);
+};
+var oopen=window.open;
+window.open=function(u,t,f){return oopen.call(this,typeof u==="string"?enc(u):u,t,f);};
+if(window.history){
+var ops=history.pushState,ors=history.replaceState;
+history.pushState=function(s,t,u){
+try{if(u)R=new URL(String(u),R).href;return ops.call(this,s,t,u?enc(R):u);}catch(e){return ops.apply(this,arguments);}
+};
+history.replaceState=function(s,t,u){
+try{if(u)R=new URL(String(u),R).href;return ors.call(this,s,t,u?enc(R):u);}catch(e){return ors.apply(this,arguments);}
+};
+}
+document.addEventListener("click",function(ev){
+var a=ev.target&&ev.target.closest?ev.target.closest("a[href]"):null;
+if(!a)return;
+var h=a.getAttribute("href");
+if(!h||h.charAt(0)==="#"||h.indexOf("/p/")===0||/^(?:javascript|mailto|tel|data|blob):/i.test(h))return;
+var next=enc(h);if(next&&next!==h)a.setAttribute("href",next);
+},true);
+document.addEventListener("submit",function(ev){
+var f=ev.target;if(!f||f.tagName!=="FORM")return;
+var rawAct=f.getAttribute("action")||R;
+var act=rawAct.indexOf("/p/")===0?rawAct:enc(rawAct);
+var method=(f.getAttribute("method")||"GET").toUpperCase();
+if(method==="GET"){
+ev.preventDefault();
+try{
+var baseTarget=rawAct.indexOf("/p/")===0?R:new URL(rawAct,R).href;
+var u=new URL(baseTarget);
+var fd=new FormData(f);
+fd.forEach(function(v,k){if(typeof v==="string")u.searchParams.append(k,v);});
+var dest=enc(u.href);
+if(f.target==="_blank")window.open(dest,"_blank");else window.location.assign(dest);
+}catch(e){}
+}else if(act){f.setAttribute("action",act);}
+},true);
+})();</script>`;
+}
+
+function rewriteHtmlForHttpProxy(html, baseUrl) {
+  let out = html
+    .replace(/<meta[^>]+http-equiv\s*=\s*(?:"(?:content-security-policy|x-frame-options)"|'(?:content-security-policy|x-frame-options)'|(?:content-security-policy|x-frame-options))[^>]*>/gi, "");
+
+  out = out.replace(
+    /(<meta[^>]+http-equiv\s*=\s*(?:"refresh"|'refresh'|refresh)[^>]*content\s*=\s*)(["'])([^"']+)\2/gi,
+    (_m, pre, q, content) => {
+      const updated = content.replace(/url\s*=\s*(['"]?)([^;'"]+)\1/i, (_uM, uq, ref) => {
+        return `url=${uq}${toHttpProxyUrl(ref, baseUrl)}${uq}`;
+      });
+      return `${pre}${q}${updated}${q}`;
+    }
+  );
+
+  const rewriteUrlAttr = (m, pre, dq, sq, uq) => {
+    const val = dq ?? sq ?? uq ?? "";
+    const quote = sq !== undefined ? "'" : '"';
+    const rewritten = toHttpProxyUrl(val, baseUrl);
+    if (rewritten === val) return m;
+    return `${pre}${quote}${rewritten}${quote}`;
+  };
+
+  out = out.replace(
+    /<([a-zA-Z][a-zA-Z0-9:-]*)(\s+[^<>]*?)>/g,
+    (tagMatch, tagName, attrs) => {
+      const lowerTag = tagName.toLowerCase();
+      if (lowerTag === "style") return tagMatch;
+      let updated = attrs.replace(
+        lowerTag === "script"
+          ? /(\ssrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi
+          : /(\s(?:href|src|action|poster|data-src)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi,
+        rewriteUrlAttr
+      );
+      if (lowerTag !== "script") {
+        updated = updated.replace(
+          /(\ssrcset\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
+          (_m, pre, dq, sq) => {
+            const val = dq ?? sq ?? "";
+            const quote = dq !== undefined ? '"' : "'";
+            const rewritten = val
+              .split(",")
+              .map((part) => {
+                const t = part.trim();
+                if (!t) return "";
+                const sp = t.split(/\s+/);
+                sp[0] = toHttpProxyUrl(sp[0], baseUrl);
+                return sp.join(" ");
+              })
+              .filter(Boolean)
+              .join(", ");
+            return `${pre}${quote}${rewritten}${quote}`;
+          }
+        );
+      }
+      return `<${tagName}${updated}>`;
+    }
+  );
+
+  out = out.replace(
+    /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
+    (_m, open, css, close) => `${open}${rewriteCssUrls(css, baseUrl)}${close}`
+  );
+
+  out = out.replace(
+    /(\sstyle\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi,
+    (_m, pre, dq, sq) => {
+      const val = dq ?? sq ?? "";
+      const quote = dq !== undefined ? '"' : "'";
+      return `${pre}${quote}${rewriteCssUrls(val, baseUrl)}${quote}`;
+    }
+  );
+
+  const shim = buildHttpProxyClientShim(baseUrl);
+  if (/<head\b[^>]*>/i.test(out)) {
+    out = out.replace(/<head\b[^>]*>/i, (tag) => `${tag}${shim}`);
+  } else if (/<html\b[^>]*>/i.test(out)) {
+    out = out.replace(/<html\b[^>]*>/i, (tag) => `${tag}${shim}`);
+  } else {
+    out = `${shim}${out}`;
+  }
+  return out;
+}
+
+const HTTP_PROXY_STRIPPED_RESP_HEADERS = new Set([
+  "content-security-policy",
+  "content-security-policy-report-only",
+  "x-frame-options",
+  "cross-origin-opener-policy",
+  "cross-origin-embedder-policy",
+  "cross-origin-resource-policy",
+  "strict-transport-security",
+  "content-encoding",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "set-cookie",
+]);
+
+const HTTP_PROXY_ALLOWED_REQ_HEADERS = [
+  "accept",
+  "accept-language",
+  "content-type",
+  "user-agent",
+  "range",
+];
+
+async function handleHttpProxy(req, res) {
+  const targetStr = decodeHttpProxyTarget(req.url);
+  if (!targetStr) {
+    return res.status(400).send("Invalid HTTP proxy target URL.");
+  }
+
+  const validated = await validatePublicHttpUrl(targetStr);
+  if (!validated) {
+    return res.status(403).send("Blocked proxy target.");
+  }
+
+  const method = String(req.method || "GET").toUpperCase();
+  const headers = {
+    "accept-encoding": "identity",
+    "user-agent": req.headers["user-agent"] || MOCHI_FALLBACK_UA,
+  };
+  for (const name of HTTP_PROXY_ALLOWED_REQ_HEADERS) {
+    const val = req.headers[name];
+    if (typeof val === "string" && val.trim()) {
+      headers[name] = val;
+    }
+  }
+  headers["referer"] = validated.origin + "/";
+
+  const hasBody = method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+  const reqBody =
+    hasBody && Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined;
+
+  let currentUrl = validated.toString();
+  let upstreamRes = null;
+  try {
+    for (let hop = 0; hop <= 5; hop++) {
+      upstreamRes = await fetch(currentUrl, {
+        method,
+        headers,
+        body: hop === 0 ? reqBody : undefined,
+        redirect: "manual",
+        signal: AbortSignal.timeout(15000),
+      });
+
+      const isRedirect =
+        upstreamRes.status >= 300 &&
+        upstreamRes.status < 400 &&
+        upstreamRes.headers.get("location");
+      if (!isRedirect) break;
+
+      const loc = upstreamRes.headers.get("location");
+      const nextUrl = new URL(loc, currentUrl).toString();
+      const safeNext = await validatePublicHttpUrl(nextUrl);
+      if (!safeNext) {
+        return res.status(403).send("Blocked redirect target.");
+      }
+      const safeNextUrl = safeNext.toString();
+
+      if (upstreamRes.status === 307 || upstreamRes.status === 308 || hasBody) {
+        res.status(upstreamRes.status);
+        res.setHeader("Location", toHttpProxyUrl(safeNextUrl, currentUrl));
+        return res.end();
+      }
+      // For standard GET/HEAD redirects, return rewritten Location when browser-facing
+      // HTML navigation is active, updating URL history automatically.
+      const acceptHdr = String(req.headers["accept"] || "");
+      if (method === "GET" && acceptHdr.includes("text/html")) {
+        res.status(upstreamRes.status);
+        res.setHeader("Location", toHttpProxyUrl(safeNextUrl, currentUrl));
+        return res.end();
+      }
+      currentUrl = safeNextUrl;
+    }
+
+    if (!upstreamRes) {
+      return res.status(502).send("No response from upstream target.");
+    }
+
+    const contentType = upstreamRes.headers.get("content-type") || "application/octet-stream";
+    for (const [k, v] of upstreamRes.headers.entries()) {
+      const lower = k.toLowerCase();
+      if (HTTP_PROXY_STRIPPED_RESP_HEADERS.has(lower)) continue;
+      if (lower === "location") {
+        res.setHeader("location", toHttpProxyUrl(v, currentUrl));
+        continue;
+      }
+      res.setHeader(k, v);
+    }
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Type", contentType);
+
+    const maxBytes = 12 * 1024 * 1024;
+    const rawBuf = method === "HEAD" ? Buffer.alloc(0) : await readLimitedResponseBuffer(upstreamRes, maxBytes);
+    if (!rawBuf) {
+      return res.status(502).send("Upstream response exceeded size limit.");
+    }
+
+    const lowerType = contentType.toLowerCase();
+    if (lowerType.includes("text/html") || lowerType.includes("application/xhtml+xml")) {
+      const rewrittenHtml = rewriteHtmlForHttpProxy(rawBuf.toString("utf8"), currentUrl);
+      return res.status(upstreamRes.status).send(rewrittenHtml);
+    }
+    if (lowerType.includes("text/css")) {
+      const rewrittenCss = rewriteCssUrls(rawBuf.toString("utf8"), currentUrl);
+      return res.status(upstreamRes.status).send(rewrittenCss);
+    }
+    return res.status(upstreamRes.status).send(rawBuf);
+  } catch (err) {
+    if (!res.headersSent) {
+      return res.status(502).send(`HTTP proxy error: ${err?.message || "Upstream unreachable"}`);
+    }
+    res.destroy();
+  }
+}
+
+app.use("/p", express.raw({ type: "*/*", limit: "4mb" }), handleHttpProxy);
+
 const bMap = {
   1: path.join(baremuxPath, "index.js"),
   2: path.join(publicPath, "b/s/jetty.all.js"),
@@ -802,13 +1197,16 @@ app.use(
     contentSecurityPolicy: false,
     xPoweredBy: false,
     frameguard: false,
-    hsts: {
-      maxAge: 31536000,
-      includeSubDomains: true,
-      preload: true,
-    },
+    hsts: false,
   }),
 );
+app.use((req, res, next) => {
+  const proto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  if (req.secure || proto === "https") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  }
+  next();
+});
 
 app.use("/api/", apiLimiter);
 app.use(
@@ -989,7 +1387,15 @@ function getSharedCloudSyncDb() {
           v TEXT NOT NULL,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS chat_media (
+          id TEXT PRIMARY KEY,
+          author TEXT,
+          mime TEXT NOT NULL,
+          data_b64 TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+        CREATE INDEX IF NOT EXISTS idx_chat_media_created ON chat_media(created_at);
       `);
       cloudSyncDbInitialized = true;
     }
@@ -1787,12 +2193,12 @@ async function ensureChatMetaReadyAsync() {
       try {
         let remoteKv = {};
         if (supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
-          const res = await supabaseRest("app_kv?select=k,v", { timeoutMs: 12000 });
+          const res = await supabaseRest("app_kv?k=not.like.chat_media_*&select=k,v", { timeoutMs: 12000 });
           if (res.ok && Array.isArray(res.json)) {
             supabaseHasAppKvTable = true;
             fetchSucceeded = true;
             for (const row of res.json) {
-              if (row?.k && typeof row.v === "string") {
+              if (row?.k && !String(row.k).startsWith("chat_media_") && typeof row.v === "string") {
                 try {
                   remoteKv[row.k] = JSON.parse(row.v);
                 } catch {}
@@ -4891,6 +5297,255 @@ app.post("/api/chat/moderate", async (req, res) => {
   }
 });
 
+const CHAT_MEDIA_MAX_BYTES = 2.5 * 1024 * 1024;
+const CHAT_UPLOAD_ALLOWED_MIMES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+const chatUploadedMediaCache = new LRUCache({
+  max: 120,
+  maxSize: 28 * 1024 * 1024,
+  ttl: 1000 * 60 * 60,
+  ttlAutopurge: true,
+  sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
+});
+
+function detectUploadedImageMime(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  if (
+    buf[0] === 0x47 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x38 &&
+    (buf[4] === 0x37 || buf[4] === 0x39) &&
+    buf[5] === 0x61
+  ) {
+    return "image/gif";
+  }
+  if (
+    buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buf.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+function isAllowedChatImageUrl(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s) return false;
+  if (/^\/api\/chat\/media\/cimg_[a-zA-Z0-9_-]{4,64}(?:\?[^#]*)?$/.test(s)) {
+    return true;
+  }
+  if (s.length <= 450 * 1024 && /^data:image\/(jpeg|jpg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(s)) {
+    return true;
+  }
+  return false;
+}
+
+async function moderateImageWithOpenAI(dataUrl) {
+  const apiKey = OPENAI_MODERATION_API_KEY;
+  if (!apiKey || !apiKey.startsWith("sk-")) {
+    return { blocked: false, flagged: false };
+  }
+  try {
+    const response = await fetch("https://api.openai.com/v1/moderations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "omni-moderation-latest",
+        input: [{ type: "image_url", image_url: { url: dataUrl } }],
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return { blocked: false, flagged: false };
+    const data = await response.json();
+    const result = data?.results?.[0];
+    if (result?.categories) {
+      const strictCategories = [
+        "sexual",
+        "sexual/minors",
+        "self-harm",
+        "self-harm/intent",
+        "self-harm/instructions",
+        "violence/graphic",
+        "illicit/violent",
+      ];
+      const triggered = strictCategories.filter((cat) => result.categories[cat] === true);
+      if (triggered.length > 0) {
+        return {
+          blocked: true,
+          flagged: true,
+          category: triggered[0],
+          reason: `image blocked by moderation (${triggered.join(", ")}).`,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("Image moderation request skipped:", err?.message);
+  }
+  return { blocked: false, flagged: false };
+}
+
+app.post("/api/chat/upload-image", async (req, res) => {
+  ensureChatMetaLoaded();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to upload images" });
+    }
+    const authorKey = authUser.username.toLowerCase();
+    const activeTimeout = getActiveTimeout(authorKey);
+    if (activeTimeout) {
+      return res.status(403).json({
+        success: false,
+        timedOut: true,
+        until: activeTimeout.until,
+        error: "You cannot upload images while timed out",
+      });
+    }
+
+    const rawDataUrl = String(req.body?.dataUrl || "").trim();
+    const match = /^data:(image\/(?:jpeg|jpg|png|webp|gif));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(rawDataUrl);
+    if (!match) {
+      return res.status(400).json({ success: false, error: "Only JPEG, PNG, WebP, or GIF image uploads are supported" });
+    }
+
+    const cleanB64 = match[2].replace(/\s+/g, "");
+    const buf = Buffer.from(cleanB64, "base64");
+    if (!buf || buf.length === 0 || buf.length > CHAT_MEDIA_MAX_BYTES) {
+      return res.status(413).json({ success: false, error: "Image exceeds 2.5MB upload limit" });
+    }
+
+    const detectedMime = detectUploadedImageMime(buf);
+    if (!detectedMime || !CHAT_UPLOAD_ALLOWED_MIMES.has(detectedMime)) {
+      return res.status(415).json({ success: false, error: "Unrecognized or unsupported image format" });
+    }
+
+    const normalizedDataUrl = `data:${detectedMime};base64,${cleanB64}`;
+    const modCheck = await moderateImageWithOpenAI(normalizedDataUrl);
+    if (modCheck.flagged) {
+      return res.status(400).json({
+        success: false,
+        flagged: true,
+        category: modCheck.category,
+        error: modCheck.reason || "Image blocked by moderation",
+      });
+    }
+
+    const id = `cimg_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+    chatUploadedMediaCache.set(id, { body: buf, mime: detectedMime });
+
+    try {
+      const db = getSharedCloudSyncDb();
+      db.query(
+        "INSERT OR REPLACE INTO chat_media (id, author, mime, data_b64, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+      ).run(id, authUser.username, detectedMime, cleanB64);
+      db.query(
+        "DELETE FROM chat_media WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 400)",
+      ).run();
+    } catch (e) {
+      console.warn("SQLite chat_media store warning:", e?.message);
+    }
+
+    if (USE_SUPABASE_CLOUDSYNC && supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
+      void supabaseRest("app_kv?on_conflict=k", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          k: `chat_media_${id}`,
+          v: JSON.stringify({
+            mime: detectedMime,
+            dataB64: cleanB64,
+            author: authUser.username,
+            createdAt: Date.now(),
+          }),
+        }),
+        timeoutMs: 8000,
+      }).catch(() => {});
+    }
+
+    const imageName = typeof req.body?.filename === "string"
+      ? req.body.filename.trim().slice(0, 80)
+      : "image";
+    res.json({
+      success: true,
+      id,
+      imageUrl: `/api/chat/media/${id}`,
+      imageName,
+      mime: detectedMime,
+      bytes: buf.length,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Image upload failed" });
+  }
+});
+
+app.get("/api/chat/media/:id", async (req, res) => {
+  const id = String(req.params?.id || "").trim();
+  if (!/^cimg_[a-zA-Z0-9_-]{4,64}$/.test(id)) {
+    return res.status(400).send("Invalid media id");
+  }
+
+  const cached = chatUploadedMediaCache.get(id);
+  if (cached) {
+    res.setHeader("Content-Type", cached.mime);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    return res.send(cached.body);
+  }
+
+  try {
+    const db = getSharedCloudSyncDb();
+    const row = db.query("SELECT mime, data_b64 FROM chat_media WHERE id = ?").get(id);
+    if (row?.data_b64 && CHAT_UPLOAD_ALLOWED_MIMES.has(row.mime)) {
+      const body = Buffer.from(row.data_b64, "base64");
+      chatUploadedMediaCache.set(id, { body, mime: row.mime });
+      res.setHeader("Content-Type", row.mime);
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+      return res.send(body);
+    }
+  } catch {}
+
+  if (USE_SUPABASE_CLOUDSYNC && supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
+    try {
+      const { ok, json } = await supabaseRest(
+        `app_kv?k=eq.${encodeURIComponent(`chat_media_${id}`)}&select=v&limit=1`,
+        { timeoutMs: 8000 },
+      );
+      const rawVal = ok && Array.isArray(json) && json[0]?.v ? JSON.parse(json[0].v) : null;
+      if (rawVal?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(rawVal.mime)) {
+        const body = Buffer.from(rawVal.dataB64, "base64");
+        chatUploadedMediaCache.set(id, { body, mime: rawVal.mime });
+        try {
+          getSharedCloudSyncDb()
+            .query(
+              "INSERT OR REPLACE INTO chat_media (id, author, mime, data_b64, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            )
+            .run(id, String(rawVal.author || ""), rawVal.mime, rawVal.dataB64);
+        } catch {}
+        res.setHeader("Content-Type", rawVal.mime);
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        return res.send(body);
+      }
+    } catch {}
+  }
+
+  return res.status(404).send("Media not found");
+});
+
 async function getModActor(req) {
   await ensureChatMetaReadyAsync();
   const keyHeader =
@@ -5301,11 +5956,16 @@ app.post("/api/chat/send", async (req, res) => {
     const cleanText = String(message?.text || "").trim().slice(0, 2000);
     const rawGifUrl = typeof message?.gifUrl === "string" ? message.gifUrl.trim() : "";
     const hasValidGif = Boolean(rawGifUrl && isAllowedKlipyMediaUrl(rawGifUrl));
+    const rawImageUrl = typeof message?.imageUrl === "string" ? message.imageUrl.trim() : "";
+    const hasValidImage = Boolean(rawImageUrl && isAllowedChatImageUrl(rawImageUrl));
 
     if (rawGifUrl && !hasValidGif) {
       return res.status(400).json({ success: false, error: "Only valid KLIPY HTTPS GIF URLs are allowed" });
     }
-    if (!message || !message.author || !message.channel || (!cleanText && !hasValidGif)) {
+    if (rawImageUrl && !hasValidImage) {
+      return res.status(400).json({ success: false, error: "Invalid chat image URL" });
+    }
+    if (!message || !message.author || !message.channel || (!cleanText && !hasValidGif && !hasValidImage)) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
@@ -5340,6 +6000,7 @@ app.post("/api/chat/send", async (req, res) => {
           author: rauthor,
           text: String(message.replyTo.text || "").trim().slice(0, 200),
           hasGif: Boolean(message.replyTo.hasGif),
+          hasImage: Boolean(message.replyTo.hasImage),
         };
       }
     }
@@ -5359,6 +6020,12 @@ app.post("/api/chat/send", async (req, res) => {
         ? {
             gifUrl: rawGifUrl,
             gifTitle: typeof message?.gifTitle === "string" ? message.gifTitle.trim().slice(0, 120) : "GIF",
+          }
+        : {}),
+      ...(hasValidImage
+        ? {
+            imageUrl: rawImageUrl,
+            imageName: typeof message?.imageName === "string" ? message.imageName.trim().slice(0, 80) : "image",
           }
         : {}),
       ...(cleanReplyTo ? { replyTo: cleanReplyTo } : {}),
@@ -5473,7 +6140,7 @@ app.post("/api/chat/edit", async (req, res) => {
     if (String(targetMsg.author || "").toLowerCase() !== authUser.username.toLowerCase()) {
       return res.status(403).json({ success: false, error: "You can only edit your own messages" });
     }
-    if (!cleanText && !targetMsg.gifUrl) {
+    if (!cleanText && !targetMsg.gifUrl && !targetMsg.imageUrl) {
       return res.status(400).json({ success: false, error: "Edited message cannot be empty" });
     }
 

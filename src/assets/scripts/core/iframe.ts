@@ -1,5 +1,12 @@
 import { showLoading, hideLoading } from "../state/store.ts";
-import { decodeUrl, getProxyUrl, normalizeGameHistoryUrl } from "./utils";
+import {
+  decodeUrl,
+  encodeHttpProxyUrl,
+  getProxyUrl,
+  isServiceWorkerSupportedContext,
+  normalizeGameHistoryUrl,
+} from "./utils";
+import { teardownIframeElement } from "./chromebookMode.ts";
 
 interface sunshineTab {
   id: number;
@@ -432,6 +439,19 @@ export function navigateIframeTo(
   }
 
   const proxyScope = getProxyScopeFromUrl(url);
+  if (proxyScope && !isServiceWorkerSupportedContext()) {
+    // Plain HTTP (non-localhost) cannot register Service Workers; transparently
+    // route through the server-side rewriting HTTP proxy (`/p/`).
+    const decodedTarget = decodeUrl(url);
+    const fallbackUrl =
+      decodedTarget && /^https?:\/\//i.test(decodedTarget)
+        ? encodeHttpProxyUrl(decodedTarget)
+        : url;
+    delete iframe.dataset.pendingProxyUrl;
+    iframe.removeAttribute("srcdoc");
+    iframe.src = fallbackUrl;
+    return;
+  }
   if (proxyScope) {
     iframe.dataset.pendingProxyUrl = url;
     (async () => {
@@ -481,12 +501,7 @@ export function cleanupIframe(iframe: HTMLIFrameElement): void {
   iframe.removeAttribute("data-reload-attempted");
   iframe.removeAttribute("data-manual-url");
   delete iframe.dataset.reloadCount;
-  try {
-    iframe.contentWindow?.stop?.();
-  } catch (e) {}
-  try {
-    iframe.src = "about:blank";
-  } catch (e) {}
+  teardownIframeElement(iframe);
   const wrapper = iframe.parentElement;
   if (wrapper) {
     wrapper.style.boxShadow = "";

@@ -2,7 +2,11 @@ import { BANGS, SEARCH_ENGINES } from "../core/config.ts";
 import { useEffect } from "preact/hooks";
 import { store, showBrowserView } from "../state/store.ts";
 import { navigateIframeTo, updateHistoryUI } from "../core/iframe.ts";
-import { getProxyUrl } from "../core/utils.ts";
+import {
+  encodeHttpProxyUrl,
+  getProxyUrl,
+  isServiceWorkerSupportedContext,
+} from "../core/utils.ts";
 import { checkContent } from "../core/contentFilter.ts";
 
 interface TabLike {
@@ -84,6 +88,9 @@ function generateSearchUrl(query: string): string {
 }
 
 async function getUrl(url: string): Promise<string> {
+  if (!isServiceWorkerSupportedContext()) {
+    return encodeHttpProxyUrl(url);
+  }
   const selectedBackend = localStorage.getItem("backend") ?? "scramjet";
   const withDeadline = (p: Promise<unknown> | undefined, ms = 4500) =>
     p

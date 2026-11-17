@@ -52,27 +52,59 @@ function _base64UrlDecodeToBytes(b64url: string): Uint8Array {
   return _binaryStringToBytes(atob(p));
 }
 
+export function isServiceWorkerSupportedContext(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    Boolean(window.isSecureContext) &&
+    "serviceWorker" in navigator
+  );
+}
+
+function _decodeXorToken(encodedPart: string): string | null {
+  try {
+    const xoredBytes = _base64UrlDecodeToBytes(encodedPart);
+    const rawBytes = _xorBytes(xoredBytes);
+    const percentEncoded =
+      typeof TextDecoder !== "undefined"
+        ? new TextDecoder().decode(rawBytes)
+        : _bytesToBinaryString(rawBytes);
+    const result = decodeURIComponent(percentEncoded);
+    if (result.startsWith("http://") || result.startsWith("https://")) {
+      return result;
+    }
+  } catch (_e) {}
+  return null;
+}
+
 export function decodeUrl(encodedUrl: string): string {
   if (!encodedUrl) return "";
 
   try {
     const urlObject = new URL(encodedUrl, window.location.origin);
+    if (urlObject.pathname.startsWith("/p/")) {
+      const rest = urlObject.pathname.slice("/p/".length);
+      const slashIdx = rest.indexOf("/");
+      const encodedPart = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
+      const subPath = slashIdx === -1 ? "" : rest.slice(slashIdx + 1);
+      const baseDecoded = _decodeXorToken(encodedPart);
+      if (baseDecoded) {
+        if (subPath || urlObject.search) {
+          try {
+            const rel = (subPath || "") + urlObject.search + urlObject.hash;
+            return new URL(rel, baseDecoded).href;
+          } catch {}
+        }
+        return baseDecoded + urlObject.hash;
+      }
+    }
     if (urlObject.pathname.startsWith("/!!/")) {
       let encodedPart = urlObject.pathname.slice("/!!/".length);
       if (encodedPart.endsWith("/")) encodedPart = encodedPart.slice(0, -1);
 
-      try {
-        const xoredBytes = _base64UrlDecodeToBytes(encodedPart);
-        const rawBytes = _xorBytes(xoredBytes);
-        const percentEncoded =
-          typeof TextDecoder !== "undefined"
-            ? new TextDecoder().decode(rawBytes)
-            : _bytesToBinaryString(rawBytes);
-        const result = decodeURIComponent(percentEncoded);
-        if (result.startsWith("http://") || result.startsWith("https://")) {
-          return result + urlObject.search + urlObject.hash;
-        }
-      } catch (_e) {}
+      const decoded = _decodeXorToken(encodedPart);
+      if (decoded) {
+        return decoded + urlObject.search + urlObject.hash;
+      }
 
       if (
         encodedPart.startsWith("http://") ||
@@ -177,6 +209,29 @@ export function getProxyUrl(url: string): string {
   } catch {}
   const encoded = encodeMochiUrl(trimmed);
   return "/!!/" + encoded + "/";
+}
+
+/**
+ * Encodes an http(s) target URL for the server-side rewriting proxy (`/p/.../`),
+ * used when browser Service Workers are unavailable (e.g., plain HTTP contexts).
+ */
+export function encodeHttpProxyUrl(url: string): string {
+  if (!url) return "";
+  const trimmed = String(url).trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("/p/") ||
+    trimmed.startsWith("/!!/") ||
+    trimmed.startsWith("about:") ||
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:")
+  ) {
+    return trimmed;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return `/p/${encodeMochiUrl(trimmed)}/`;
+  }
+  return trimmed;
 }
 
 export function normalizeGameHistoryUrl(candidate: string | null | undefined): string | null {

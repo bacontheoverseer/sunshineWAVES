@@ -1896,3 +1896,155 @@ html.dark-mode .footer {
     color: var(--text-dimmed, rgba(255, 255, 255, 0.62));
     text-shadow: 0 1px 6px rgba(0, 0, 0, 0.75);
 }
+
+/* Chromebook / Low-Spec Mode (Strictly opt-in via Settings -> chromebook mode) */
+html.chromebook-mode *,
+html.chromebook-mode *::before,
+html.chromebook-mode *::after {
+    backdrop-filter: none !important;
+}
+
+html.chromebook-mode,
+html.chromebook-mode body,
+html.chromebook-mode .chat-feed,
+html.chromebook-mode .meow {
+    scroll-behavior: auto !important;
+}
+
+:root.chromebook-mode *,
+:root.chromebook-mode *::before,
+:root.chromebook-mode *::after {
+    -webkit-backdrop-filter: none !important;
+}
+
+html.chromebook-mode #particles-canva {
+    display: none !important;
+}
+
+html.chromebook-mode .sidebar,
+html.chromebook-mode .main-nav,
+html.chromebook-mode .popup,
+html.chromebook-mode .settings-menu,
+html.chromebook-mode #warningPrompt,
+html.chromebook-mode #updateSuccess,
+html.chromebook-mode .home-decor-fab,
+html.chromebook-mode .home-decor-editor {
+    background-color: rgba(15, 18, 28, 0.95) !important;
+    background: color-mix(in srgb, var(--bg-body, #0f121c) 95%, transparent) !important;
+    box-shadow: none !important;
+}
+
+html.chromebook-mode .main-container,
+html.chromebook-mode.dark-mode .main-container {
+    background: rgba(15, 18, 28, 0.95) !important;
+    background: color-mix(in srgb, var(--bg-surface-2, #0f121c) 95%, transparent) !important;
+    box-shadow: none !important;
+}
+
+html.chromebook-mode .cloudsync-gate-backdrop {
+    background: rgba(5, 5, 8, 0.96) !important;
+}
+
+html.chromebook-mode .oxp-backdrop,
+html.chromebook-mode .toast.success,
+html.chromebook-mode .toast.error,
+html.chromebook-mode .toast.info {
+    background-color: rgba(15, 18, 28, 0.95) !important;
+}
+
+html.chromebook-mode body.games-view::before,
+html.chromebook-mode body.apps-view::before,
+html.chromebook-mode body.studio-view::before,
+html.chromebook-mode body.shop-view::before,
+html.chromebook-mode body.master-view::before {
+    background: linear-gradient(to bottom, var(--bg-body, #0f121c) 68%, rgba(15, 18, 28, 0.85) 88%, transparent 100%) !important;
+}
+
+html.chromebook-mode .icon-btn,
+html.chromebook-mode .text-icon-btn {
+    background-color: rgba(20, 24, 36, 0.94) !important;
+    background: color-mix(in srgb, var(--bg-surface-4, #141824) 94%, var(--bg-body, #0f121c)) !important;
+    box-shadow: none !important;
+    transition: none !important;
+}
+
+html.chromebook-mode .icon-btn:hover,
+html.chromebook-mode .text-icon-btn:hover,
+html.chromebook-mode .nav-controls a:hover,
+html.chromebook-mode .window-controls a:hover,
+html.chromebook-mode .prompt-close-btn:hover {
+    transform: none !important;
+}
+
+html.chromebook-mode .title img {
+    filter: none !important;
+}
+
+html.chromebook-mode .game-card,
+html.chromebook-mode .studio-game-card,
+html.chromebook-mode .app-card,
+html.chromebook-mode .oxp-modal,
+html.chromebook-mode .tour-tooltip,
+html.chromebook-mode .toast {
+    box-shadow: none !important;
+    filter: none !important;
+    transition: none !important;
+}
+
+html.chromebook-mode .game-card:hover,
+html.chromebook-mode .studio-game-card:hover,
+html.chromebook-mode .app-card:hover {
+    transform: none !important;
+    box-shadow: 0 0 0 1px var(--border-medium, rgba(255, 255, 255, 0.25)) !important;
+}
+
+html.chromebook-mode .game-card-2p-btn {
+    background: rgba(15, 18, 28, 0.95) !important;
+}
+
+html.chromebook-mode .studio-game-card,
+html.chromebook-mode .app-card {
+    content-visibility: auto;
+    contain-intrinsic-size: 260px 230px;
+}
+
+html.chromebook-mode *:not(.iframe-container):not(.iframe-container *) {
+    transition-duration: 0s !important;
+}
+
+/* Freeze Background UI & Animations when a game iframe/view is active */
+html.chromebook-mode body.game-active-perf-mode *:not(#iframe-container):not(#iframe-container *):not(#studio-page .studio-stage-panel):not(#studio-page .studio-stage-panel *) {
+    animation-play-state: paused !important;
+    transition: none !important;
+}
+
+html.chromebook-mode body.game-active-perf-mode #particles-canva,
+html.chromebook-mode body.game-active-perf-mode #arrow-pointer,
+html.chromebook-mode body.game-active-perf-mode .site-bg-layer,
+html.chromebook-mode body.game-active-perf-mode .home-decor-stage,
+html.chromebook-mode body.game-active-perf-mode .home-decor-dock,
+html.chromebook-mode body.game-active-perf-mode .marquee,
+html.chromebook-mode body.game-active-perf-mode .game-skeleton-card {
+    display: none !important;
+    animation-play-state: paused !important;
+}
+
+html.chromebook-mode body.browser-view.game-active-perf-mode .main-container,
+html.chromebook-mode body.browser-view.game-active-perf-mode #bookmarks-container,
+html.chromebook-mode body.browser-view.game-active-perf-mode .footer,
+html.chromebook-mode body.browser-view.game-active-perf-mode .games-page,
+html.chromebook-mode body.browser-view.game-active-perf-mode .apps-page,
+html.chromebook-mode body.browser-view.game-active-perf-mode .studio-page,
+html.chromebook-mode body.browser-view.game-active-perf-mode .shop-page,
+html.chromebook-mode body.browser-view.game-active-perf-mode .master-page {
+    display: none !important;
+    content-visibility: hidden !important;
+}
+
+html.chromebook-mode body.studio-view.game-active-perf-mode .studio-grid,
+html.chromebook-mode body.studio-view.game-active-perf-mode .studio-library-toolbar,
+html.chromebook-mode body.studio-view.game-active-perf-mode .studio-hero,
+html.chromebook-mode body.studio-view.game-active-perf-mode .studio-quickstart-banner {
+    display: none !important;
+    content-visibility: hidden !important;
+}

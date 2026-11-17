@@ -8,6 +8,7 @@ import { initializeIframe,
 } from "../core/iframe.ts";
 import { handleSearch as performSearch } from "../search/search.ts";
 import { getProxyUrl, normalizeGameHistoryUrl } from "../core/utils.ts";
+import { syncGameActivePerfMode } from "../core/chromebookMode.ts";
 
 interface Tab {
   id: number;
@@ -506,6 +507,7 @@ export const store = {
     }
 
     this.syncRefreshButton();
+    syncGameActivePerfMode();
     this.notify();
   },
 
@@ -929,9 +931,11 @@ export function removeIframeLoading(tabId?: number) {
 }
 export function showBrowserView() {
   document.body.classList.add("browser-view");
+  syncGameActivePerfMode();
 }
 export function showHomeView() {
   document.body.classList.remove("browser-view");
+  syncGameActivePerfMode();
 }
 export function syncRefreshButtonWithActiveTab() {
   store.syncRefreshButton();

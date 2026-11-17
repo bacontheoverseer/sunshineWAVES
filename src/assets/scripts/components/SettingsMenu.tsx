@@ -4,6 +4,10 @@ import {
   PRIVACY_SECTIONS,
   TERMS_SECTIONS,
 } from "../core/legalDocs.js";
+import {
+  CHROMEBOOK_MODE_STORAGE_KEY,
+  setChromebookModeEnabled,
+} from "../core/chromebookMode.ts";
 import OxiumSettingsCard from "./OxiumSettingsCard";
 
 interface SelectorProps {
@@ -131,6 +135,9 @@ export default function SettingsMenu() {
   const [darkMode, setDarkMode] = useState(
     () => localStorage.getItem("darkMode") === "true",
   );
+  const [chromebookMode, setChromebookMode] = useState(
+    () => localStorage.getItem(CHROMEBOOK_MODE_STORAGE_KEY) === "true",
+  );
   const [versionInfo, setVersionInfo] = useState("");
 
   useEffect(() => {
@@ -244,6 +251,16 @@ export default function SettingsMenu() {
     return () => document.removeEventListener("openSettingsLegal", onOpenLegal);
   }, [isOpen, isClosing]);
 
+  useEffect(() => {
+    const syncFromStorage = () => {
+      const enabled = localStorage.getItem(CHROMEBOOK_MODE_STORAGE_KEY) === "true";
+      setChromebookMode(enabled);
+      setChromebookModeEnabled(enabled);
+    };
+    window.addEventListener("cloudsync-restored", syncFromStorage);
+    return () => window.removeEventListener("cloudsync-restored", syncFromStorage);
+  }, []);
+
   const save = (key: string, value: string) => {
     localStorage.setItem(key, value);
     window.showToast?.("success", "settings saved");
@@ -321,6 +338,8 @@ export default function SettingsMenu() {
       runThemeTransition(() => {
         document.documentElement.classList.toggle("dark-mode", value);
       });
+    } else if (key === CHROMEBOOK_MODE_STORAGE_KEY) {
+      setChromebookModeEnabled(value);
     }
   };
 
@@ -494,6 +513,17 @@ export default function SettingsMenu() {
                 checked={preventClosing}
                 onChange={(v) =>
                   handleToggle("preventClosing", v, setPreventClosing)
+                }
+              />
+            </div>
+            <div class="settings-item">
+              <label>chromebook mode</label>
+              <p>pause background animations while playing, remove blur/heavy shadows, and optimize chat &amp; grids for low-end laptops.</p>
+              <Toggle
+                id="chromebook-mode-toggle"
+                checked={chromebookMode}
+                onChange={(v) =>
+                  handleToggle(CHROMEBOOK_MODE_STORAGE_KEY, v, setChromebookMode)
                 }
               />
             </div>

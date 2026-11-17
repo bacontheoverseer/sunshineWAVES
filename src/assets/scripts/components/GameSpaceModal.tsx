@@ -12,6 +12,7 @@ import {
 } from "../core/cookieCoins.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
 import { getClientId } from "../core/liveClient.ts";
+import { isChromebookModeEnabled, useChromebookMode } from "../core/chromebookMode.ts";
 
 interface SpaceMessage {
   id: string;
@@ -1748,8 +1749,10 @@ export default function GameSpaceModal() {
             gap: "10px",
             padding: "9px 14px",
             borderRadius: "16px",
-            backgroundColor: "rgba(12, 12, 16, 0.88)",
-            backdropFilter: "blur(14px)",
+            backgroundColor: isChromebookModeEnabled()
+              ? "rgba(12, 12, 16, 0.96)"
+              : "rgba(12, 12, 16, 0.88)",
+            backdropFilter: isChromebookModeEnabled() ? "none" : "blur(14px)",
             border: "1px solid var(--bg-surface-10)",
             color: "var(--text-primary)",
             fontSize: "12px",

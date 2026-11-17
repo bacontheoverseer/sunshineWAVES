@@ -1,3 +1,5 @@
+import { isServiceWorkerSupportedContext } from "./utils.ts";
+
 type ConnectionState =
   | "IDLE"
   | "CONNECTING"
@@ -83,6 +85,7 @@ class sunshineConnectionManager {
   _hiddenAtMs: number;
   _swEnsurePromises: Map<string, Promise<ServiceWorkerRegistration>>;
   _inRetryBackoff: boolean;
+  _httpFallbackMode: boolean;
 
   constructor() {
     this.state = STATES.IDLE;
@@ -98,6 +101,7 @@ class sunshineConnectionManager {
     this._hiddenAtMs = 0;
     this._swEnsurePromises = new Map();
     this._inRetryBackoff = false;
+    this._httpFallbackMode = !isServiceWorkerSupportedContext();
 
     const app = ((window as unknown as Record<string, unknown>)["sunshineApp"] ??= {}) as typeof window.sunshineApp;
     app.transportReady = this._transportReadyPromise;
@@ -106,6 +110,12 @@ class sunshineConnectionManager {
     ) => this.ensureServiceWorkerReady(opts);
 
     app.waitForTransport = async (timeoutMs = 10000) => {
+      if (this._httpFallbackMode || !isServiceWorkerSupportedContext()) {
+        this._httpFallbackMode = true;
+        this.setState(STATES.CONNECTED);
+        this._resolveTransportReady();
+        return Promise.resolve();
+      }
       if (this._transportReadyPromise._settled && this.state === STATES.CONNECTED) {
         const [swOk, transportOk] = await Promise.all([
           this._verifyServiceWorker(),
@@ -167,10 +177,10 @@ class sunshineConnectionManager {
   }
 
   preFlightChecks(): boolean {
-    if (!navigator.serviceWorker) {
-      this.updateStatus("fatal: service workers are not supported!", "error");
-      this.setState(STATES.FAILED);
-      return false;
+    if (!isServiceWorkerSupportedContext()) {
+      this._httpFallbackMode = true;
+      this.updateStatus("http proxy fallback active", "info");
+      return true;
     }
     if (typeof BareMux !== "object" || !BareMux.BareMuxConnection) {
       this.updateStatus("fatal: baremux library not found!", "error");
@@ -505,6 +515,17 @@ class sunshineConnectionManager {
   }
 
   async initializeApp(isRetry: boolean = false): Promise<boolean | undefined> {
+    if (this._httpFallbackMode || !isServiceWorkerSupportedContext()) {
+      this._httpFallbackMode = true;
+      this._resolveTransportReady();
+      this.updateStatus("connected (http proxy fallback)!", "success");
+      this.setState(STATES.CONNECTED);
+      this._retryCount = 0;
+      this.isInitialLoad = false;
+      const el = document.querySelector(".transport-selected");
+      if (el) el.textContent = "http-proxy";
+      return true;
+    }
     if (this.state === STATES.CONNECTING && !isRetry) return;
     if (this.state === STATES.RECONNECTING && !this._inRetryBackoff && isRetry) return;
     this._inRetryBackoff = false;
@@ -603,6 +624,7 @@ class sunshineConnectionManager {
   }
 
   startHealthCheck(): void {
+    if (this._httpFallbackMode) return;
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
     let isChecking = false;
     this.healthCheckInterval = setInterval(async () => {
@@ -656,6 +678,7 @@ class sunshineConnectionManager {
   }
 
   async recoverOnWake(options?: { forceReapply?: boolean }): Promise<void> {
+    if (this._httpFallbackMode) return;
     if (
       this._isRecovering ||
       this.state === STATES.CONNECTING ||

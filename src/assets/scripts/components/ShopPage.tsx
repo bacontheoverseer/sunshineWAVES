@@ -12,6 +12,7 @@ import {
 } from "../core/cookieCoins.ts";
 import { getClientId, executeTrollAction, isLiveStreamConnected } from "../core/liveClient.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
+import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 
 interface ShopTrollItem {
   id: string;
@@ -379,10 +380,28 @@ export default function ShopPage() {
   useEffect(() => {
     if (!visible || shopTab !== "trolls") return;
     fetchOnlineUsers();
+    let batchTimer: number | null = null;
+    let batchRaf: number | null = null;
+    let pendingList: any = null;
     const onPresence = (e: Event) => {
       const detail = (e as CustomEvent)?.detail;
-      if (Array.isArray(detail?.onlineUsers)) {
+      if (!Array.isArray(detail?.onlineUsers)) return;
+      if (!isChromebookModeEnabled()) {
         applyOnlineList(detail.onlineUsers);
+        return;
+      }
+      pendingList = detail.onlineUsers;
+      if (batchTimer === null) {
+        batchTimer = window.setTimeout(() => {
+          batchTimer = null;
+          if (batchRaf !== null) window.cancelAnimationFrame(batchRaf);
+          batchRaf = window.requestAnimationFrame(() => {
+            batchRaf = null;
+            const list = pendingList;
+            pendingList = null;
+            if (Array.isArray(list)) applyOnlineList(list);
+          });
+        }, 500);
       }
     };
     window.addEventListener("sunshine-presence-event", onPresence);
@@ -394,6 +413,8 @@ export default function ShopPage() {
     return () => {
       window.removeEventListener("sunshine-presence-event", onPresence);
       window.clearInterval(timer);
+      if (batchTimer !== null) window.clearTimeout(batchTimer);
+      if (batchRaf !== null) window.cancelAnimationFrame(batchRaf);
     };
   }, [visible, shopTab, fetchOnlineUsers, applyOnlineList]);
 

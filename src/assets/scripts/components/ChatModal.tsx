@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "preact/hooks";
+import { memo } from "preact/compat";
 import { moderateChatMessage } from "../core/contentFilter.ts";
+import {
+  batchedLocalStorageGet,
+  batchedLocalStorageSet,
+  isGameActivePerfMode,
+  useChromebookMode,
+} from "../core/chromebookMode.ts";
 import {
   getClientId,
   detectCurrentGameSession,
@@ -30,12 +37,21 @@ import {
   UserAvatar,
   getNameClasses,
 } from "./ProfileVisuals.tsx";
+import ChatCameraModal from "./ChatCameraModal.tsx";
+import {
+  type CompressedImageResult,
+  compressImageFile,
+  formatBytesLabel,
+  isAllowedChatImageUrl,
+  uploadChatImage,
+} from "../core/imageUpload.ts";
 
 interface ChatReplyRef {
   id: string;
   author: string;
   text?: string;
   hasGif?: boolean;
+  hasImage?: boolean;
 }
 
 interface ChatMessage {
@@ -47,6 +63,8 @@ interface ChatMessage {
   text: string;
   gifUrl?: string;
   gifTitle?: string;
+  imageUrl?: string;
+  imageName?: string;
   timestamp: string;
   channel: string;
   recipient?: string | null;
@@ -355,13 +373,555 @@ function renderFormattedText(text: string) {
   });
 }
 
+const CHROMEBOOK_INITIAL_MSG_CAP = 60;
+const CHROMEBOOK_MSG_STEP = 60;
+const QUICK_REACT_EMOJIS = ["😂", "❤️", "😭", "🔥", "👍", "💀", "🎉", "👀"] as const;
+
+interface ChatMessageRowProps {
+  msg: ChatMessage;
+  isGrouped: boolean;
+  isSelf: boolean;
+  msgCustom: ProfileCustomization | null;
+  safeFallbackColor: string;
+  authorRole: ChatRole;
+  isAuthorGoat: boolean;
+  canDeleteMsg: boolean;
+  displayName: string;
+  replyAuthorLabel: string;
+  replyMiniCustom: ProfileCustomization | null;
+  replyTextColorClass: string;
+  isHighlighted: boolean;
+  isEditingThis: boolean;
+  editingMessageText: string;
+  savingEdit: boolean;
+  isReacting: boolean;
+  isReactPickerOpen: boolean;
+  reactPickerRef: preact.RefObject<HTMLDivElement>;
+  cloudUser: string | null;
+  canReplyOrReact: boolean;
+  onScrollToMessage: (id: string) => void;
+  onOpenUserProfile: (username: string) => void;
+  onStartEditMessage: (msg: ChatMessage) => void;
+  onSaveEditMessage: (msg: ChatMessage) => void;
+  onCancelEditMessage: () => void;
+  onEditingTextChange: (text: string) => void;
+  onToggleReaction: (msgId: string, emoji: string) => void;
+  onToggleReactMenu: (msgId: string) => void;
+  onOpenReactPicker: (msgId: string) => void;
+  onCloseReactPicker: () => void;
+  onReplyMessage: (msg: ChatMessage) => void;
+  onOpenDirectMessage: (username: string) => void;
+  onToggleBlockUser: (username: string) => void;
+  onDeleteMessage: (msg: ChatMessage) => void;
+  onOpenImageLightbox: (url: string, name?: string | undefined) => void;
+}
+
+const ChatMessageRow = memo(function ChatMessageRow({
+  msg,
+  isGrouped,
+  isSelf,
+  msgCustom,
+  safeFallbackColor,
+  authorRole,
+  isAuthorGoat,
+  canDeleteMsg,
+  displayName,
+  replyAuthorLabel,
+  replyMiniCustom,
+  replyTextColorClass,
+  isHighlighted,
+  isEditingThis,
+  editingMessageText,
+  savingEdit,
+  isReacting,
+  isReactPickerOpen,
+  reactPickerRef,
+  cloudUser,
+  canReplyOrReact,
+  onScrollToMessage,
+  onOpenUserProfile,
+  onStartEditMessage,
+  onSaveEditMessage,
+  onCancelEditMessage,
+  onEditingTextChange,
+  onToggleReaction,
+  onToggleReactMenu,
+  onOpenReactPicker,
+  onCloseReactPicker,
+  onReplyMessage,
+  onOpenDirectMessage,
+  onToggleBlockUser,
+  onDeleteMessage,
+  onOpenImageLightbox,
+}: ChatMessageRowProps) {
+  const replyRef = msg.replyTo || null;
+
+  return (
+    <div
+      id={`chat-msg-${msg.id}`}
+      class={`chat-entry ${isGrouped ? "is-grouped" : ""} ${
+        replyRef ? "has-reply" : ""
+      } ${isHighlighted ? "is-highlighted" : ""}`}
+    >
+      {replyRef && (
+        <div
+          class="chat-reply-context"
+          title="Jump to original message"
+          onClick={() => onScrollToMessage(replyRef.id)}
+        >
+          <span class="chat-reply-spine" aria-hidden="true" />
+          <UserAvatar
+            username={replyRef.author}
+            custom={replyMiniCustom}
+            fallbackColor={stringToColor(replyRef.author)}
+            className="chat-reply-mini-avatar"
+          />
+          <span class={`chat-reply-author ${replyTextColorClass}`}>
+            @{replyAuthorLabel}
+          </span>
+          <span class="chat-reply-snippet">
+            {replyRef.text
+              ? replyRef.text
+              : replyRef.hasImage
+              ? "clicked to view image"
+              : replyRef.hasGif
+              ? "clicked to see GIF"
+              : "message"}
+          </span>
+        </div>
+      )}
+
+      <div class="chat-entry-main">
+        {isGrouped ? (
+          <div class="chat-entry-gutter" aria-hidden="true">
+            <span class="chat-entry-hover-time">{msg.timestamp}</span>
+          </div>
+        ) : (
+          <UserAvatar
+            username={msg.author}
+            custom={msgCustom}
+            fallbackColor={safeFallbackColor}
+            className="chat-entry-avatar"
+            title={`View @${msg.author}'s profile`}
+            onClick={(e: MouseEvent) => {
+              e.stopPropagation();
+              onOpenUserProfile(msg.author);
+            }}
+          />
+        )}
+        <div class="chat-entry-content">
+          {!isGrouped && (
+            <div class="chat-entry-header">
+              <span
+                class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
+                  msgCustom
+                )}`}
+                title={`View @${msg.author}'s profile`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenUserProfile(msg.author);
+                }}
+              >
+                {displayName}
+              </span>
+              <RoleBadge role={authorRole} />
+              <GoatBadge isGoat={isAuthorGoat} />
+              {msgCustom?.customTag && (
+                <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
+              )}
+              <span class="chat-entry-time">{msg.timestamp}</span>
+            </div>
+          )}
+          {isEditingThis ? (
+            <form
+              class="chat-edit-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                onSaveEditMessage(msg);
+              }}
+            >
+              <input
+                type="text"
+                class="chat-edit-input"
+                maxLength={500}
+                autoFocus
+                disabled={savingEdit}
+                value={editingMessageText}
+                onInput={(e) =>
+                  onEditingTextChange((e.target as HTMLInputElement).value)
+                }
+              />
+              <div class="chat-edit-meta-row">
+                <span>escape to cancel · enter to save</span>
+                <div style={{ display: "flex", gap: "6px" }}>
+                  <button
+                    type="button"
+                    class="chat-gif-more-btn"
+                    onClick={onCancelEditMessage}
+                  >
+                    cancel
+                  </button>
+                  <button
+                    type="submit"
+                    class="chat-gif-more-btn"
+                    disabled={savingEdit}
+                    style={{
+                      backgroundColor: "var(--btn-primary-bg)",
+                      color: "var(--btn-primary-text)",
+                    }}
+                  >
+                    {savingEdit ? "saving..." : "save"}
+                  </button>
+                </div>
+              </div>
+            </form>
+          ) : (
+            msg.text &&
+            (() => {
+              const jumboCount = getJumboEmojiCount(msg.text);
+              const jumboCls =
+                jumboCount > 0
+                  ? ` is-jumbo-emoji${jumboCount <= 3 ? " is-jumbo-lg" : ""}`
+                  : "";
+              return (
+                <div class={`chat-entry-text${jumboCls}`}>
+                  {renderFormattedText(msg.text)}
+                  {msg.edited && <span class="chat-msg-edited">(edited)</span>}
+                </div>
+              );
+            })()
+          )}
+          {isAllowedKlipyUrl(msg.gifUrl) && (
+            <div class="chat-entry-gif-wrap">
+              <img
+                class="chat-entry-gif"
+                src={getKlipyProxySrc(msg.gifUrl)}
+                alt={msg.gifTitle || "GIF"}
+                loading="lazy"
+                decoding="async"
+              />
+            </div>
+          )}
+          {isAllowedChatImageUrl(msg.imageUrl) && (
+            <div class="chat-entry-image-wrap">
+              <button
+                type="button"
+                class="chat-entry-image-btn"
+                title={`View full image${msg.imageName ? ` (${msg.imageName})` : ""}`}
+                onClick={() => onOpenImageLightbox(msg.imageUrl!, msg.imageName)}
+              >
+                <img
+                  class="chat-entry-image"
+                  src={msg.imageUrl}
+                  alt={msg.imageName || "Uploaded image"}
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
+            </div>
+          )}
+          {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+            <div class="chat-reaction-bar">
+              {Object.entries(msg.reactions).map(([emoji, users]) => {
+                if (!Array.isArray(users) || users.length === 0) return null;
+                const meReacted = Boolean(
+                  cloudUser && users.includes(cloudUser.toLowerCase())
+                );
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    class={`chat-reaction-pill${meReacted ? " is-reacted" : ""}`}
+                    title={`${users.map((u) => `@${u}`).join(", ")}`}
+                    onClick={() => onToggleReaction(msg.id, emoji)}
+                  >
+                    <span class="chat-reaction-emoji">{emoji}</span>
+                    <span class="chat-reaction-count">{users.length}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Hover actions on each message */}
+      <div class="chat-entry-actions">
+        {canReplyOrReact && (
+          <button
+            type="button"
+            class="chat-entry-action-btn chat-react-toggle-btn"
+            title="Add reaction"
+            onClick={() => onToggleReactMenu(msg.id)}
+          >
+            <i class="fa-regular fa-face-smile"></i>
+          </button>
+        )}
+        <button
+          type="button"
+          class="chat-entry-action-btn"
+          title={`View @${msg.author}'s profile`}
+          onClick={() => onOpenUserProfile(msg.author)}
+        >
+          <i class="fa-solid fa-id-card"></i>
+        </button>
+        {canReplyOrReact && (
+          <button
+            type="button"
+            class="chat-entry-action-btn"
+            title={`Reply to @${msg.author}`}
+            onClick={() => onReplyMessage(msg)}
+          >
+            <i class="fa-solid fa-reply"></i>
+          </button>
+        )}
+        {isSelf && !isEditingThis && (
+          <button
+            type="button"
+            class="chat-entry-action-btn"
+            title="Edit message"
+            onClick={() => onStartEditMessage(msg)}
+          >
+            <i class="fa-solid fa-pen"></i>
+          </button>
+        )}
+        {!isSelf && (
+          <>
+            <button
+              type="button"
+              class="chat-entry-action-btn"
+              title={`Direct message @${msg.author}`}
+              onClick={() => onOpenDirectMessage(msg.author)}
+            >
+              <i class="fa-solid fa-paper-plane"></i>
+            </button>
+            <button
+              type="button"
+              class="chat-entry-action-btn danger"
+              title={`Block @${msg.author}`}
+              onClick={() => onToggleBlockUser(msg.author)}
+            >
+              <i class="fa-solid fa-ban"></i>
+            </button>
+          </>
+        )}
+        {canDeleteMsg && (
+          <button
+            type="button"
+            class="chat-entry-action-btn danger"
+            title="Delete message"
+            onClick={() => onDeleteMessage(msg)}
+          >
+            <i class="fa-solid fa-trash-can"></i>
+          </button>
+        )}
+      </div>
+
+      {isReacting && (
+        <div class="chat-quick-react-bar">
+          {QUICK_REACT_EMOJIS.map((em) => (
+            <button
+              key={em}
+              type="button"
+              class="chat-quick-react-btn"
+              title={`React with ${em}`}
+              onClick={() => onToggleReaction(msg.id, em)}
+            >
+              {em}
+            </button>
+          ))}
+          <button
+            type="button"
+            class="chat-quick-react-btn chat-quick-react-more"
+            title="More emojis"
+            onClick={() => onOpenReactPicker(msg.id)}
+          >
+            <i class="fa-solid fa-plus"></i>
+          </button>
+        </div>
+      )}
+
+      {isReactPickerOpen && (
+        <EmojiPicker
+          pickerRef={reactPickerRef}
+          containerClass="is-reaction-picker"
+          onSelect={(emoji) => onToggleReaction(msg.id, emoji)}
+          onClose={onCloseReactPicker}
+        />
+      )}
+    </div>
+  );
+});
+
+interface ChatUserRowProps {
+  user: OnlineUser;
+  offline?: boolean;
+  blocked: boolean;
+  isGoat: boolean;
+  dotStatus: "online" | "idle" | "dnd";
+  playingDurationLabel: string;
+  onOpenUserProfile: (username: string) => void;
+  onOpenDirectMessage: (username: string) => void;
+  onToggleBlockUser: (username: string) => void;
+}
+
+const ChatUserRow = memo(function ChatUserRow({
+  user: u,
+  offline = false,
+  blocked,
+  isGoat,
+  dotStatus,
+  playingDurationLabel,
+  onOpenUserProfile,
+  onOpenDirectMessage,
+  onToggleBlockUser,
+}: ChatUserRowProps) {
+  const uCustom = u.customization || null;
+  const npClass = [
+    uCustom?.nameplate && uCustom.nameplate !== "none"
+      ? `has-nameplate nameplate-${uCustom.nameplate}`
+      : "",
+    uCustom?.nameplateUrl ? "has-nameplate has-media-nameplate" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const displayName = uCustom?.displayName?.trim() || u.username;
+
+  return (
+    <div class={`chat-user-item${offline ? " offline" : ""} ${npClass}`}>
+      <NameplateMediaLayer url={uCustom?.nameplateUrl} />
+      <div
+        class="chat-user-avatar-wrap"
+        title={`View @${u.username}'s profile`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenUserProfile(u.username);
+        }}
+      >
+        <UserAvatar
+          username={u.username}
+          custom={uCustom}
+          fallbackColor={u.color}
+          className="chat-user-avatar"
+          opacity={offline ? (blocked ? 0.35 : 0.65) : blocked ? 0.45 : 1}
+        />
+        <div class={`chat-user-dot ${offline ? "offline" : dotStatus}`}></div>
+      </div>
+      <div
+        class="chat-user-meta"
+        title={`View @${u.username}'s profile`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenUserProfile(u.username);
+        }}
+      >
+        <div class="chat-user-name-row">
+          <span
+            class={`chat-user-name ${getNameClasses(uCustom)}`}
+            style={
+              offline
+                ? {
+                    opacity: blocked ? 0.45 : 0.78,
+                    textDecoration: blocked ? "line-through" : undefined,
+                  }
+                : blocked
+                ? { textDecoration: "line-through", opacity: 0.6 }
+                : undefined
+            }
+          >
+            {displayName}
+          </span>
+          <RoleBadge role={u.role} />
+          <GoatBadge isGoat={isGoat} />
+          {!offline && u.isTimedOut && (
+            <span class="chat-role-badge muted-pill">muted</span>
+          )}
+          {!offline && u.isSelf && <span class="chat-you-pill">you</span>}
+        </div>
+        {!offline && playingDurationLabel ? (
+          <div class="chat-user-game-sub" title={`Playing ${u.game}`}>
+            <i class="fa-solid fa-gamepad"></i>
+            <span>
+              playing {u.game} · {playingDurationLabel}
+            </span>
+          </div>
+        ) : (
+          <div class={`chat-user-status-sub${offline ? " offline" : ""}`}>
+            {offline
+              ? u.statusText
+                ? u.statusText
+                : "offline"
+              : u.statusText
+              ? u.statusText
+              : dotStatus === "dnd"
+              ? "do not disturb"
+              : dotStatus === "idle"
+              ? "idle"
+              : "online"}
+          </div>
+        )}
+      </div>
+
+      <div class="chat-user-actions">
+        <button
+          type="button"
+          class="chat-user-mini-btn"
+          title={
+            !offline && u.isSelf
+              ? "View your profile"
+              : `View @${u.username}'s profile`
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenUserProfile(u.username);
+          }}
+        >
+          <i class="fa-solid fa-id-card"></i>
+        </button>
+        {(offline || !u.isSelf) && (
+          <>
+            <button
+              type="button"
+              class="chat-user-mini-btn"
+              title={`Direct message ${u.username}`}
+              onClick={() => onOpenDirectMessage(u.username)}
+            >
+              <i class="fa-solid fa-comment-dots"></i>
+            </button>
+            <button
+              type="button"
+              class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
+              title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
+              onClick={() => onToggleBlockUser(u.username)}
+            >
+              <i class="fa-solid fa-ban"></i>
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+});
+
 export default function ChatModal() {
+  const chromebookMode = useChromebookMode();
+  const chromebookModeRef = useRef(chromebookMode);
+  chromebookModeRef.current = chromebookMode;
+  const [msgRenderLimit, setMsgRenderLimit] = useState(CHROMEBOOK_INITIAL_MSG_CAP);
   const [isOpen, setIsOpen] = useState(false);
   const [activeChannel, setActiveChannel] = useState("general");
   const [inputText, setInputText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showCameraModal, setShowCameraModal] = useState(false);
+  const [pendingImage, setPendingImage] = useState<CompressedImageResult | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{
+    url: string;
+    name?: string | undefined;
+  } | null>(null);
+  const [dragOverChat, setDragOverChat] = useState(false);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
   const [gifSearch, setGifSearch] = useState("");
   const [gifItems, setGifItems] = useState<KlipyGifItem[]>([]);
   const [gifLoading, setGifLoading] = useState(false);
@@ -419,7 +979,7 @@ export default function ChatModal() {
   // Messages list
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
-      const stored = localStorage.getItem("cookie_chat_messages_v2");
+      const stored = batchedLocalStorageGet("cookie_chat_messages_v2");
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed)) return parsed;
@@ -438,6 +998,11 @@ export default function ChatModal() {
   const [viewingProfileUsername, setViewingProfileUsername] = useState<string | null>(null);
   const [profileData, setProfileData] = useState<UserProfileDetails | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
+  const [selfCreatedAt, setSelfCreatedAt] = useState<number | undefined>(undefined);
+  const viewingProfileRef = useRef<string | null>(null);
+  viewingProfileRef.current = viewingProfileUsername;
+  const profileReqSeqRef = useRef(0);
+  const profileFetchAbortRef = useRef<AbortController | null>(null);
   const [editingBio, setEditingBio] = useState("");
   const [editingStatusText, setEditingStatusText] = useState("");
   const [editingCustom, setEditingCustom] = useState<ProfileCustomization>(() => {
@@ -486,8 +1051,14 @@ export default function ChatModal() {
   const [speakingMap, setSpeakingMap] = useState<Record<string, boolean>>({});
   const [userVolumes, setUserVolumes] = useState<Record<string, number>>({});
 
+  const chatFeedRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prevFeedScrollTopRef = useRef<number>(0);
+  const ignoreAutoExpandUntilRef = useRef<number>(0);
   const broadcastRef = useRef<BroadcastChannel | null>(null);
+  const pendingPresenceDetailRef = useRef<any>(null);
+  const presenceBatchTimerRef = useRef<number | null>(null);
+  const presenceBatchRafRef = useRef<number | null>(null);
   const activeChannelRef = useRef(activeChannel);
   activeChannelRef.current = activeChannel;
   const isOpenRef = useRef(isOpen);
@@ -540,30 +1111,93 @@ export default function ChatModal() {
     [cloudUser]
   );
 
+  const closeUserProfile = useCallback(() => {
+    profileReqSeqRef.current += 1;
+    if (profileFetchAbortRef.current) {
+      try {
+        profileFetchAbortRef.current.abort();
+      } catch {}
+      profileFetchAbortRef.current = null;
+    }
+    viewingProfileRef.current = null;
+    setViewingProfileUsername(null);
+    setProfileData(null);
+    setProfileLoading(false);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (profileFetchAbortRef.current) {
+        try {
+          profileFetchAbortRef.current.abort();
+        } catch {}
+        profileFetchAbortRef.current = null;
+      }
+    };
+  }, []);
+
   const openUserProfile = useCallback(
     async (targetUsername: string) => {
       const clean = targetUsername.trim().replace(/^@/, "");
       if (!clean) return;
+      const cleanLower = clean.toLowerCase();
+
+      // Abort any previous profile lookup and clear stale profile state immediately
+      // so clicking user B never displays user A's cached card or out-of-order response.
+      const reqId = ++profileReqSeqRef.current;
+      if (profileFetchAbortRef.current) {
+        try {
+          profileFetchAbortRef.current.abort();
+        } catch {}
+      }
+      const controller =
+        typeof AbortController !== "undefined" ? new AbortController() : null;
+      profileFetchAbortRef.current = controller;
+
+      viewingProfileRef.current = clean;
       setViewingProfileUsername(clean);
+      setProfileData(null);
       setProfileLoading(true);
       try {
         const res = await fetch(
-          `/api/chat/user-profile?username=${encodeURIComponent(clean)}`
+          `/api/chat/user-profile?username=${encodeURIComponent(clean)}`,
+          {
+            cache: "no-store",
+            ...(controller ? { signal: controller.signal } : {}),
+          }
         );
+        if (
+          reqId !== profileReqSeqRef.current ||
+          viewingProfileRef.current?.toLowerCase() !== cleanLower
+        ) {
+          return;
+        }
         if (res.ok) {
           const data = await res.json();
+          if (
+            reqId !== profileReqSeqRef.current ||
+            viewingProfileRef.current?.toLowerCase() !== cleanLower
+          ) {
+            return;
+          }
           if (data && data.exists === false) {
             notifyToast(
               data.error || `user "@${clean}" does not exist in cloudsync`,
               "error"
             );
+            viewingProfileRef.current = null;
             setViewingProfileUsername(null);
             setProfileData(null);
             return;
           }
           if (data?.profile) {
+            const fetchedName = String(data.profile.username || "").trim();
+            if (fetchedName && fetchedName.toLowerCase() !== cleanLower) {
+              return;
+            }
             setProfileData(data.profile);
-            if (cloudUser && clean.toLowerCase() === cloudUser.toLowerCase()) {
+            if (cloudUser && cleanLower === cloudUser.toLowerCase()) {
+              if (data.profile.createdAt) setSelfCreatedAt(data.profile.createdAt);
               setEditingBio(data.profile.bio || "");
               setEditingStatusText(data.profile.statusText || "");
               const merged = data.profile.customization
@@ -573,10 +1207,13 @@ export default function ChatModal() {
             }
           }
         }
-      } catch {
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
         // Fallback profile card if offline
       } finally {
-        setProfileLoading(false);
+        if (reqId === profileReqSeqRef.current) {
+          setProfileLoading(false);
+        }
       }
     },
     [cloudUser]
@@ -615,7 +1252,13 @@ export default function ChatModal() {
       }
 
       setProfileData((prev) => {
-        if (!prev || prev.username.toLowerCase() !== lower) return prev;
+        if (
+          !prev ||
+          prev.username.toLowerCase() !== lower ||
+          viewingProfileRef.current?.toLowerCase() !== lower
+        ) {
+          return prev;
+        }
         return {
           ...prev,
           ...(typeof payload.bio === "string" ? { bio: payload.bio } : {}),
@@ -660,7 +1303,7 @@ export default function ChatModal() {
           });
           if (!changed) return prev;
           try {
-            localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+            batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(next));
           } catch {}
           return next;
         });
@@ -766,7 +1409,12 @@ export default function ChatModal() {
       if (res.ok) {
         const data = await res.json();
         if (data?.profile) {
-          setProfileData(data.profile);
+          if (data.profile.createdAt) {
+            setSelfCreatedAt(data.profile.createdAt);
+          }
+          if (viewingProfileRef.current?.toLowerCase() === cloudUser.toLowerCase()) {
+            setProfileData(data.profile);
+          }
           setEditingBio(data.profile.bio || "");
           setEditingStatusText(data.profile.statusText || "");
           if (data.profile.customization) {
@@ -849,10 +1497,10 @@ export default function ChatModal() {
       });
       const dmChannel = makeDmChannelId(cloudUser || "guest", canonicalTarget);
       setActiveChannel(dmChannel);
-      setViewingProfileUsername(null);
+      closeUserProfile();
       setUnreadCounts((prev) => ({ ...prev, [dmChannel]: 0 }));
     },
-    [cloudUser, registeredCloudSyncUsers, openUserProfile]
+    [cloudUser, registeredCloudSyncUsers, openUserProfile, closeUserProfile]
   );
 
   // Sync audio element volumes and mute states when deafened / blocked / volume slider changes
@@ -929,7 +1577,7 @@ export default function ChatModal() {
               ...(incoming.customization ? { customization: incoming.customization } : {}),
             };
             try {
-              localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+              batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(next));
             } catch {}
             return next;
           }
@@ -953,7 +1601,7 @@ export default function ChatModal() {
           updated = [...prev, incoming].slice(-250);
         }
         try {
-          localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(updated));
+          batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(updated));
         } catch {}
         return updated;
       });
@@ -1514,15 +2162,18 @@ export default function ChatModal() {
     setEditingCustom(localSaved || getDefaultCustomization(cloudUser));
   }, [cloudUser]);
 
-  // 1-second ticker only while Chat modal is open so active playtime updates without background re-renders
+  // 1-second ticker while Chat modal is open (paused/throttled under Chromebook Mode)
   useEffect(() => {
     if (!isOpen) return;
     setNowMs(Date.now());
+    const intervalMs = chromebookMode ? 15000 : 1000;
     const timer = window.setInterval(() => {
-      if (!document.hidden) setNowMs(Date.now());
-    }, 1000);
+      if (document.hidden) return;
+      if (chromebookMode && isGameActivePerfMode()) return;
+      setNowMs(Date.now());
+    }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [isOpen]);
+  }, [isOpen, chromebookMode]);
 
   // Poll chat & presence state gently (SSE handles real-time push; background poll acts as sync safety net)
   useEffect(() => {
@@ -1654,7 +2305,7 @@ export default function ChatModal() {
                 )
                 .slice(-250);
               try {
-                localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(sorted));
+                batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(sorted));
               } catch {}
               return sorted;
             });
@@ -1831,7 +2482,16 @@ export default function ChatModal() {
     setConfirmDeleteChat(null);
     setReactingMessageId(null);
     setReactPickerMessageId(null);
+    setMsgRenderLimit(CHROMEBOOK_INITIAL_MSG_CAP);
   }, [activeChannel]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setShowCameraModal(false);
+      setLightboxImage(null);
+      setDragOverChat(false);
+    }
+  }, [isOpen]);
 
   const filterMessagesLocally = useCallback(
     (predicate: (m: ChatMessage) => boolean) => {
@@ -1839,7 +2499,7 @@ export default function ChatModal() {
         const next = prev.filter(predicate);
         if (next.length === prev.length) return prev;
         try {
-          localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+          batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(next));
         } catch {}
         return next;
       });
@@ -1855,7 +2515,7 @@ export default function ChatModal() {
         const next = prev.slice();
         next[idx] = updater(prev[idx]);
         try {
-          localStorage.setItem("cookie_chat_messages_v2", JSON.stringify(next));
+          batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(next));
         } catch {}
         return next;
       });
@@ -1964,8 +2624,7 @@ export default function ChatModal() {
       if (detail) handleVoiceEvent(detail);
     };
 
-    const onSsePresence = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
+    const applyPresenceDetail = (detail: any) => {
       if (!detail) return;
       const incomingAt = Number(detail.snapshotAt || 0);
       const usersLoaded = detail.usersLoaded !== false;
@@ -1985,6 +2644,7 @@ export default function ChatModal() {
         setProfileData((prev) => {
           if (!prev) return prev;
           const lower = prev.username.toLowerCase();
+          if (viewingProfileRef.current?.toLowerCase() !== lower) return null;
           const match = combinedUsers.find((u) => u.username?.toLowerCase() === lower);
           if (!match) return prev;
           const isOnline = Array.isArray(detail.onlineUsers)
@@ -2029,6 +2689,47 @@ export default function ChatModal() {
         } else if (Array.isArray(detail.staffMods)) {
           setSelfRole("member");
         }
+      }
+    };
+
+    const onSsePresence = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+      if (!chromebookModeRef.current) {
+        applyPresenceDetail(detail);
+        return;
+      }
+      const prev = pendingPresenceDetailRef.current;
+      pendingPresenceDetailRef.current = prev
+        ? {
+            ...prev,
+            ...detail,
+            ...(Array.isArray(detail.onlineUsers)
+              ? { onlineUsers: detail.onlineUsers }
+              : prev.onlineUsers
+              ? { onlineUsers: prev.onlineUsers }
+              : {}),
+            ...(Array.isArray(detail.offlineUsers) &&
+            (detail.usersLoaded !== false || detail.offlineUsers.length > 0)
+              ? { offlineUsers: detail.offlineUsers }
+              : prev.offlineUsers
+              ? { offlineUsers: prev.offlineUsers }
+              : {}),
+          }
+        : detail;
+      if (presenceBatchTimerRef.current === null) {
+        presenceBatchTimerRef.current = window.setTimeout(() => {
+          presenceBatchTimerRef.current = null;
+          if (presenceBatchRafRef.current !== null) {
+            window.cancelAnimationFrame(presenceBatchRafRef.current);
+          }
+          presenceBatchRafRef.current = window.requestAnimationFrame(() => {
+            presenceBatchRafRef.current = null;
+            const merged = pendingPresenceDetailRef.current;
+            pendingPresenceDetailRef.current = null;
+            if (merged) applyPresenceDetail(merged);
+          });
+        }, 500);
       }
     };
 
@@ -2082,6 +2783,15 @@ export default function ChatModal() {
       window.removeEventListener("sunshine-chat-event", onSseChat);
       window.removeEventListener("sunshine-voice-event", onSseVoice);
       window.removeEventListener("sunshine-presence-event", onSsePresence);
+      if (presenceBatchTimerRef.current !== null) {
+        window.clearTimeout(presenceBatchTimerRef.current);
+        presenceBatchTimerRef.current = null;
+      }
+      if (presenceBatchRafRef.current !== null) {
+        window.cancelAnimationFrame(presenceBatchRafRef.current);
+        presenceBatchRafRef.current = null;
+      }
+      pendingPresenceDetailRef.current = null;
       broadcastRef.current?.close();
     };
   }, [
@@ -2098,7 +2808,11 @@ export default function ChatModal() {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (editingMessageId) {
+      if (lightboxImage) {
+        setLightboxImage(null);
+      } else if (showCameraModal) {
+        setShowCameraModal(false);
+      } else if (editingMessageId) {
         setEditingMessageId(null);
       } else if (reactPickerMessageId) {
         setReactPickerMessageId(null);
@@ -2119,7 +2833,7 @@ export default function ChatModal() {
       } else if (replyingTo) {
         setReplyingTo(null);
       } else if (viewingProfileUsername) {
-        setViewingProfileUsername(null);
+        closeUserProfile();
       } else {
         setIsOpen(false);
       }
@@ -2128,6 +2842,8 @@ export default function ChatModal() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     isOpen,
+    lightboxImage,
+    showCameraModal,
     editingMessageId,
     reactPickerMessageId,
     reactingMessageId,
@@ -2139,6 +2855,7 @@ export default function ChatModal() {
     showGifPicker,
     showEmojiPicker,
     viewingProfileUsername,
+    closeUserProfile,
   ]);
 
   const fetchKlipyGifs = useCallback(
@@ -2271,20 +2988,54 @@ export default function ChatModal() {
       setUnreadCounts((prev) =>
         prev[activeChannel] ? { ...prev, [activeChannel]: 0 } : prev
       );
+      if (chromebookMode) {
+        ignoreAutoExpandUntilRef.current = Date.now() + 250;
+      }
       setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        if (chromebookMode && chatFeedRef.current) {
+          chatFeedRef.current.scrollTop = chatFeedRef.current.scrollHeight;
+          prevFeedScrollTopRef.current = chatFeedRef.current.scrollTop;
+        } else {
+          messagesEndRef.current?.scrollIntoView({
+            behavior: chromebookMode ? "auto" : "smooth",
+          });
+        }
       }, 40);
     }
-  }, [messages, isOpen, activeChannel]);
+  }, [messages, isOpen, activeChannel, chromebookMode]);
+
+  const stageChatImageFile = useCallback(async (file?: File | null) => {
+    if (!file) return;
+    if (!cloudUser) {
+      notifyToast("sign in to cloudsync to upload images", "error");
+      return;
+    }
+    try {
+      const compressed = await compressImageFile(file, {
+        maxWidth: 1080,
+        maxHeight: 1080,
+        maxGifBytes: 900 * 1024,
+        quality: 0.85,
+      });
+      setPendingImage(compressed);
+      setShowGifPicker(false);
+      setShowEmojiPicker(false);
+      window.setTimeout(() => chatInputRef.current?.focus(), 30);
+    } catch (err: any) {
+      notifyToast(err?.message || "could not process image", "error");
+    }
+  }, [cloudUser]);
 
   const sendChatMessage = async (
     rawText: string,
-    gif?: { url: string; title?: string }
+    gif?: { url: string; title?: string },
+    imageOverride?: CompressedImageResult | null
   ) => {
     if (!cloudUser || isSending) return;
     const text = rawText.trim();
     const validGif = gif && isAllowedKlipyUrl(gif.url) ? gif : undefined;
-    if (!text && !validGif) return;
+    const imageToSend = imageOverride !== undefined ? imageOverride : pendingImage;
+    if (!text && !validGif && !imageToSend) return;
 
     // Prevent sending DM to a user you have blocked or who does not exist in CloudSync
     if (activeChannel.startsWith("dm:")) {
@@ -2314,6 +3065,22 @@ export default function ChatModal() {
         }
       }
 
+      let uploadedImageMeta: { imageUrl: string; imageName: string } | null = null;
+      if (imageToSend) {
+        try {
+          const uploaded = await uploadChatImage(imageToSend.dataUrl, imageToSend.name);
+          uploadedImageMeta = {
+            imageUrl: uploaded.imageUrl,
+            imageName: uploaded.imageName,
+          };
+          if (imageOverride === undefined) setPendingImage(null);
+        } catch (err: any) {
+          notifyToast(err?.message || "image upload failed", "error");
+          setIsSending(false);
+          return;
+        }
+      }
+
       const recipient = activeChannel.startsWith("dm:")
         ? getDmPartnerName(activeChannel, cloudUser)
         : null;
@@ -2329,6 +3096,12 @@ export default function ChatModal() {
         ...(validGif
           ? { gifUrl: validGif.url, gifTitle: validGif.title || "GIF" }
           : {}),
+        ...(uploadedImageMeta
+          ? {
+              imageUrl: uploadedImageMeta.imageUrl,
+              imageName: uploadedImageMeta.imageName,
+            }
+          : {}),
         ...(activeReply
           ? {
               replyTo: {
@@ -2336,6 +3109,7 @@ export default function ChatModal() {
                 author: activeReply.author,
                 text: (activeReply.text || "").slice(0, 200),
                 hasGif: Boolean(activeReply.gifUrl),
+                hasImage: Boolean(activeReply.imageUrl),
               },
             }
           : {}),
@@ -2441,7 +3215,7 @@ export default function ChatModal() {
     async (msg: ChatMessage) => {
       if (!cloudUser || savingEdit) return;
       const cleanText = editingMessageText.trim();
-      if (!cleanText && !msg.gifUrl) {
+      if (!cleanText && !msg.gifUrl && !msg.imageUrl) {
         notifyToast("message cannot be empty (use delete instead)", "error");
         return;
       }
@@ -2626,17 +3400,66 @@ export default function ChatModal() {
     [cloudUser, updateMessageLocally]
   );
 
+  const handleToggleReactMenu = useCallback((msgId: string) => {
+    setReactPickerMessageId(null);
+    setReactingMessageId((cur) => (cur === msgId ? null : msgId));
+  }, []);
+
+  const handleOpenReactPicker = useCallback((msgId: string) => {
+    setReactingMessageId(null);
+    setReactPickerMessageId(msgId);
+  }, []);
+
+  const handleCloseReactPicker = useCallback(() => {
+    setReactPickerMessageId(null);
+  }, []);
+
+  const handleOpenImageLightbox = useCallback((url: string, name?: string | undefined) => {
+    setLightboxImage({ url, name });
+  }, []);
+
+  const handleCancelEditMessage = useCallback(() => {
+    setEditingMessageId(null);
+  }, []);
+
+  const handleReplyMessage = useCallback((msg: ChatMessage) => {
+    setReplyingTo(msg);
+    window.setTimeout(() => chatInputRef.current?.focus(), 20);
+  }, []);
+
+  const channelMessagesRef = useRef<ChatMessage[]>([]);
+
   const scrollToMessage = useCallback((msgId: string) => {
-    const el = document.getElementById(`chat-msg-${msgId}`);
-    if (!el) {
-      notifyToast("original message is no longer in chat history", "info");
+    const existingEl = document.getElementById(`chat-msg-${msgId}`);
+    if (existingEl) {
+      existingEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightedMsgId(msgId);
+      window.setTimeout(() => {
+        setHighlightedMsgId((cur) => (cur === msgId ? null : cur));
+      }, 1600);
       return;
     }
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    setHighlightedMsgId(msgId);
-    window.setTimeout(() => {
-      setHighlightedMsgId((cur) => (cur === msgId ? null : cur));
-    }, 1600);
+
+    if (chromebookModeRef.current) {
+      const idx = channelMessagesRef.current.findIndex((m) => m.id === msgId);
+      if (idx >= 0) {
+        const needed = channelMessagesRef.current.length - idx + 10;
+        setMsgRenderLimit((cur) => Math.max(cur, needed));
+        requestAnimationFrame(() => {
+          const revealed = document.getElementById(`chat-msg-${msgId}`);
+          if (revealed) {
+            revealed.scrollIntoView({ behavior: "smooth", block: "center" });
+            setHighlightedMsgId(msgId);
+            window.setTimeout(() => {
+              setHighlightedMsgId((cur) => (cur === msgId ? null : cur));
+            }, 1600);
+          }
+        });
+        return;
+      }
+    }
+
+    notifyToast("original message is no longer in chat history", "info");
   }, []);
 
   const handleTimeoutUser = useCallback(
@@ -2662,17 +3485,17 @@ export default function ChatModal() {
           notifyToast(data?.error || "could not update timeout", "error");
           return;
         }
-        if (profileData && profileData.username.toLowerCase() === targetUsername.toLowerCase()) {
-          setProfileData((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  isTimedOut: durationMinutes > 0,
-                  timeoutUntil: data.timeout?.until || 0,
-                }
-              : prev
-          );
-        }
+        setProfileData((prev) =>
+          prev &&
+          prev.username.toLowerCase() === targetUsername.toLowerCase() &&
+          viewingProfileRef.current?.toLowerCase() === targetUsername.toLowerCase()
+            ? {
+                ...prev,
+                isTimedOut: durationMinutes > 0,
+                timeoutUntil: data.timeout?.until || 0,
+              }
+            : prev
+        );
         notifyToast(
           durationMinutes > 0
             ? `muted @${targetUsername} (${durationMinutes >= 525600 ? "permanent" : `${durationMinutes}m`})`
@@ -2683,7 +3506,7 @@ export default function ChatModal() {
         notifyToast("moderation request failed", "error");
       }
     },
-    [cloudUser, profileData]
+    [cloudUser]
   );
 
   const handlePurgeUserMessages = useCallback(
@@ -2756,9 +3579,13 @@ export default function ChatModal() {
         if (Array.isArray(data.goatUsers)) {
           setGoatUsers(data.goatUsers);
         }
-        if (profileData && profileData.username.toLowerCase() === targetUsername.toLowerCase()) {
-          setProfileData((prev) => (prev ? { ...prev, isGoat: Boolean(data.granted) } : prev));
-        }
+        setProfileData((prev) =>
+          prev &&
+          prev.username.toLowerCase() === targetUsername.toLowerCase() &&
+          viewingProfileRef.current?.toLowerCase() === targetUsername.toLowerCase()
+            ? { ...prev, isGoat: Boolean(data.granted) }
+            : prev
+        );
         notifyToast(
           data.granted
             ? `awarded golden GOAT title to @${data.targetUsername || targetUsername}`
@@ -2769,7 +3596,7 @@ export default function ChatModal() {
         notifyToast("GOAT update request failed", "error");
       }
     },
-    [cloudUser, profileData]
+    [cloudUser]
   );
 
   const handleSendMessage = async (e?: Event) => {
@@ -3023,6 +3850,16 @@ export default function ChatModal() {
     : null;
 
   const stageParticipants = stageVoiceRoomId ? voiceRooms[stageVoiceRoomId] || [] : [];
+
+  channelMessagesRef.current = channelMessages;
+  const hasHiddenOlderMessages = chromebookMode && channelMessages.length > msgRenderLimit;
+  const renderedMessages = hasHiddenOlderMessages
+    ? channelMessages.slice(-msgRenderLimit)
+    : channelMessages;
+
+  if (chromebookMode && !isOpen) {
+    return null;
+  }
 
   return (
     <div
@@ -3503,7 +4340,32 @@ export default function ChatModal() {
         </div>
 
         {/* ── COLUMN 2: Center Chat Feed, Voice Stage & Input ── */}
-        <div class="chat-main">
+        <div
+          class={`chat-main${dragOverChat ? " is-drag-over" : ""}`}
+          onDragOver={(e) => {
+            if (!cloudUser) return;
+            if (e.dataTransfer?.types?.includes("Files")) {
+              e.preventDefault();
+              setDragOverChat(true);
+            }
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) {
+              setDragOverChat(false);
+            }
+          }}
+          onDrop={(e) => {
+            setDragOverChat(false);
+            if (!cloudUser) return;
+            const file = Array.from(e.dataTransfer?.files || []).find((f) =>
+              f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|avif|bmp)$/i.test(f.name)
+            );
+            if (file) {
+              e.preventDefault();
+              void stageChatImageFile(file);
+            }
+          }}
+        >
           {/* Header */}
           <div class="chat-main-header">
             <div class="chat-main-header-left">
@@ -3866,7 +4728,53 @@ export default function ChatModal() {
           )}
 
           {/* Messages feed */}
-          <div class="chat-feed">
+          <div
+            ref={chatFeedRef}
+            class="chat-feed"
+            onScroll={
+              chromebookMode && hasHiddenOlderMessages
+                ? (e) => {
+                    const el = e.currentTarget;
+                    const prevTopSeen = prevFeedScrollTopRef.current;
+                    prevFeedScrollTopRef.current = el.scrollTop;
+                    if (
+                      el.scrollTop <= 24 &&
+                      el.scrollTop < prevTopSeen &&
+                      Date.now() > ignoreAutoExpandUntilRef.current
+                    ) {
+                      const prevHeight = el.scrollHeight;
+                      const prevTop = el.scrollTop;
+                      setMsgRenderLimit((prev) =>
+                        Math.min(channelMessages.length, prev + CHROMEBOOK_MSG_STEP)
+                      );
+                      requestAnimationFrame(() => {
+                        const feed = chatFeedRef.current;
+                        if (feed) {
+                          const targetTop = feed.scrollHeight - prevHeight + prevTop;
+                          feed.scrollTop = targetTop;
+                          prevFeedScrollTopRef.current = targetTop;
+                        }
+                      });
+                    }
+                  }
+                : undefined
+            }
+          >
+            {hasHiddenOlderMessages && (
+              <div style={{ display: "flex", justifyContent: "center", padding: "6px 0" }}>
+                <button
+                  type="button"
+                  class="chat-gif-more-btn"
+                  onClick={() =>
+                    setMsgRenderLimit((prev) =>
+                      Math.min(channelMessages.length, prev + CHROMEBOOK_MSG_STEP)
+                    )
+                  }
+                >
+                  load older messages ({channelMessages.length - renderedMessages.length} hidden)
+                </button>
+              </div>
+            )}
             {channelMessages.length === 0 ? (
               <div class="chat-empty-state">
                 <i class={`fa-solid ${activeChannelDef.icon}`}></i>
@@ -3882,10 +4790,18 @@ export default function ChatModal() {
                 </span>
               </div>
             ) : (
-              channelMessages.map((msg, idx) => {
-                const isGrouped = shouldGroupMessages(channelMessages[idx - 1], msg);
-                const isSelf =
-                  cloudUser && msg.author.toLowerCase() === cloudUser.toLowerCase();
+              renderedMessages.map((msg, idx) => {
+                const sliceStartIdx = channelMessages.length - renderedMessages.length;
+                const prevMsg =
+                  idx > 0
+                    ? renderedMessages[idx - 1]
+                    : sliceStartIdx > 0
+                    ? channelMessages[sliceStartIdx - 1]
+                    : undefined;
+                const isGrouped = shouldGroupMessages(prevMsg, msg);
+                const isSelf = Boolean(
+                  cloudUser && msg.author.toLowerCase() === cloudUser.toLowerCase()
+                );
                 const authorMeta = userMetaMap.get(msg.author.toLowerCase());
                 const rawFallbackCustom = isStaleUninitializedCustom(msg.customization)
                   ? null
@@ -3922,278 +4838,45 @@ export default function ChatModal() {
                 const isEditingThis = editingMessageId === msg.id;
 
                 return (
-                  <div
+                  <ChatMessageRow
                     key={msg.id}
-                    id={`chat-msg-${msg.id}`}
-                    class={`chat-entry ${isGrouped ? "is-grouped" : ""} ${
-                      replyRef ? "has-reply" : ""
-                    } ${highlightedMsgId === msg.id ? "is-highlighted" : ""}`}
-                  >
-                    {replyRef && (
-                      <div
-                        class="chat-reply-context"
-                        title="Jump to original message"
-                        onClick={() => scrollToMessage(replyRef.id)}
-                      >
-                        <span class="chat-reply-spine" aria-hidden="true" />
-                        <UserAvatar
-                          username={replyRef.author}
-                          custom={replyMiniCustom}
-                          fallbackColor={stringToColor(replyRef.author)}
-                          className="chat-reply-mini-avatar"
-                        />
-                        <span class={`chat-reply-author ${getNameClasses(replyMeta?.customization)}`}>
-                          @{replyAuthorLabel}
-                        </span>
-                        <span class="chat-reply-snippet">
-                          {replyRef.text ? replyRef.text : replyRef.hasGif ? "clicked to see GIF" : "message"}
-                        </span>
-                      </div>
-                    )}
-
-                    <div class="chat-entry-main">
-                      {isGrouped ? (
-                        <div class="chat-entry-gutter" aria-hidden="true">
-                          <span class="chat-entry-hover-time">{msg.timestamp}</span>
-                        </div>
-                      ) : (
-                        <UserAvatar
-                          username={msg.author}
-                          custom={msgCustom}
-                          fallbackColor={safeFallbackColor}
-                          className="chat-entry-avatar"
-                          title={`View @${msg.author}'s profile`}
-                          onClick={() => openUserProfile(msg.author)}
-                        />
-                      )}
-                      <div class="chat-entry-content">
-                        {!isGrouped && (
-                          <div class="chat-entry-header">
-                            <span
-                              class={`chat-entry-author ${isSelf ? "is-self" : ""} ${getNameClasses(
-                                msgCustom
-                              )}`}
-                              title={`View @${msg.author}'s profile`}
-                              onClick={() => openUserProfile(msg.author)}
-                            >
-                              {displayName}
-                            </span>
-                            <RoleBadge role={authorRole} />
-                            <GoatBadge isGoat={isUserGoat(msg.author)} />
-                            {msgCustom?.customTag && (
-                              <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
-                            )}
-                            <span class="chat-entry-time">{msg.timestamp}</span>
-                          </div>
-                        )}
-                        {isEditingThis ? (
-                          <form
-                            class="chat-edit-form"
-                            onSubmit={(e) => {
-                              e.preventDefault();
-                              void handleSaveEditMessage(msg);
-                            }}
-                          >
-                            <input
-                              type="text"
-                              class="chat-edit-input"
-                              maxLength={500}
-                              autoFocus
-                              disabled={savingEdit}
-                              value={editingMessageText}
-                              onInput={(e) =>
-                                setEditingMessageText((e.target as HTMLInputElement).value)
-                              }
-                            />
-                            <div class="chat-edit-meta-row">
-                              <span>escape to cancel · enter to save</span>
-                              <div style={{ display: "flex", gap: "6px" }}>
-                                <button
-                                  type="button"
-                                  class="chat-gif-more-btn"
-                                  onClick={() => setEditingMessageId(null)}
-                                >
-                                  cancel
-                                </button>
-                                <button
-                                  type="submit"
-                                  class="chat-gif-more-btn"
-                                  disabled={savingEdit}
-                                  style={{ backgroundColor: "var(--btn-primary-bg)", color: "var(--btn-primary-text)" }}
-                                >
-                                  {savingEdit ? "saving..." : "save"}
-                                </button>
-                              </div>
-                            </div>
-                          </form>
-                        ) : (
-                          msg.text &&
-                          (() => {
-                            const jumboCount = getJumboEmojiCount(msg.text);
-                            const jumboCls =
-                              jumboCount > 0
-                                ? ` is-jumbo-emoji${jumboCount <= 3 ? " is-jumbo-lg" : ""}`
-                                : "";
-                            return (
-                              <div class={`chat-entry-text${jumboCls}`}>
-                                {renderFormattedText(msg.text)}
-                                {msg.edited && (
-                                  <span class="chat-msg-edited">(edited)</span>
-                                )}
-                              </div>
-                            );
-                          })()
-                        )}
-                        {isAllowedKlipyUrl(msg.gifUrl) && (
-                          <div class="chat-entry-gif-wrap">
-                            <img
-                              class="chat-entry-gif"
-                              src={getKlipyProxySrc(msg.gifUrl)}
-                              alt={msg.gifTitle || "GIF"}
-                              loading="lazy"
-                              decoding="async"
-                            />
-                          </div>
-                        )}
-                        {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                          <div class="chat-reaction-bar">
-                            {Object.entries(msg.reactions).map(([emoji, users]) => {
-                              if (!Array.isArray(users) || users.length === 0) return null;
-                              const meReacted = Boolean(
-                                cloudUser && users.includes(cloudUser.toLowerCase())
-                              );
-                              return (
-                                <button
-                                  key={emoji}
-                                  type="button"
-                                  class={`chat-reaction-pill${meReacted ? " is-reacted" : ""}`}
-                                  title={`${users.map((u) => `@${u}`).join(", ")}`}
-                                  onClick={() => void handleToggleReaction(msg.id, emoji)}
-                                >
-                                  <span class="chat-reaction-emoji">{emoji}</span>
-                                  <span class="chat-reaction-count">{users.length}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Hover actions on each message */}
-                    <div class="chat-entry-actions">
-                      {cloudUser && (
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn chat-react-toggle-btn"
-                          title="Add reaction"
-                          onClick={() => {
-                            setReactPickerMessageId(null);
-                            setReactingMessageId((cur) => (cur === msg.id ? null : msg.id));
-                          }}
-                        >
-                          <i class="fa-regular fa-face-smile"></i>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        class="chat-entry-action-btn"
-                        title={`View @${msg.author}'s profile`}
-                        onClick={() => openUserProfile(msg.author)}
-                      >
-                        <i class="fa-solid fa-id-card"></i>
-                      </button>
-                      {cloudUser && (
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn"
-                          title={`Reply to @${msg.author}`}
-                          onClick={() => {
-                            setReplyingTo(msg);
-                            window.setTimeout(() => chatInputRef.current?.focus(), 20);
-                          }}
-                        >
-                          <i class="fa-solid fa-reply"></i>
-                        </button>
-                      )}
-                      {isSelf && !isEditingThis && (
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn"
-                          title="Edit message"
-                          onClick={() => handleStartEditMessage(msg)}
-                        >
-                          <i class="fa-solid fa-pen"></i>
-                        </button>
-                      )}
-                      {!isSelf && (
-                        <>
-                          <button
-                            type="button"
-                            class="chat-entry-action-btn"
-                            title={`Direct message @${msg.author}`}
-                            onClick={() => openDirectMessage(msg.author)}
-                          >
-                            <i class="fa-solid fa-paper-plane"></i>
-                          </button>
-                          <button
-                            type="button"
-                            class="chat-entry-action-btn danger"
-                            title={`Block @${msg.author}`}
-                            onClick={() => toggleBlockUser(msg.author)}
-                          >
-                            <i class="fa-solid fa-ban"></i>
-                          </button>
-                        </>
-                      )}
-                      {canDeleteMsg && (
-                        <button
-                          type="button"
-                          class="chat-entry-action-btn danger"
-                          title="Delete message"
-                          onClick={() => void handleDeleteMessage(msg)}
-                        >
-                          <i class="fa-solid fa-trash-can"></i>
-                        </button>
-                      )}
-                    </div>
-
-                    {reactingMessageId === msg.id && (
-                      <div class="chat-quick-react-bar">
-                        {["😂", "❤️", "😭", "🔥", "👍", "💀", "🎉", "👀"].map((em) => (
-                          <button
-                            key={em}
-                            type="button"
-                            class="chat-quick-react-btn"
-                            title={`React with ${em}`}
-                            onClick={() => void handleToggleReaction(msg.id, em)}
-                          >
-                            {em}
-                          </button>
-                        ))}
-                        <button
-                          type="button"
-                          class="chat-quick-react-btn chat-quick-react-more"
-                          title="More emojis"
-                          onClick={() => {
-                            setReactingMessageId(null);
-                            setReactPickerMessageId(msg.id);
-                          }}
-                        >
-                          <i class="fa-solid fa-plus"></i>
-                        </button>
-                      </div>
-                    )}
-
-                    {reactPickerMessageId === msg.id && (
-                      <EmojiPicker
-                        pickerRef={reactPickerRef}
-                        containerClass="is-reaction-picker"
-                        onSelect={(emoji) => void handleToggleReaction(msg.id, emoji)}
-                        onClose={() => setReactPickerMessageId(null)}
-                      />
-                    )}
-                  </div>
+                    msg={msg}
+                    isGrouped={isGrouped}
+                    isSelf={isSelf}
+                    msgCustom={msgCustom}
+                    safeFallbackColor={safeFallbackColor}
+                    authorRole={authorRole}
+                    isAuthorGoat={isUserGoat(msg.author)}
+                    canDeleteMsg={canDeleteMsg}
+                    displayName={displayName}
+                    replyAuthorLabel={replyAuthorLabel}
+                    replyMiniCustom={replyMiniCustom}
+                    replyTextColorClass={getNameClasses(replyMeta?.customization)}
+                    isHighlighted={highlightedMsgId === msg.id}
+                    isEditingThis={isEditingThis}
+                    editingMessageText={isEditingThis ? editingMessageText : ""}
+                    savingEdit={isEditingThis ? savingEdit : false}
+                    isReacting={reactingMessageId === msg.id}
+                    isReactPickerOpen={reactPickerMessageId === msg.id}
+                    reactPickerRef={reactPickerRef}
+                    cloudUser={cloudUser}
+                    canReplyOrReact={Boolean(cloudUser)}
+                    onScrollToMessage={scrollToMessage}
+                    onOpenUserProfile={openUserProfile}
+                    onStartEditMessage={handleStartEditMessage}
+                    onSaveEditMessage={handleSaveEditMessage}
+                    onCancelEditMessage={handleCancelEditMessage}
+                    onEditingTextChange={setEditingMessageText}
+                    onToggleReaction={handleToggleReaction}
+                    onToggleReactMenu={handleToggleReactMenu}
+                    onOpenReactPicker={handleOpenReactPicker}
+                    onCloseReactPicker={handleCloseReactPicker}
+                    onReplyMessage={handleReplyMessage}
+                    onOpenDirectMessage={openDirectMessage}
+                    onToggleBlockUser={toggleBlockUser}
+                    onDeleteMessage={handleDeleteMessage}
+                    onOpenImageLightbox={handleOpenImageLightbox}
+                  />
                 );
               })
             )}
@@ -4258,7 +4941,13 @@ export default function ChatModal() {
                         </strong>
                       </span>
                       <span class="chat-replying-bar-snippet">
-                        {replyingTo.text ? `— ${replyingTo.text}` : replyingTo.gifUrl ? "— [GIF]" : ""}
+                        {replyingTo.text
+                          ? `— ${replyingTo.text}`
+                          : replyingTo.imageUrl
+                          ? "— [image]"
+                          : replyingTo.gifUrl
+                          ? "— [GIF]"
+                          : ""}
                       </span>
                     </div>
                     <button
@@ -4271,20 +4960,100 @@ export default function ChatModal() {
                     </button>
                   </div>
                 )}
+                {pendingImage && (
+                  <div class="chat-pending-image-bar">
+                    <div class="chat-pending-image-left">
+                      <img
+                        src={pendingImage.dataUrl}
+                        alt={pendingImage.name}
+                        class="chat-pending-image-thumb"
+                      />
+                      <div class="chat-pending-image-meta">
+                        <span class="chat-pending-image-name">{pendingImage.name}</span>
+                        <span class="chat-pending-image-size">
+                          {pendingImage.width > 0 && pendingImage.height > 0
+                            ? `${pendingImage.width}×${pendingImage.height} · `
+                            : ""}
+                          {formatBytesLabel(pendingImage.bytes)} · ready to send
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="chat-replying-cancel"
+                      title="Remove image"
+                      onClick={() => setPendingImage(null)}
+                    >
+                      <i class="fa-solid fa-xmark"></i>
+                    </button>
+                  </div>
+                )}
+                <input
+                  ref={imageFileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const input = e.currentTarget as HTMLInputElement;
+                    const file = input.files?.[0];
+                    input.value = "";
+                    void stageChatImageFile(file);
+                  }}
+                />
                 <form class="chat-input-pill" onSubmit={handleSendMessage}>
                   <input
                     ref={chatInputRef}
                     type="text"
                     class="chat-input-field"
                     placeholder={
-                      activeChannelDef.isDm
+                      pendingImage
+                        ? "add a caption or press enter to send photo..."
+                        : activeChannelDef.isDm
                         ? `message @${activeChannelDef.name}...`
                         : `message #${activeChannelDef.name}...`
                     }
                     value={inputText}
                     onInput={(e) => setInputText((e.target as HTMLInputElement).value)}
+                    onPaste={(e) => {
+                      const items = e.clipboardData?.items;
+                      if (!items) return;
+                      for (const item of Array.from(items)) {
+                        if (item.type.startsWith("image/")) {
+                          const file = item.getAsFile();
+                          if (file) {
+                            e.preventDefault();
+                            void stageChatImageFile(file);
+                            break;
+                          }
+                        }
+                      }
+                    }}
                     maxLength={500}
                   />
+                  <button
+                    type="button"
+                    class="chat-media-toggle-btn"
+                    title="Upload image (or paste / drop file)"
+                    aria-label="Upload image"
+                    disabled={isSending}
+                    onClick={() => imageFileInputRef.current?.click()}
+                  >
+                    <i class="fa-solid fa-image"></i>
+                  </button>
+                  <button
+                    type="button"
+                    class={`chat-media-toggle-btn${showCameraModal ? " active" : ""}`}
+                    title="Take photo with in-site camera"
+                    aria-label="Open camera"
+                    disabled={isSending}
+                    onClick={() => {
+                      setShowGifPicker(false);
+                      setShowEmojiPicker(false);
+                      setShowCameraModal(true);
+                    }}
+                  >
+                    <i class="fa-solid fa-camera"></i>
+                  </button>
                   <button
                     type="button"
                     class={`chat-emoji-toggle-btn${showEmojiPicker ? " active" : ""}`}
@@ -4311,10 +5080,10 @@ export default function ChatModal() {
                   <button
                     type="submit"
                     class="chat-submit-btn"
-                    disabled={!inputText.trim() || isSending}
+                    disabled={(!inputText.trim() && !pendingImage) || isSending}
                     title="Send message"
                   >
-                    <i class="fa-solid fa-paper-plane"></i>
+                    <i class={`fa-solid ${isSending ? "fa-spinner fa-spin" : "fa-paper-plane"}`}></i>
                   </button>
                 </form>
               </>
@@ -4436,107 +5205,22 @@ export default function ChatModal() {
                 const blocked = isUserBlocked(u.username);
                 const playingActive = Boolean(u.isPlayingGame && u.game && u.game !== "browsing");
                 const uCustom = u.customization || null;
-                const npClass = [
-                  uCustom?.nameplate && uCustom.nameplate !== "none"
-                    ? `has-nameplate nameplate-${uCustom.nameplate}`
-                    : "",
-                  uCustom?.nameplateUrl ? "has-nameplate has-media-nameplate" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ");
                 const dotStatus = getEffectivePresenceDot(uCustom?.presenceStatus, u.isIdle);
-                const displayName = uCustom?.displayName?.trim() || u.username;
+                const playingDurationLabel = playingActive
+                  ? formatElapsedDuration(u.gameStartedAt, nowMs)
+                  : "";
                 return (
-                  <div key={`online_${u.username}`} class={`chat-user-item ${npClass}`}>
-                    <NameplateMediaLayer url={uCustom?.nameplateUrl} />
-                    <div
-                      class="chat-user-avatar-wrap"
-                      title={`View @${u.username}'s profile`}
-                      onClick={() => openUserProfile(u.username)}
-                    >
-                      <UserAvatar
-                        username={u.username}
-                        custom={uCustom}
-                        fallbackColor={u.color}
-                        className="chat-user-avatar"
-                        opacity={blocked ? 0.45 : 1}
-                      />
-                      <div class={`chat-user-dot ${dotStatus}`}></div>
-                    </div>
-                    <div
-                      class="chat-user-meta"
-                      title={`View @${u.username}'s profile`}
-                      onClick={() => openUserProfile(u.username)}
-                    >
-                      <div class="chat-user-name-row">
-                        <span
-                          class={`chat-user-name ${getNameClasses(uCustom)}`}
-                          style={
-                            blocked
-                              ? { textDecoration: "line-through", opacity: 0.6 }
-                              : undefined
-                          }
-                        >
-                          {displayName}
-                        </span>
-                        <RoleBadge role={u.role} />
-                        <GoatBadge isGoat={isUserGoat(u.username)} />
-                        {u.isTimedOut && (
-                          <span class="chat-role-badge muted-pill">muted</span>
-                        )}
-                        {u.isSelf && <span class="chat-you-pill">you</span>}
-                      </div>
-                      {playingActive ? (
-                        <div class="chat-user-game-sub" title={`Playing ${u.game}`}>
-                          <i class="fa-solid fa-gamepad"></i>
-                          <span>
-                            playing {u.game} · {formatElapsedDuration(u.gameStartedAt, nowMs)}
-                          </span>
-                        </div>
-                      ) : (
-                        <div class="chat-user-status-sub">
-                          {u.statusText
-                            ? u.statusText
-                            : dotStatus === "dnd"
-                            ? "do not disturb"
-                            : dotStatus === "idle"
-                            ? "idle"
-                            : "online"}
-                        </div>
-                      )}
-                    </div>
-
-                    <div class="chat-user-actions">
-                      <button
-                        type="button"
-                        class="chat-user-mini-btn"
-                        title={u.isSelf ? "View your profile" : `View @${u.username}'s profile`}
-                        onClick={() => openUserProfile(u.username)}
-                      >
-                        <i class="fa-solid fa-id-card"></i>
-                      </button>
-                      {!u.isSelf && (
-                        <>
-                          <button
-                            type="button"
-                            class="chat-user-mini-btn"
-                            title={`Direct message ${u.username}`}
-                            onClick={() => openDirectMessage(u.username)}
-                          >
-                            <i class="fa-solid fa-comment-dots"></i>
-                          </button>
-                          <button
-                            type="button"
-                            class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
-                            title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
-                            onClick={() => toggleBlockUser(u.username)}
-                          >
-                            <i class="fa-solid fa-ban"></i>
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
+                  <ChatUserRow
+                    key={`online_${u.username}`}
+                    user={u}
+                    blocked={blocked}
+                    isGoat={isUserGoat(u.username)}
+                    dotStatus={dotStatus}
+                    playingDurationLabel={playingDurationLabel}
+                    onOpenUserProfile={openUserProfile}
+                    onOpenDirectMessage={openDirectMessage}
+                    onToggleBlockUser={toggleBlockUser}
+                  />
                 );
               })
             )}
@@ -4577,87 +5261,20 @@ export default function ChatModal() {
                   no offline users yet
                 </div>
               ) : (
-                offlineUsers.map((u) => {
-                  const blocked = isUserBlocked(u.username);
-                  const uCustom = u.customization || null;
-                  const npClass = [
-                    uCustom?.nameplate && uCustom.nameplate !== "none"
-                      ? `has-nameplate nameplate-${uCustom.nameplate}`
-                      : "",
-                    uCustom?.nameplateUrl ? "has-nameplate has-media-nameplate" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ");
-                  const displayName = uCustom?.displayName?.trim() || u.username;
-                  return (
-                    <div key={`offline_${u.username}`} class={`chat-user-item offline ${npClass}`}>
-                      <NameplateMediaLayer url={uCustom?.nameplateUrl} />
-                      <div
-                        class="chat-user-avatar-wrap"
-                        title={`View @${u.username}'s profile`}
-                        onClick={() => openUserProfile(u.username)}
-                      >
-                        <UserAvatar
-                          username={u.username}
-                          custom={uCustom}
-                          fallbackColor={u.color}
-                          className="chat-user-avatar"
-                          opacity={blocked ? 0.35 : 0.65}
-                        />
-                        <div class="chat-user-dot offline"></div>
-                      </div>
-                      <div
-                        class="chat-user-meta"
-                        title={`View @${u.username}'s profile`}
-                        onClick={() => openUserProfile(u.username)}
-                      >
-                        <div class="chat-user-name-row">
-                          <span
-                            class={`chat-user-name ${getNameClasses(uCustom)}`}
-                            style={{
-                              opacity: blocked ? 0.45 : 0.78,
-                              textDecoration: blocked ? "line-through" : undefined,
-                            }}
-                          >
-                            {displayName}
-                          </span>
-                          <RoleBadge role={u.role} />
-                          <GoatBadge isGoat={isUserGoat(u.username)} />
-                        </div>
-                        <div class="chat-user-status-sub offline">
-                          {u.statusText ? u.statusText : "offline"}
-                        </div>
-                      </div>
-
-                      <div class="chat-user-actions">
-                        <button
-                          type="button"
-                          class="chat-user-mini-btn"
-                          title={`View @${u.username}'s profile`}
-                          onClick={() => openUserProfile(u.username)}
-                        >
-                          <i class="fa-solid fa-id-card"></i>
-                        </button>
-                        <button
-                          type="button"
-                          class="chat-user-mini-btn"
-                          title={`Direct message ${u.username}`}
-                          onClick={() => openDirectMessage(u.username)}
-                        >
-                          <i class="fa-solid fa-comment-dots"></i>
-                        </button>
-                        <button
-                          type="button"
-                          class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
-                          title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
-                          onClick={() => toggleBlockUser(u.username)}
-                        >
-                          <i class="fa-solid fa-ban"></i>
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
+                offlineUsers.map((u) => (
+                  <ChatUserRow
+                    key={`offline_${u.username}`}
+                    user={u}
+                    offline
+                    blocked={isUserBlocked(u.username)}
+                    isGoat={isUserGoat(u.username)}
+                    dotStatus="idle"
+                    playingDurationLabel=""
+                    onOpenUserProfile={openUserProfile}
+                    onOpenDirectMessage={openDirectMessage}
+                    onToggleBlockUser={toggleBlockUser}
+                  />
+                ))
               )}
                 </div>
               );
@@ -4707,11 +5324,16 @@ export default function ChatModal() {
           <div
             class="chat-profile-modal-backdrop"
             onClick={(e) => {
-              if (e.target === e.currentTarget) setViewingProfileUsername(null);
+              if (e.target === e.currentTarget) closeUserProfile();
             }}
           >
             {(() => {
-              const targetName = profileData?.username || viewingProfileUsername;
+              const verifiedProfile =
+                profileData &&
+                profileData.username?.toLowerCase() === viewingProfileUsername.toLowerCase()
+                  ? profileData
+                  : null;
+              const targetName = verifiedProfile?.username || viewingProfileUsername;
               const isViewingSelf = Boolean(
                 cloudUser && targetName.toLowerCase() === cloudUser.toLowerCase()
               );
@@ -4719,37 +5341,38 @@ export default function ChatModal() {
               const onlineMatch = onlineUsers.find(
                 (u) => u.username.toLowerCase() === targetName.toLowerCase()
               );
-              const isOnlineNow = isViewingSelf || Boolean(onlineMatch || profileData?.online);
+              const isOnlineNow =
+                isViewingSelf || Boolean(onlineMatch || verifiedProfile?.online);
               const activeGameName = isViewingSelf
                 ? myGameSession.isPlayingGame
                   ? myGameSession.game
                   : ""
                 : onlineMatch?.isPlayingGame
                 ? onlineMatch.game || ""
-                : profileData?.isPlayingGame
-                ? profileData.game
+                : verifiedProfile?.isPlayingGame
+                ? verifiedProfile.game
                 : "";
               const activeGameStart = isViewingSelf
                 ? myGameSession.gameStartedAt
-                : onlineMatch?.gameStartedAt || profileData?.gameStartedAt || 0;
+                : onlineMatch?.gameStartedAt || verifiedProfile?.gameStartedAt || 0;
               const avatarCol = stringToColor(targetName);
               const blocked = isUserBlocked(targetName);
 
               const custom = isViewingSelf
                 ? editingCustom
                 : sanitizeCustomization(
-                    profileData?.customization || metaMatch?.customization,
+                    verifiedProfile?.customization || metaMatch?.customization,
                     targetName
                   );
               const targetRole: ChatRole =
-                (isViewingSelf ? selfRole : profileData?.role || metaMatch?.role) ||
+                (isViewingSelf ? selfRole : verifiedProfile?.role || metaMatch?.role) ||
                 (ownerUsers.some((o) => o.toLowerCase() === targetName.toLowerCase())
                   ? "owner"
                   : staffMods.some((m) => m.toLowerCase() === targetName.toLowerCase())
                   ? "mod"
                   : "member");
               const targetTimedOut = Boolean(
-                profileData?.isTimedOut ||
+                verifiedProfile?.isTimedOut ||
                   metaMatch?.isTimedOut ||
                   (isViewingSelf &&
                     selfTimeout &&
@@ -4769,7 +5392,7 @@ export default function ChatModal() {
                   (selfRole === "owner" || targetRole !== "mod")
               );
               const targetIsGoat = Boolean(
-                isUserGoat(targetName) || profileData?.isGoat
+                isUserGoat(targetName) || verifiedProfile?.isGoat
               );
               const canGrantGoat = Boolean(
                 cloudUser && (selfRole === "owner" || selfRole === "mod")
@@ -4777,6 +5400,7 @@ export default function ChatModal() {
 
               return (
                 <div
+                  key={targetName.toLowerCase()}
                   class={`chat-profile-card theme-${custom.cardTheme} ${
                     custom.profileEffect === "lightning-border" ? "effect-lightning-border" : ""
                   }`}
@@ -4800,7 +5424,7 @@ export default function ChatModal() {
                           style={{ right: "44px", width: "auto", padding: "0 10px", gap: "5px" }}
                           title="Customize pfp, gif banner, animated frames & effects"
                           onClick={() => {
-                            setViewingProfileUsername(null);
+                            closeUserProfile();
                             void handleOpenCustomizer();
                           }}
                         >
@@ -4812,7 +5436,7 @@ export default function ChatModal() {
                         type="button"
                         class="chat-profile-close-btn"
                         title="Close profile"
-                        onClick={() => setViewingProfileUsername(null)}
+                        onClick={closeUserProfile}
                       >
                         <i class="fa-solid fa-xmark"></i>
                       </button>
@@ -4833,7 +5457,7 @@ export default function ChatModal() {
                           {custom.customTag && (
                             <span class="chat-role-badge custom-tag">{custom.customTag}</span>
                           )}
-                          {(profileData?.cloudSyncVerified ?? true) && (
+                          {(verifiedProfile?.cloudSyncVerified ?? true) && (
                             <span class="chat-profile-badge verified">
                               <i class="fa-solid fa-cloud"></i> cloudsync
                             </span>
@@ -4872,8 +5496,8 @@ export default function ChatModal() {
                           <span>@{targetName}</span>
                           {custom.pronouns && <span>· {custom.pronouns}</span>}
                         </div>
-                        {profileData?.statusText && !isViewingSelf && (
-                          <div class="chat-profile-custom-status">{profileData.statusText}</div>
+                        {verifiedProfile?.statusText && !isViewingSelf && (
+                          <div class="chat-profile-custom-status">{verifiedProfile.statusText}</div>
                         )}
                       </div>
 
@@ -4921,7 +5545,7 @@ export default function ChatModal() {
                               type="button"
                               class="chat-profile-pill-btn"
                               onClick={() => {
-                                setViewingProfileUsername(null);
+                                closeUserProfile();
                                 void handleOpenCustomizer();
                               }}
                             >
@@ -4940,12 +5564,12 @@ export default function ChatModal() {
                       ) : (
                         <div class={`chat-profile-section chat-profile-bio-card bio-${custom.bioStyle}`}>
                           <div class="chat-profile-bio-text">
-                            {profileData?.bio || "no bio set yet."}
+                            {verifiedProfile?.bio || "no bio set yet."}
                           </div>
-                          {profileData?.createdAt && (
+                          {verifiedProfile?.createdAt && (
                             <div class="chat-profile-joined">
                               <i class="fa-solid fa-calendar-days"></i> member since{" "}
-                              {new Date(profileData.createdAt).toLocaleDateString()}
+                              {new Date(verifiedProfile.createdAt).toLocaleDateString()}
                             </div>
                           )}
                         </div>
@@ -4954,7 +5578,7 @@ export default function ChatModal() {
                       {/* Game & Leaderboard Stats */}
                       <div class="chat-profile-section">
                         <div class="chat-profile-section-title">game & studio stats</div>
-                        {profileLoading && !profileData ? (
+                        {profileLoading && !verifiedProfile ? (
                           <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
                             loading profile stats...
                           </div>
@@ -4963,45 +5587,45 @@ export default function ChatModal() {
                             <div class="chat-profile-stats-grid">
                               <div class="chat-profile-stat-pill">
                                 <span class="chat-profile-stat-val">
-                                  {formatPlayTime(profileData?.stats?.totalSeconds || 0)}
+                                  {formatPlayTime(verifiedProfile?.stats?.totalSeconds || 0)}
                                 </span>
                                 <span class="chat-profile-stat-lbl">total time played</span>
                               </div>
                               <div class="chat-profile-stat-pill">
                                 <span class="chat-profile-stat-val">
-                                  {profileData?.stats?.totalPlays || 0}
+                                  {verifiedProfile?.stats?.totalPlays || 0}
                                 </span>
                                 <span class="chat-profile-stat-lbl">total game sessions</span>
                               </div>
                               <div class="chat-profile-stat-pill">
                                 <span class="chat-profile-stat-val">
-                                  {profileData?.publishedGamesCount || 0}
+                                  {verifiedProfile?.publishedGamesCount || 0}
                                 </span>
                                 <span class="chat-profile-stat-lbl">published games</span>
                               </div>
                             </div>
 
-                            {profileData?.studio && (
+                            {verifiedProfile?.studio && (
                               <div class="chat-profile-studio-row">
                                 <i
-                                  class={`fa-solid ${profileData.studio.icon || "fa-rocket"}`}
-                                  style={{ color: profileData.studio.color || "#60a5fa" }}
+                                  class={`fa-solid ${verifiedProfile.studio.icon || "fa-rocket"}`}
+                                  style={{ color: verifiedProfile.studio.color || "#60a5fa" }}
                                 ></i>
                                 <div>
                                   <div style={{ fontWeight: 600, fontSize: "12px" }}>
-                                    {profileData.studio.name}
+                                    {verifiedProfile.studio.name}
                                   </div>
                                   <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
-                                    {profileData.studio.tagline}
+                                    {verifiedProfile.studio.tagline}
                                   </div>
                                 </div>
                               </div>
                             )}
 
-                            {profileData?.stats?.topGames &&
-                              profileData.stats.topGames.length > 0 && (
+                            {verifiedProfile?.stats?.topGames &&
+                              verifiedProfile.stats.topGames.length > 0 && (
                                 <div class="chat-profile-top-games">
-                                  {profileData.stats.topGames.slice(0, 3).map((g) => (
+                                  {verifiedProfile.stats.topGames.slice(0, 3).map((g) => (
                                     <div key={g.game} class="chat-profile-top-game-row">
                                       <span class="chat-profile-top-game-name">{g.game}</span>
                                       <span class="chat-profile-top-game-time">
@@ -5029,7 +5653,7 @@ export default function ChatModal() {
                                     ? prev
                                     : `@${targetName} ${prev}`
                                 );
-                                setViewingProfileUsername(null);
+                                closeUserProfile();
                               }}
                             >
                               mention
@@ -5057,7 +5681,7 @@ export default function ChatModal() {
                             onClick={() => {
                               const dmChan = makeDmChannelId(cloudUser || "guest", targetName);
                               setActiveChannel(dmChan);
-                              setViewingProfileUsername(null);
+                              closeUserProfile();
                               joinVoiceRoom(`voice:${dmChan}`);
                             }}
                           >
@@ -5167,7 +5791,13 @@ export default function ChatModal() {
             username={cloudUser}
             role={selfRole}
             isGoat={isUserGoat(cloudUser)}
-            createdAt={profileData?.createdAt || userMetaMap.get(cloudUser.toLowerCase())?.createdAt}
+            createdAt={
+              selfCreatedAt ||
+              (profileData?.username?.toLowerCase() === cloudUser.toLowerCase()
+                ? profileData.createdAt
+                : undefined) ||
+              userMetaMap.get(cloudUser.toLowerCase())?.createdAt
+            }
             initialCustom={editingCustom}
             initialBio={editingBio}
             initialStatusText={editingStatusText}
@@ -5215,6 +5845,60 @@ export default function ChatModal() {
             onClose={() => setGroupModalMode(null)}
             notify={(msg, type) => notifyToast(msg, type)}
           />
+        )}
+
+        {/* ── IN-SITE CAMERA CAPTURE MODAL ── */}
+        {showCameraModal && cloudUser && (
+          <ChatCameraModal
+            onAttach={(img) => {
+              setPendingImage(img);
+              window.setTimeout(() => chatInputRef.current?.focus(), 40);
+            }}
+            onSendNow={(img) => {
+              void sendChatMessage(inputText, undefined, img);
+            }}
+            onFallbackUpload={() => imageFileInputRef.current?.click()}
+            onClose={() => setShowCameraModal(false)}
+          />
+        )}
+
+        {/* ── FULLSCREEN CHAT IMAGE LIGHTBOX ── */}
+        {lightboxImage && (
+          <div
+            class="chat-lightbox-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setLightboxImage(null);
+            }}
+          >
+            <div class="chat-lightbox-card" onClick={(e) => e.stopPropagation()}>
+              <div class="chat-lightbox-topbar">
+                <span>{lightboxImage.name || "image preview"}</span>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <a
+                    href={lightboxImage.url}
+                    download={lightboxImage.name || "chat-image"}
+                    class="chat-header-btn"
+                    style={{ textDecoration: "none" }}
+                  >
+                    <i class="fa-solid fa-download"></i>
+                    <span>save</span>
+                  </a>
+                  <button
+                    type="button"
+                    class="chat-header-btn"
+                    onClick={() => setLightboxImage(null)}
+                  >
+                    <i class="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+              </div>
+              <img
+                src={lightboxImage.url}
+                alt={lightboxImage.name || "Full image preview"}
+                class="chat-lightbox-img"
+              />
+            </div>
+          </div>
         )}
       </div>
     </div>

@@ -16,6 +16,7 @@ import {
   type StyleOption,
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
+import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 
 export type CollectibleTabKind = "decoration" | "effect" | "nameplate" | "frame";
 
@@ -189,7 +190,11 @@ export default function CollectiblePickerPanel({
       ) : (
         <div class={`chat-collectible-grid is-${kind}s`}>
           {shown.map((item, idx) => {
-            const imgLoading = idx < 9 ? "eager" : "lazy";
+            const imgLoading = isChromebookModeEnabled()
+              ? "lazy"
+              : idx < 9
+                ? "eager"
+                : "lazy";
             if (kind === "decoration") {
               const d = item as ReturnType<typeof getCatalogDecorations>[number];
               const fullUrl = expandCollectibleUrl(d.u);

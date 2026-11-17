@@ -296,6 +296,12 @@ function notifyScramjetWorkerReady(): void {
 }
 
 export async function ensureScramjetReady(): Promise<void> {
+  if (
+    typeof window !== "undefined" &&
+    (!window.isSecureContext || !("serviceWorker" in navigator))
+  ) {
+    return;
+  }
   installPageScramjetIdbGuard();
   if (_scramjetInitPromise) return _scramjetInitPromise;
   _scramjetInitPromise = (async () => {

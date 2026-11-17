@@ -3,6 +3,7 @@ import { memo } from "preact/compat";
 import { fetchGameData, resetGameCache, getGameDisplayLabel, type GameEntry } from "../features/games.ts";
 import { showHomeView } from "../state/store.ts";
 import { attachSearchLight } from "../core/searchLight.ts";
+import { useChromebookMode } from "../core/chromebookMode.ts";
 
 const FADE_DURATION = 100;
 const SKELETON_KEYS = Array.from({ length: 12 }, (_, i) => `skeleton-${i}`);
@@ -68,7 +69,20 @@ export default function GamesPage() {
   const [loaded, setLoaded] = useState(false);
   const [visible, setVisible] = useState(false);
   const [active, setActive] = useState(false);
+  const chromebookMode = useChromebookMode();
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+
+  useEffect(() => {
+    if (!chromebookMode) {
+      setDebouncedQuery(query);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(query);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [query, chromebookMode]);
   const [error, setError] = useState<string | null>(null);
 
   const searchBarRef = useRef<HTMLDivElement | null>(null);
@@ -306,13 +320,14 @@ export default function GamesPage() {
   );
 
   const filteredGames = useMemo(() => {
-    if (!query) return allGames;
-    const q = query.toLowerCase().trim();
+    const activeQuery = chromebookMode ? debouncedQuery : query;
+    if (!activeQuery) return allGames;
+    const q = activeQuery.toLowerCase().trim();
     if (!q) return allGames;
     return allGames.filter(
       (g) => (g._nameLc || "").includes(q) || (g._authorLc || "").includes(q),
     );
-  }, [allGames, query]);
+  }, [allGames, query, debouncedQuery, chromebookMode]);
 
   const [renderCount, setRenderCount] = useState(RENDER_BATCH);
   const loadMoreRef = useRef<HTMLDivElement>(null);

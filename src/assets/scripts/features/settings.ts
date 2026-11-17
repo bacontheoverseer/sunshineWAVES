@@ -1,3 +1,5 @@
+import { setChromebookModeEnabled } from "../core/chromebookMode.ts";
+
 export {};
 
 interface SiteCloakingPreset {
@@ -826,6 +828,7 @@ function _initSettings(): void {
     "dark-mode",
     localStorage.getItem("darkMode") === "true",
   );
+  setChromebookModeEnabled(localStorage.getItem("chromebookMode") === "true");
 
   window.addEventListener("load", () => runInitialCloak(initialLinkCloaking));
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "preact/hooks";
 import { showHomeView } from "../state/store.ts";
 import { attachSearchLight } from "../core/searchLight.ts";
+import { useChromebookMode } from "../core/chromebookMode.ts";
 
 export interface ProxyAppEntry {
   id: string;
@@ -261,10 +262,23 @@ const APPS_LIST: ProxyAppEntry[] = [
 const FADE_DURATION = 100;
 
 export default function AppsPage() {
+  const chromebookMode = useChromebookMode();
   const [visible, setVisible] = useState(false);
   const [active, setActive] = useState(false);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [category, setCategory] = useState<"all" | "social" | "media" | "gaming" | "tools">("all");
+
+  useEffect(() => {
+    if (!chromebookMode) {
+      setDebouncedQuery(query);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(query);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [query, chromebookMode]);
   const [customUrl, setCustomUrl] = useState("");
 
   const searchBarRef = useRef<HTMLDivElement | null>(null);
@@ -390,7 +404,7 @@ export default function AppsPage() {
   );
 
   const filteredApps = useMemo(() => {
-    const q = query.toLowerCase().trim();
+    const q = (chromebookMode ? debouncedQuery : query).toLowerCase().trim();
     return APPS_LIST.filter((app) => {
       if (category !== "all" && app.category !== category) return false;
       if (!q) return true;
@@ -400,7 +414,7 @@ export default function AppsPage() {
         app.url.toLowerCase().includes(q)
       );
     });
-  }, [query, category]);
+  }, [query, debouncedQuery, chromebookMode, category]);
 
   if (!visible) return null;
 

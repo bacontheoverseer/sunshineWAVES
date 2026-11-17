@@ -10,6 +10,12 @@ import {
   recordGameActivity,
   type StudioProfile,
 } from "../core/cookieCoins.ts";
+import {
+  isChromebookModeEnabled,
+  setGameSourceActive,
+  teardownIframeElement,
+  useChromebookMode,
+} from "../core/chromebookMode.ts";
 
 export type GameMode = "platformer" | "fps3d" | "topdown" | "shooter" | "flappy" | "custom_html";
 
@@ -550,8 +556,21 @@ export default function GameStudioPage() {
   const [subTab, setSubTab] = useState<"community" | "mystudio" | "editor" | "htmlupload">(
     "community"
   );
+  const chromebookMode = useChromebookMode();
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [modeFilter, setModeFilter] = useState<"all" | GameMode>("all");
+
+  useEffect(() => {
+    if (!chromebookMode) {
+      setDebouncedSearchQuery(searchQuery);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery, chromebookMode]);
 
   // User's Custom Named Game Studio & Cookie Coins
   const [userStudio, setUserStudio] = useState<StudioProfile>(() => getUserStudio());
@@ -640,6 +659,36 @@ export default function GameStudioPage() {
   const isPaintingRef = useRef(false);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const broadcastRef = useRef<BroadcastChannel | null>(null);
+  const playingCustomIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const htmlPreviewIframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  useEffect(() => {
+    const el = htmlPreviewIframeRef.current;
+    return () => {
+      if (isChromebookModeEnabled() && el) {
+        teardownIframeElement(el, true);
+      }
+    };
+  }, [htmlPreviewBlobUrl, subTab, visible]);
+
+  useEffect(() => {
+    const activeInStudio = Boolean(
+      visible &&
+        subTab === "editor" &&
+        (Boolean(playingCustomHtmlGame && playingCustomBlobUrl) || isPlaying),
+    );
+    setGameSourceActive("studio-play", activeInStudio);
+    return () => setGameSourceActive("studio-play", false);
+  }, [visible, subTab, playingCustomHtmlGame, playingCustomBlobUrl, isPlaying, chromebookMode]);
+
+  useEffect(() => {
+    const el = playingCustomIframeRef.current;
+    return () => {
+      if (isChromebookModeEnabled() && el) {
+        teardownIframeElement(el, true);
+      }
+    };
+  }, [playingCustomBlobUrl]);
 
   const keysRef = useRef<Record<string, boolean>>({});
   const mouseLookDeltaRef = useRef<number>(0);
@@ -2641,7 +2690,9 @@ export default function GameStudioPage() {
   };
 
   const filteredCommunityGames = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
+    const q = (chromebookMode ? debouncedSearchQuery : searchQuery)
+      .toLowerCase()
+      .trim();
     return communityGames.filter((g) => {
       if (modeFilter !== "all" && g.mode !== modeFilter) return false;
       if (!q) return true;
@@ -2652,7 +2703,7 @@ export default function GameStudioPage() {
         g.description.toLowerCase().includes(q)
       );
     });
-  }, [communityGames, searchQuery, modeFilter]);
+  }, [communityGames, searchQuery, debouncedSearchQuery, chromebookMode, modeFilter]);
 
   const myStudioGames = useMemo(
     () =>
@@ -3526,6 +3577,7 @@ export default function GameStudioPage() {
 
             {htmlPreviewBlobUrl ? (
               <iframe
+                ref={htmlPreviewIframeRef}
                 key={htmlPreviewBlobUrl}
                 title="Custom HTML Game Preview"
                 src={htmlPreviewBlobUrl}
@@ -3570,6 +3622,9 @@ export default function GameStudioPage() {
                     type="button"
                     class="studio-tool-btn"
                     onClick={() => {
+                      if (isChromebookModeEnabled() && playingCustomIframeRef.current) {
+                        teardownIframeElement(playingCustomIframeRef.current, true);
+                      }
                       setPlayingCustomHtmlGame(null);
                       setSubTab("community");
                     }}
@@ -3619,6 +3674,7 @@ export default function GameStudioPage() {
 
               {playingCustomBlobUrl && (
                 <iframe
+                  ref={playingCustomIframeRef}
                   key={playingCustomBlobUrl}
                   title={playingCustomHtmlGame.title}
                   src={playingCustomBlobUrl}

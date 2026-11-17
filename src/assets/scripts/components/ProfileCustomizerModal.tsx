@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "preact/hooks";
+import { readImageFileAsDataUrl } from "../core/imageUpload.ts";
 import {
   AVATAR_EMOJIS,
   BANNER_STYLES,
@@ -15,6 +16,7 @@ import {
   getDefaultCustomization,
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
+import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 import {
   GoatBadge,
   NameplateMediaLayer,
@@ -49,52 +51,6 @@ interface KlipySearchHit {
   title: string;
   previewUrl: string;
   url: string;
-}
-
-async function readImageFileAsDataUrl(
-  file: File,
-  maxWidth: number,
-  maxHeight: number,
-  maxGifBytes: number
-): Promise<string> {
-  if (file.type === "image/gif" || file.name.toLowerCase().endsWith(".gif")) {
-    if (file.size > maxGifBytes) {
-      throw new Error(
-        `Animated GIF is ${Math.round(file.size / 1024)}KB (max ${Math.round(maxGifBytes / 1024)}KB). Try picking from KLIPY or pasting a GIF URL!`
-      );
-    }
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(new Error("Could not read GIF file"));
-      reader.readAsDataURL(file);
-    });
-  }
-
-  const rawUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const el = new Image();
-      el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error("Invalid image file"));
-      el.src = rawUrl;
-    });
-    const ratio = Math.min(1, maxWidth / img.width, maxHeight / img.height);
-    const w = Math.max(1, Math.round(img.width * ratio));
-    const h = Math.max(1, Math.round(img.height * ratio));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Canvas unavailable");
-    ctx.drawImage(img, 0, 0, w, h);
-    const webp = canvas.toDataURL("image/webp", 0.85);
-    return webp.startsWith("data:image/webp")
-      ? webp
-      : canvas.toDataURL("image/jpeg", 0.85);
-  } finally {
-    URL.revokeObjectURL(rawUrl);
-  }
 }
 
 export default function ProfileCustomizerModal({
@@ -552,7 +508,12 @@ export default function ProfileCustomizerModal({
                               setGifPickerFor(null);
                             }}
                           >
-                            <img src={getSafeMediaProxySrc(g.previewUrl)} alt={g.title} />
+                            <img
+                              src={getSafeMediaProxySrc(g.previewUrl)}
+                              alt={g.title}
+                              loading={isChromebookModeEnabled() ? "lazy" : undefined}
+                              decoding="async"
+                            />
                           </button>
                         ))}
                       </div>
@@ -706,7 +667,12 @@ export default function ProfileCustomizerModal({
                               setGifPickerFor(null);
                             }}
                           >
-                            <img src={getSafeMediaProxySrc(g.previewUrl)} alt={g.title} />
+                            <img
+                              src={getSafeMediaProxySrc(g.previewUrl)}
+                              alt={g.title}
+                              loading={isChromebookModeEnabled() ? "lazy" : undefined}
+                              decoding="async"
+                            />
                           </button>
                         ))}
                       </div>

@@ -3,6 +3,7 @@ import {
   type ProfileCustomization,
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
+import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 
 interface UserAvatarProps {
   username: string;
@@ -48,7 +49,12 @@ export function UserAvatar({
     >
       <div class="chat-avatar-inner">
         {mediaSrc ? (
-          <img src={mediaSrc} alt={username} decoding="async" />
+          <img
+            src={mediaSrc}
+            alt={username}
+            loading={isChromebookModeEnabled() ? "lazy" : undefined}
+            decoding="async"
+          />
         ) : custom?.avatarEmoji ? (
           <span>{custom.avatarEmoji}</span>
         ) : (
@@ -61,6 +67,7 @@ export function UserAvatar({
           alt=""
           class="avatar-dec-img"
           aria-hidden="true"
+          loading={isChromebookModeEnabled() ? "lazy" : undefined}
           decoding="async"
         />
       ) : dec ? (
@@ -128,6 +135,7 @@ export function NameplateMediaLayer({
       alt=""
       class="chat-nameplate-media"
       aria-hidden="true"
+      loading={isChromebookModeEnabled() ? "lazy" : undefined}
       decoding="async"
     />
   );
