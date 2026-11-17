@@ -16,19 +16,20 @@ CREATE TABLE IF NOT EXISTS public.cloudsync_sync (
 ALTER TABLE public.cloudsync_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cloudsync_sync ENABLE ROW LEVEL SECURITY;
 
-CREATE TABLE IF NOT EXISTS public.lemonsqueezy_subscriptions (
+CREATE TABLE IF NOT EXISTS public.stripe_subscriptions (
   subscription_id TEXT PRIMARY KEY,
-  order_id TEXT NOT NULL DEFAULT '',
+  checkout_session_id TEXT NOT NULL DEFAULT '',
+  invoice_id TEXT NOT NULL DEFAULT '',
   customer_id TEXT NOT NULL DEFAULT '',
-  license_key TEXT NOT NULL DEFAULT '',
   email_lower TEXT NOT NULL DEFAULT '',
   user_name_lower TEXT NOT NULL DEFAULT '',
   custom_username_lower TEXT NOT NULL DEFAULT '',
   claimed_username_lower TEXT NOT NULL DEFAULT '',
-  variant_id TEXT NOT NULL DEFAULT '',
+  price_id TEXT NOT NULL DEFAULT '',
   product_id TEXT NOT NULL DEFAULT '',
   tier_name TEXT NOT NULL DEFAULT 'Cookie Master',
   status TEXT NOT NULL DEFAULT 'active',
+  managed_payments BOOLEAN NOT NULL DEFAULT TRUE,
   customer_portal_url TEXT NOT NULL DEFAULT '',
   amount NUMERIC NOT NULL DEFAULT 2,
   verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS public.lemonsqueezy_subscriptions (
   cancelled_at TIMESTAMPTZ NULL
 );
 
-ALTER TABLE public.lemonsqueezy_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.stripe_subscriptions ENABLE ROW LEVEL SECURITY;
 
 
 CREATE TABLE IF NOT EXISTS public.app_kv (

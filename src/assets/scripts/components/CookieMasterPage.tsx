@@ -18,6 +18,7 @@ import {
 interface MasterConfig {
   configured: boolean;
   provider: string;
+  supportsSessionCheckout?: boolean;
   checkoutUrl: string;
   billingUrl: string;
   hasWebhookVerification: boolean;
@@ -30,7 +31,8 @@ interface MasterConfig {
 
 const DEFAULT_CONFIG: MasterConfig = {
   configured: false,
-  provider: "lemonsqueezy",
+  provider: "stripe_managed_payments",
+  supportsSessionCheckout: false,
   checkoutUrl: "",
   billingUrl: "",
   hasWebhookVerification: false,
@@ -179,7 +181,70 @@ export default function CookieMasterPage() {
     };
   }, [show, hide, toggle, refreshState]);
 
-  // Fetch Lemon Squeezy config when Cookie Master opens
+  // Handle Stripe Managed Payments return URL (?cookie_master=success&session_id=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const returnStatus = params.get("cookie_master");
+    if (!returnStatus) return;
+
+    const sessionId = (params.get("session_id") || "").trim();
+    const cleanUrl = `${window.location.pathname}${window.location.hash || ""}`;
+    try {
+      window.history.replaceState({}, "", cleanUrl || "/");
+    } catch {}
+
+    if (returnStatus === "cancelled") {
+      show();
+      notifyToast("checkout cancelled", "info");
+      return;
+    }
+
+    if (returnStatus === "success") {
+      show();
+      let cancelled = false;
+      const statusUrl = sessionId
+        ? `/api/cookie-master/status?session_id=${encodeURIComponent(sessionId)}`
+        : "/api/cookie-master/status";
+
+      fetch(statusUrl, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((payload) => {
+          if (cancelled) return;
+          if (payload?.active) {
+            const prev = getCookieMasterState();
+            setCookieMasterState({
+              active: true,
+              licenseKey: String(
+                payload.licenseKey || payload.subscriptionId || sessionId || "stripe",
+              ),
+              subscriptionId:
+                typeof payload.subscriptionId === "string"
+                  ? payload.subscriptionId
+                  : sessionId || undefined,
+              status: typeof payload.status === "string" ? payload.status : "active",
+              email: typeof payload.email === "string" ? payload.email : prev?.email,
+              verifiedAt: Date.now(),
+              expiresAt: Number(payload.expiresAt) || 0,
+              cancelledAt: typeof payload.cancelledAt === "string" ? payload.cancelledAt : null,
+              lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
+            });
+            notifyToast("cookie master unlocked! enjoy ad-free mode & daily coins", "success");
+          } else {
+            notifyToast("confirming stripe payment status...", "info");
+            setAwaitingCheckout(true);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setAwaitingCheckout(true);
+        });
+
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [show]);
+
+  // Fetch Stripe Managed Payments config when Cookie Master opens
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
@@ -189,7 +254,9 @@ export default function CookieMasterPage() {
         if (cancelled || !data) return;
         setConfig({
           configured: Boolean(data.configured),
-          provider: typeof data.provider === "string" ? data.provider : "lemonsqueezy",
+          provider:
+            typeof data.provider === "string" ? data.provider : "stripe_managed_payments",
+          supportsSessionCheckout: Boolean(data.supportsSessionCheckout),
           checkoutUrl: typeof data.checkoutUrl === "string" ? data.checkoutUrl : "",
           billingUrl: typeof data.billingUrl === "string" ? data.billingUrl : "",
           hasWebhookVerification: Boolean(data.hasWebhookVerification),
@@ -210,7 +277,7 @@ export default function CookieMasterPage() {
     };
   }, [visible]);
 
-  // Poll membership activation automatically while user completes Lemon Squeezy checkout in new tab
+  // Poll membership activation automatically while user completes Stripe checkout in new tab
   useEffect(() => {
     if (!awaitingCheckout) return;
     let cancelled = false;
@@ -227,7 +294,7 @@ export default function CookieMasterPage() {
           const prev = getCookieMasterState();
           setCookieMasterState({
             active: true,
-            licenseKey: String(payload.licenseKey || payload.subscriptionId || "lemonsqueezy"),
+            licenseKey: String(payload.licenseKey || payload.subscriptionId || "stripe"),
             subscriptionId:
               typeof payload.subscriptionId === "string" ? payload.subscriptionId : undefined,
             status: typeof payload.status === "string" ? payload.status : "active",
@@ -331,7 +398,10 @@ export default function CookieMasterPage() {
     const trimmed = emailOrCode.trim();
     const signedInUser = getActiveUser();
     if (!trimmed && signedInUser === "guest") {
-      notifyToast("enter your lemon squeezy email, license key, or subscription id first", "error");
+      notifyToast(
+        "enter your stripe billing email, subscription id (sub_...), or checkout session id (cs_...) first",
+        "error",
+      );
       return;
     }
 
@@ -345,8 +415,8 @@ export default function CookieMasterPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.success || !data?.active) {
         notifyToast(
-          data?.error || "could not find an active lemon squeezy cookie master membership yet",
-          "error"
+          data?.error || "could not find an active stripe cookie master subscription yet",
+          "error",
         );
         return;
       }
@@ -354,7 +424,9 @@ export default function CookieMasterPage() {
       const prev = getCookieMasterState();
       setCookieMasterState({
         active: true,
-        licenseKey: String(data.licenseKey || data.subscriptionId || trimmed || prev?.licenseKey || "lemonsqueezy"),
+        licenseKey: String(
+          data.licenseKey || data.subscriptionId || trimmed || prev?.licenseKey || "stripe",
+        ),
         subscriptionId:
           typeof data.subscriptionId === "string" ? data.subscriptionId : prev?.subscriptionId,
         status: typeof data.status === "string" ? data.status : "active",
@@ -382,14 +454,15 @@ export default function CookieMasterPage() {
   };
 
   const buildCheckoutUrl = (): string => {
+    if (config.supportsSessionCheckout) {
+      return "/api/cookie-master/checkout";
+    }
     if (!config.checkoutUrl) return "";
     try {
       const u = new URL(config.checkoutUrl);
-      // Hosted new-tab checkout avoids Chromium blocking non-COEP embed iframes
-      u.searchParams.delete("embed");
       const activeUser = getActiveUser();
       if (activeUser && activeUser !== "guest") {
-        u.searchParams.set("checkout[custom][username]", activeUser);
+        u.searchParams.set("client_reference_id", activeUser);
       }
       return u.toString();
     } catch {
@@ -397,12 +470,12 @@ export default function CookieMasterPage() {
     }
   };
 
-  const handleOpenLemonCheckout = (e: MouseEvent) => {
-    if (!config.configured || !config.checkoutUrl) {
+  const handleOpenStripeCheckout = (e: MouseEvent) => {
+    if (!config.configured || (!config.supportsSessionCheckout && !config.checkoutUrl)) {
       e.preventDefault();
       notifyToast(
-        "Set LEMONSQUEEZY_CHECKOUT_URL and LEMONSQUEEZY_WEBHOOK_SECRET on the server to open Lemon Squeezy checkout.",
-        "info"
+        "Set STRIPE_SECRET_KEY and STRIPE_PRICE_ID (or STRIPE_PAYMENT_LINK_URL) on the server to open Stripe checkout.",
+        "info",
       );
       return;
     }
@@ -423,7 +496,7 @@ export default function CookieMasterPage() {
       const data = await res.json().catch(() => null);
       const url = data?.portalUrl || config.billingUrl;
       if (!url) {
-        notifyToast("billing portal url not configured yet — check your lemon squeezy receipt email", "info");
+        notifyToast("billing portal url not configured yet — check your stripe receipt email", "info");
         return;
       }
       window.open(url, "_blank", "noopener,noreferrer");
@@ -431,7 +504,7 @@ export default function CookieMasterPage() {
       if (config.billingUrl) {
         window.open(config.billingUrl, "_blank", "noopener,noreferrer");
       } else {
-        notifyToast("could not open lemon squeezy portal right now", "error");
+        notifyToast("could not open stripe customer portal right now", "error");
       }
     }
   };
@@ -547,7 +620,7 @@ export default function CookieMasterPage() {
         </div>
       )}
 
-      {/* Product Hero Card (Native Operation Cookie Product Page + Lemon Squeezy Checkout) */}
+      {/* Product Hero Card (Native Operation Cookie Product Page + Stripe Managed Payments Checkout) */}
       <div
         class="studio-panel"
         style={{
@@ -616,12 +689,12 @@ export default function CookieMasterPage() {
                 maxWidth: "560px",
               }}
             >
-              upgrade your account with one monthly membership powered by lemon squeezy.
+              upgrade your account with one monthly membership powered by stripe managed payments.
               {activeUsername !== "guest"
                 ? ` your cloudsync account (@${activeUsername}) is linked automatically during checkout,`
                 : ""}{" "}
-              or verify anytime below using your lemon squeezy email, license key, or subscription
-              id.
+              or verify anytime below using your billing email, subscription id (sub_...), or
+              checkout session id (cs_...).
             </p>
           </div>
 
@@ -682,7 +755,7 @@ export default function CookieMasterPage() {
                 href={buildCheckoutUrl() || "#"}
                 target="_blank"
                 rel="noopener noreferrer"
-                onClick={handleOpenLemonCheckout}
+                onClick={handleOpenStripeCheckout}
                 class="apps-custom-btn"
                 style={{
                   justifyContent: "center",
@@ -700,7 +773,7 @@ export default function CookieMasterPage() {
                     ? "loading checkout..."
                     : config.configured
                       ? `buy cookie master — $${config.priceMonthly}/mo`
-                      : "lemon squeezy checkout not configured"}
+                      : "stripe checkout not configured"}
                 </span>
               </a>
             )}
@@ -713,7 +786,7 @@ export default function CookieMasterPage() {
                 textTransform: "lowercase",
               }}
             >
-              checkout via lemon squeezy · synced with cloudsync
+              checkout via stripe managed payments · synced with cloudsync
             </div>
 
             <div
@@ -865,7 +938,7 @@ export default function CookieMasterPage() {
                   textTransform: "lowercase",
                 }}
               >
-                lemon squeezy pass:{" "}
+                stripe managed pass:{" "}
                 {maskReference(
                   masterState?.subscriptionId || masterState?.licenseKey || masterState?.email || "",
                 )}
@@ -954,9 +1027,9 @@ export default function CookieMasterPage() {
                   flex: "1 1 320px",
                 }}
               >
-                lemon squeezy processes recurring billing directly. open your lemon squeezy
-                customer billing portal anytime to cancel auto-renewal or update your payment
-                method—your cookie master perks remain active until your current month expires.
+                stripe processes recurring billing directly. open your stripe customer billing
+                portal anytime to cancel auto-renewal or update your payment method—your cookie
+                master perks remain active until your current month expires.
               </div>
               <button
                 type="button"
@@ -974,7 +1047,7 @@ export default function CookieMasterPage() {
         <div class="apps-custom-launcher" style={{ padding: "16px 18px" }}>
           <div class="apps-custom-launcher-label">
             <i class="fa-solid fa-key"></i>
-            <span>already subscribed via lemon squeezy? verify with your email, license key, or subscription id</span>
+            <span>already subscribed via stripe? verify with your billing email, sub_..., or cs_...</span>
           </div>
 
           <form
@@ -985,7 +1058,7 @@ export default function CookieMasterPage() {
             <input
               type="text"
               class="apps-custom-input"
-              placeholder="email, license key, or subscription id"
+              placeholder="email, sub_..., or cs_..."
               value={lookupInput}
               onInput={(e) => setLookupInput((e.target as HTMLInputElement).value)}
               disabled={verifying}

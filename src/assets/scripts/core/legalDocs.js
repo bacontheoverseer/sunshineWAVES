@@ -1,4 +1,4 @@
-export const LEGAL_LAST_UPDATED = "November 15, 2026";
+export const LEGAL_LAST_UPDATED = "November 16, 2026";
 export const LEGAL_SERVICE_NAME = "Operation Cookie";
 
 export const TERMS_SECTIONS = [
@@ -26,11 +26,11 @@ export const TERMS_SECTIONS = [
     ],
   },
   {
-    title: "4. Paid Subscriptions (Cookie Master), Lemon Squeezy Checkout & Billing",
+    title: "4. Paid Subscriptions (Cookie Master), Stripe Managed Payments & Billing",
     body: [
-      "The Cookie Master monthly membership ($2.00/month USD unless otherwise updated) and any paid perks are processed exclusively by third-party Merchant of Record Lemon Squeezy (and its payment partners such as Stripe, PayPal, and Apple Pay). Operation Cookie never collects, views, processes, or stores raw credit card numbers, CVV codes, bank details, or billing addresses.",
-      "Subscriptions renew automatically through Lemon Squeezy according to Lemon Squeezy's billing cycle until cancelled. You may cancel recurring billing directly through your Lemon Squeezy Customer Billing Portal (accessible from the Cookie Master panel or your Lemon Squeezy store receipt email). Clicking 'unlink' inside Operation Cookie only disconnects local browser activation and does NOT cancel Lemon Squeezy billing.",
-      "All digital purchases, memberships, and perk unlocks are final and non-refundable to the maximum extent permitted by law, except where mandatory consumer law or Lemon Squeezy's Merchant of Record refund policies require otherwise. Partial billing periods are not prorated or refunded.",
+      "The Cookie Master monthly membership ($2.00/month USD unless otherwise updated) and any paid perks are processed exclusively via Stripe Managed Payments, with Stripe acting as third-party Merchant of Record (supporting payment methods such as cards, Link, and Apple Pay). Operation Cookie never collects, views, processes, or stores raw credit card numbers, CVV codes, bank details, or billing addresses.",
+      "Subscriptions renew automatically through Stripe Billing according to your Stripe billing cycle until cancelled. You may cancel recurring billing directly through your Stripe Customer Billing Portal (accessible from the Cookie Master panel or your Stripe receipt email). Clicking 'unlink' inside Operation Cookie only disconnects local browser activation and does NOT cancel Stripe billing.",
+      "All digital purchases, memberships, and perk unlocks are final and non-refundable to the maximum extent permitted by law, except where mandatory consumer law or Stripe Managed Payments Merchant of Record refund policies require otherwise. Partial billing periods are not prorated or refunded.",
       "Initiating a payment chargeback, reversal, or unauthorized dispute immediately and permanently revokes Cookie Master privileges, clears associated perks, and may result in permanent termination of all linked accounts without compensation.",
       "We reserve the right to modify Cookie Master pricing, renewal periods, daily coin amounts, upcoming perks ('Soon to Come'), or feature availability at any time. 'Ad-Free Operation Cookie' suppresses Operation Cookie's own homepage/first-party ad placements only and cannot block advertisements, popups, or trackers served independently inside third-party websites, external game embeds, or proxied pages.",
     ],
@@ -47,7 +47,7 @@ export const TERMS_SECTIONS = [
     title: "6. Acceptable Use & Prohibited Conduct",
     body: [
       "You agree NOT to use the Service to: (a) violate any applicable law or third-party right; (b) transmit, access, or host illegal content, child sexual abuse material (CSAM), malware, ransomware, phishing kits, or exploits; (c) launch denial-of-service attacks, probe, scan, or overload our servers, transports, webhooks, or Supabase infrastructure, or bypass rate limits and security controls; (d) harass, threaten, doxx, hate-target, impersonate, or abuse other users; (e) spam, scrape, bot-farm Cookie Coins, forge webhook/payment requests, or share unauthorized automated scripts; or (f) infringe copyrights, trademarks, or intellectual property rights.",
-      "Any attempt to falsify Lemon Squeezy transactions or license keys, replay webhooks, tamper with client storage for unauthorized commercial gain, or attack infrastructure may result in immediate bans and reporting to hosting/payment providers or relevant authorities where warranted.",
+      "Any attempt to falsify Stripe transactions, checkout sessions, or subscription identifiers, replay webhooks, tamper with client storage for unauthorized commercial gain, or attack infrastructure may result in immediate bans and reporting to hosting/payment providers or relevant authorities where warranted.",
     ],
   },
   {
@@ -60,7 +60,7 @@ export const TERMS_SECTIONS = [
   {
     title: "8. Third-Party Links, Services & Intellectual Property",
     body: [
-      "Links, proxied destinations, external games, font/icon CDNs, Lemon Squeezy checkout pages, and advertisements shown on non-ad-free sessions belong to independent third parties with their own terms and privacy practices. Operation Cookie assumes zero liability for third-party acts, omissions, content, malware, or losses.",
+      "Links, proxied destinations, external games, font/icon CDNs, Stripe Checkout pages, and advertisements shown on non-ad-free sessions belong to independent third parties with their own terms and privacy practices. Operation Cookie assumes zero liability for third-party acts, omissions, content, malware, or losses.",
       "Operation Cookie branding, original interface code, and compiled assets are protected by applicable intellectual property laws. If you believe content hosted directly by us infringes your copyright, please contact the site administrator immediately with identification of the material and your contact details so it can be reviewed and removed promptly.",
     ],
   },
@@ -98,7 +98,7 @@ export const PRIVACY_SECTIONS = [
   {
     title: "1. Overview & Scope",
     body: [
-      "This Privacy Policy explains how Operation Cookie collects, stores, processes, and protects information when you use our web interface, mirror domains, CloudSync accounts, Cookie Master / Lemon Squeezy integration, Chatroom, Game Studio, Cookie Shop, and proxy tools.",
+      "This Privacy Policy explains how Operation Cookie collects, stores, processes, and protects information when you use our web interface, mirror domains, CloudSync accounts, Cookie Master / Stripe Managed Payments integration, Chatroom, Game Studio, Cookie Shop, and proxy tools.",
       "By using the Service, you acknowledge and consent to the data practices described in this Privacy Policy.",
     ],
   },
@@ -117,10 +117,10 @@ export const PRIVACY_SECTIONS = [
     ],
   },
   {
-    title: "4. Payments & Lemon Squeezy Membership Verification Data",
+    title: "4. Payments & Stripe Managed Payments Verification Data",
     body: [
-      "All $2/month Cookie Master payments are handled entirely by Lemon Squeezy and its payment processors. Operation Cookie NEVER receives, processes, or stores full credit/debit card numbers, security codes, or bank account credentials.",
-      "When Lemon Squeezy sends a signed subscription webhook confirmation or verifies a pass/license, we store only the minimum verification metadata needed to unlock and sync your perks across mirror domains: Lemon Squeezy subscription ID, order/license reference, customer email (lowercased), customer display name, CloudSync username checkout custom data, plan/variant identifier, payment amount, subscription status, verification timestamp, and membership renewal/expiration timestamp.",
+      "All $2/month Cookie Master payments are handled entirely by Stripe Managed Payments (with Stripe as Merchant of Record). Operation Cookie NEVER receives, processes, or stores full credit/debit card numbers, security codes, or bank account credentials.",
+      "When Stripe sends a signed webhook confirmation or verifies a Checkout Session / subscription, we store only the minimum verification metadata needed to unlock and sync your perks across mirror domains: Stripe subscription ID, Checkout Session / invoice reference, Stripe customer ID, customer email (lowercased), customer display name, CloudSync username checkout reference/metadata, price/product identifier, payment amount, subscription status, verification timestamp, and membership renewal/expiration timestamp.",
     ],
   },
   {
@@ -148,13 +148,13 @@ export const PRIVACY_SECTIONS = [
     title: "8. Data Retention, Deletion & Access Controls",
     body: [
       "You may delete your CloudSync account and its stored sync payload at any time using the 'Delete Account' option inside the CloudSync menu (which calls DELETE /api/auth/me), or click 'unlink' in Cookie Master to remove local pass state from your browser.",
-      "Lemon Squeezy webhook and subscription verification records may be retained during active billing cycles and as reasonably necessary afterward for anti-fraud, chargeback defense, accounting, and legal compliance. Ephemeral chat and rate-limit records rotate automatically.",
+      "Stripe webhook, Checkout Session, and subscription verification records may be retained during active billing cycles and as reasonably necessary afterward for anti-fraud, chargeback defense, accounting, and legal compliance. Ephemeral chat and rate-limit records rotate automatically.",
     ],
   },
   {
     title: "9. Children's & Student Privacy",
     body: [
-      "Operation Cookie does not knowingly collect personal contact information from children under 13 (or applicable regional minimum age) without parental or guardian consent. CloudSync requires only a pseudonym/username, and payment data is collected solely by Lemon Squeezy under Lemon Squeezy's own age and payment rules. If a parent or guardian believes personal information of a minor was submitted improperly, contact the administrator for prompt deletion.",
+      "Operation Cookie does not knowingly collect personal contact information from children under 13 (or applicable regional minimum age) without parental or guardian consent. CloudSync requires only a pseudonym/username, and payment data is collected solely by Stripe under Stripe's own age, Merchant of Record, and payment rules. If a parent or guardian believes personal information of a minor was submitted improperly, contact the administrator for prompt deletion.",
     ],
   },
   {

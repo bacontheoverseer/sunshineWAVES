@@ -16,3 +16,4 @@ cache
 *.log
 data/kofi-subscriptions.json
 data/lemonsqueezy-subscriptions.json
+data/stripe-subscriptions.json
