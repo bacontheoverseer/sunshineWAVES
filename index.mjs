@@ -5760,9 +5760,9 @@ const chatUploadedMediaCache = new LRUCache({
   sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
 });
 
-const CHAT_MEDIA_SHARD_COUNT = 8;
-const CHAT_MEDIA_SHARD_MAX_ITEMS = 12;
-const CHAT_MEDIA_SHARD_MAX_JSON_BYTES = 2400 * 1024;
+const CHAT_MEDIA_SHARD_COUNT = 32;
+const CHAT_MEDIA_SHARD_MAX_ITEMS = 6;
+const CHAT_MEDIA_SHARD_MAX_JSON_BYTES = 1100 * 1024;
 const chatMediaShardUserIds = new Map();
 const chatMediaShardQueues = new Map();
 
@@ -5788,27 +5788,90 @@ async function withChatMediaShardLock(shardName, fn) {
   }
 }
 
+// Direct Supabase request helper for chat media so large/slow media writes
+// never cache local SQLite user IDs or trip the global auth degraded breaker.
+async function supabaseDirectMediaRequest(restPath, options = {}) {
+  const timeoutMs = Number(options.timeoutMs) || 15000;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
+    method: options.method || "GET",
+    body: options.body,
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      "Content-Type": "application/json",
+      ...(SUPABASE_KEY_IS_JWT ? { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  const text = await res.text();
+  let json = null;
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {}
+  }
+  return { ok: res.ok, status: res.status, json, text };
+}
+
 async function getChatMediaShardUserId(shardName, { createIfMissing = false } = {}) {
+  if (!USE_SUPABASE_CLOUDSYNC) return null;
   if (chatMediaShardUserIds.has(shardName)) {
     return chatMediaShardUserIds.get(shardName);
   }
-  const id = createIfMissing
-    ? await getOrCreateReservedSystemUserId(shardName)
-    : Number((await dbFindUserByUsername(shardName))?.id) || null;
-  if (id) chatMediaShardUserIds.set(shardName, id);
-  return id;
+  const lower = String(shardName || "").trim().toLowerCase();
+  if (!lower) return null;
+  try {
+    const sel = await supabaseDirectMediaRequest(
+      `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id&limit=1`,
+      { timeoutMs: 10000 },
+    );
+    const existingId = Number(Array.isArray(sel.json) ? sel.json[0]?.id : 0) || null;
+    if (existingId) {
+      chatMediaShardUserIds.set(shardName, existingId);
+      return existingId;
+    }
+    if (!createIfMissing) return null;
+
+    const cre = await supabaseDirectMediaRequest("cloudsync_users", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        username: shardName,
+        username_lower: lower,
+        password_hash: "!locked_system_kv_account!",
+        token_version: 1,
+      }),
+      timeoutMs: 10000,
+    });
+    const createdRow = Array.isArray(cre.json) ? cre.json[0] : cre.json;
+    const createdId = Number(createdRow?.id) || null;
+    if (createdId) {
+      chatMediaShardUserIds.set(shardName, createdId);
+      return createdId;
+    }
+    // Race condition: another worker/request created it first
+    const retrySel = await supabaseDirectMediaRequest(
+      `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id&limit=1`,
+      { timeoutMs: 10000 },
+    );
+    const refetchedId = Number(Array.isArray(retrySel.json) ? retrySel.json[0]?.id : 0) || null;
+    if (refetchedId) chatMediaShardUserIds.set(shardName, refetchedId);
+    return refetchedId;
+  } catch (err) {
+    console.warn("Supabase chat_media shard lookup warning:", err?.message);
+    return null;
+  }
 }
 
 async function persistChatMediaRemoteAsync(id, entry) {
-  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return false;
+  if (!USE_SUPABASE_CLOUDSYNC) return false;
   try {
     await ensureChatMetaReadyAsync();
   } catch {}
-  if (isSupabaseDegraded()) return false;
 
   if (supabaseHasAppKvTable !== false) {
     try {
-      const res = await supabaseRest("app_kv?on_conflict=k", {
+      const res = await supabaseDirectMediaRequest("app_kv?on_conflict=k", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({
@@ -5816,7 +5879,7 @@ async function persistChatMediaRemoteAsync(id, entry) {
           v: JSON.stringify(entry),
           updated_at: new Date().toISOString(),
         }),
-        timeoutMs: 9000,
+        timeoutMs: 15000,
       });
       if (res.ok) {
         supabaseHasAppKvTable = true;
@@ -5824,26 +5887,28 @@ async function persistChatMediaRemoteAsync(id, entry) {
       }
       if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
         supabaseHasAppKvTable = false;
-      } else {
-        return false;
       }
-    } catch {
-      return false;
+    } catch (err) {
+      console.warn("Supabase app_kv chat_media write warning:", err?.message);
     }
   }
 
-  // When app_kv does not exist on Supabase (PGRST205 / cloudsync_sync mode),
+  // When app_kv does not exist on Supabase (or its write failed),
   // shard media entries across reserved system accounts in cloudsync_sync.
   const shardName = getChatMediaShardName(id);
   return await withChatMediaShardLock(shardName, async () => {
     try {
       const uid = await getChatMediaShardUserId(shardName, { createIfMissing: true });
       if (!uid) return false;
-      const existingRow = await dbGetSyncPayload(uid);
+      const existingRes = await supabaseDirectMediaRequest(
+        `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
+        { timeoutMs: 12000 },
+      );
       let items = [];
-      if (existingRow?.payload_json) {
+      const existingPayload = Array.isArray(existingRes.json) ? existingRes.json[0]?.payload_json : null;
+      if (existingPayload) {
         try {
-          const parsed = JSON.parse(String(existingRow.payload_json));
+          const parsed = JSON.parse(String(existingPayload));
           if (Array.isArray(parsed?.items)) items = parsed.items;
         } catch {}
       }
@@ -5854,8 +5919,21 @@ async function persistChatMediaRemoteAsync(id, entry) {
         nextItems.pop();
         serialized = JSON.stringify({ items: nextItems });
       }
-      await dbUpsertSyncPayload(uid, serialized, new Date().toISOString());
-      return !isSupabaseDegraded();
+      const upsertRes = await supabaseDirectMediaRequest("cloudsync_sync?on_conflict=user_id", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          user_id: uid,
+          payload_json: serialized,
+          updated_at: new Date().toISOString(),
+        }),
+        timeoutMs: 18000,
+      });
+      if (!upsertRes.ok) {
+        console.warn(`Supabase sharded chat_media write failed (${upsertRes.status}): ${upsertRes.text}`);
+        return false;
+      }
+      return true;
     } catch (err) {
       console.warn("Supabase sharded chat_media write warning:", err?.message);
       return false;
@@ -5864,24 +5942,23 @@ async function persistChatMediaRemoteAsync(id, entry) {
 }
 
 async function loadChatMediaRemoteAsync(id) {
-  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return null;
+  if (!USE_SUPABASE_CLOUDSYNC) return null;
   try {
     await ensureChatMetaReadyAsync();
   } catch {}
-  if (isSupabaseDegraded()) return null;
 
   if (supabaseHasAppKvTable !== false) {
     try {
-      const { ok, status, json } = await supabaseRest(
+      const res = await supabaseDirectMediaRequest(
         `app_kv?k=eq.${encodeURIComponent(`chat_media_${id}`)}&select=v&limit=1`,
-        { timeoutMs: 8000 },
+        { timeoutMs: 10000 },
       );
-      if (ok && Array.isArray(json) && json[0]?.v) {
-        const parsed = JSON.parse(json[0].v);
+      if (res.ok && Array.isArray(res.json) && res.json[0]?.v) {
+        const parsed = JSON.parse(res.json[0].v);
         if (parsed?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(parsed.mime)) {
           return parsed;
         }
-      } else if (status === 404 || status === 400 || json?.code === "PGRST205") {
+      } else if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
         supabaseHasAppKvTable = false;
       }
     } catch {}
@@ -5891,9 +5968,13 @@ async function loadChatMediaRemoteAsync(id) {
     const shardName = getChatMediaShardName(id);
     const uid = await getChatMediaShardUserId(shardName, { createIfMissing: false });
     if (!uid) return null;
-    const row = await dbGetSyncPayload(uid);
-    if (!row?.payload_json) return null;
-    const parsed = JSON.parse(String(row.payload_json));
+    const rowRes = await supabaseDirectMediaRequest(
+      `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
+      { timeoutMs: 12000 },
+    );
+    const payloadJson = rowRes.ok && Array.isArray(rowRes.json) ? rowRes.json[0]?.payload_json : null;
+    if (!payloadJson) return null;
+    const parsed = JSON.parse(String(payloadJson));
     if (!Array.isArray(parsed?.items)) return null;
     const found = parsed.items.find((it) => it && it.id === id);
     if (found?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(found.mime)) {
@@ -6054,20 +6135,29 @@ app.post("/api/chat/upload-image", async (req, res) => {
       console.warn("SQLite chat_media store warning:", e?.message);
     }
 
-    await persistChatMediaRemoteAsync(id, {
+    const mediaEntry = {
       mime: detectedMime,
       dataB64: cleanB64,
       author: authUser.username,
       createdAt: Date.now(),
-    });
+    };
+    let persistedRemotely = await persistChatMediaRemoteAsync(id, mediaEntry);
+    if (!persistedRemotely && USE_SUPABASE_CLOUDSYNC) {
+      await new Promise((r) => setTimeout(r, 250));
+      persistedRemotely = await persistChatMediaRemoteAsync(id, mediaEntry);
+    }
 
     const imageName = typeof req.body?.filename === "string"
       ? req.body.filename.trim().slice(0, 80)
       : "image";
+    const resolvedImageUrl =
+      USE_SUPABASE_CLOUDSYNC && !persistedRemotely && normalizedDataUrl.length <= 450 * 1024
+        ? normalizedDataUrl
+        : `/api/chat/media/${id}`;
     res.json({
       success: true,
       id,
-      imageUrl: `/api/chat/media/${id}`,
+      imageUrl: resolvedImageUrl,
       imageName,
       mime: detectedMime,
       bytes: buf.length,

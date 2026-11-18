@@ -432,6 +432,13 @@ interface ChatMessageRowProps {
   onOpenImageLightbox: (url: string, name?: string | undefined) => void;
 }
 
+function buildChatImageSrc(rawUrl: string | undefined, retryCount: number): string {
+  const s = String(rawUrl || "").trim();
+  if (!s || retryCount <= 0 || !s.startsWith("/api/chat/media/")) return s;
+  const sep = s.includes("?") ? "&" : "?";
+  return `${s}${sep}r=${retryCount}`;
+}
+
 const ChatMessageRow = memo(function ChatMessageRow({
   msg,
   isGrouped,
@@ -472,9 +479,35 @@ const ChatMessageRow = memo(function ChatMessageRow({
 }: ChatMessageRowProps) {
   const replyRef = msg.replyTo || null;
   const [imgBroken, setImgBroken] = useState(false);
+  const [imgRetryCount, setImgRetryCount] = useState(0);
+  const retryTimerRef = useRef<number | null>(null);
   useEffect(() => {
     setImgBroken(false);
+    setImgRetryCount(0);
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    return () => {
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
   }, [msg.imageUrl]);
+
+  const handleChatImgError = () => {
+    const raw = String(msg.imageUrl || "");
+    if (raw.startsWith("/api/chat/media/") && imgRetryCount === 0) {
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null;
+        setImgRetryCount(1);
+      }, 900);
+      return;
+    }
+    setImgBroken(true);
+  };
 
   return (
     <div
@@ -631,6 +664,19 @@ const ChatMessageRow = memo(function ChatMessageRow({
                     <span>image unavailable</span>
                     {msg.imageName && <small title={msg.imageName}>{msg.imageName}</small>}
                   </div>
+                  {msg.imageUrl?.startsWith("/api/chat/media/") && (
+                    <button
+                      type="button"
+                      class="chat-entry-image-retry"
+                      title="Retry loading image"
+                      onClick={() => {
+                        setImgBroken(false);
+                        setImgRetryCount((n) => n + 1);
+                      }}
+                    >
+                      <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i>
+                    </button>
+                  )}
                 </div>
               ) : (
                 <button
@@ -641,11 +687,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 >
                   <img
                     class="chat-entry-image"
-                    src={msg.imageUrl}
+                    src={buildChatImageSrc(msg.imageUrl, imgRetryCount)}
                     alt={msg.imageName || "Uploaded image"}
-                    loading="lazy"
                     decoding="async"
-                    onError={() => setImgBroken(true)}
+                    onError={handleChatImgError}
                   />
                 </button>
               )}
@@ -952,8 +997,10 @@ export default function ChatModal() {
     name?: string | undefined;
   } | null>(null);
   const [lightboxBroken, setLightboxBroken] = useState(false);
+  const [lightboxRetryCount, setLightboxRetryCount] = useState(0);
   useEffect(() => {
     setLightboxBroken(false);
+    setLightboxRetryCount(0);
   }, [lightboxImage?.url]);
   const [dragOverChat, setDragOverChat] = useState(false);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
@@ -2898,44 +2945,36 @@ export default function ChatModal() {
     handleOpenCustomizer,
   ]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (lightboxImage) {
-        setLightboxImage(null);
-      } else if (showCameraModal) {
-        setShowCameraModal(false);
-      } else if (editingMessageId) {
-        setEditingMessageId(null);
-      } else if (reactPickerMessageId) {
-        setReactPickerMessageId(null);
-      } else if (reactingMessageId) {
-        setReactingMessageId(null);
-      } else if (groupModalMode) {
-        setGroupModalMode(null);
-      } else if (confirmDeleteChat) {
-        setConfirmDeleteChat(null);
-      } else if (showStaffModal) {
-        setShowStaffModal(false);
-      } else if (showCustomizer) {
-        setShowCustomizer(false);
-      } else if (showGifPicker) {
-        setShowGifPicker(false);
-      } else if (showEmojiPicker) {
-        setShowEmojiPicker(false);
-      } else if (replyingTo) {
-        setReplyingTo(null);
-      } else if (viewingProfileUsername) {
-        closeUserProfile();
-      } else {
-        setIsOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [
-    isOpen,
+  const escStateRef = useRef<{
+    lightboxImage: typeof lightboxImage;
+    showCameraModal: boolean;
+    editingMessageId: string | null;
+    reactPickerMessageId: string | null;
+    reactingMessageId: string | null;
+    groupModalMode: typeof groupModalMode;
+    confirmDeleteChat: string | null;
+    showStaffModal: boolean;
+    showCustomizer: boolean;
+    showGifPicker: boolean;
+    showEmojiPicker: boolean;
+    replyingTo: typeof replyingTo;
+    viewingProfileUsername: string | null;
+  }>({
+    lightboxImage: null,
+    showCameraModal: false,
+    editingMessageId: null,
+    reactPickerMessageId: null,
+    reactingMessageId: null,
+    groupModalMode: null,
+    confirmDeleteChat: null,
+    showStaffModal: false,
+    showCustomizer: false,
+    showGifPicker: false,
+    showEmojiPicker: false,
+    replyingTo: null,
+    viewingProfileUsername: null,
+  });
+  escStateRef.current = {
     lightboxImage,
     showCameraModal,
     editingMessageId,
@@ -2943,14 +2982,52 @@ export default function ChatModal() {
     reactingMessageId,
     groupModalMode,
     confirmDeleteChat,
-    replyingTo,
     showStaffModal,
     showCustomizer,
     showGifPicker,
     showEmojiPicker,
+    replyingTo,
     viewingProfileUsername,
-    closeUserProfile,
-  ]);
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const st = escStateRef.current;
+      if (st.lightboxImage) {
+        setLightboxImage(null);
+      } else if (st.showCameraModal) {
+        setShowCameraModal(false);
+      } else if (st.editingMessageId) {
+        setEditingMessageId(null);
+      } else if (st.reactPickerMessageId) {
+        setReactPickerMessageId(null);
+      } else if (st.reactingMessageId) {
+        setReactingMessageId(null);
+      } else if (st.groupModalMode) {
+        setGroupModalMode(null);
+      } else if (st.confirmDeleteChat) {
+        setConfirmDeleteChat(null);
+      } else if (st.showStaffModal) {
+        setShowStaffModal(false);
+      } else if (st.showCustomizer) {
+        setShowCustomizer(false);
+      } else if (st.showGifPicker) {
+        setShowGifPicker(false);
+      } else if (st.showEmojiPicker) {
+        setShowEmojiPicker(false);
+      } else if (st.replyingTo) {
+        setReplyingTo(null);
+      } else if (st.viewingProfileUsername) {
+        closeUserProfile();
+      } else {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, closeUserProfile]);
 
   const fetchKlipyGifs = useCallback(
     async (query: string, pageNum: number, append: boolean) => {
@@ -5198,7 +5275,7 @@ export default function ChatModal() {
                 <input
                   ref={imageFileInputRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  accept="image/*"
                   style={{ display: "none" }}
                   onChange={(e) => {
                     const input = e.currentTarget as HTMLInputElement;
@@ -6332,10 +6409,23 @@ export default function ChatModal() {
                   <i class="fa-regular fa-image" aria-hidden="true"></i>
                   <span>image could not be loaded</span>
                   {lightboxImage.name && <small title={lightboxImage.name}>{lightboxImage.name}</small>}
+                  {lightboxImage.url.startsWith("/api/chat/media/") && (
+                    <button
+                      type="button"
+                      class="chat-header-btn"
+                      onClick={() => {
+                        setLightboxBroken(false);
+                        setLightboxRetryCount((n) => n + 1);
+                      }}
+                    >
+                      <i class="fa-solid fa-arrows-rotate"></i>
+                      <span>retry</span>
+                    </button>
+                  )}
                 </div>
               ) : (
                 <img
-                  src={lightboxImage.url}
+                  src={buildChatImageSrc(lightboxImage.url, lightboxRetryCount)}
                   alt={lightboxImage.name || "Full image preview"}
                   class="chat-lightbox-img"
                   onError={() => setLightboxBroken(true)}

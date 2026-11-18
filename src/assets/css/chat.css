@@ -4337,6 +4337,28 @@ html.chromebook-mode .chat-user-item {
   white-space: nowrap;
 }
 
+.chat-entry-image-retry {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--bg-surface-15, rgba(255, 255, 255, 0.16));
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.chat-entry-image-retry:hover {
+  opacity: 1;
+  background: var(--bg-surface-10);
+}
+
 .chat-camera-modal {
   width: min(560px, 94vw);
   max-height: 90vh;

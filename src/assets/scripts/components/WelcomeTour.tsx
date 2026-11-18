@@ -10,14 +10,29 @@ const NON_HOME_CLASSES = [
   "master-view",
 ];
 
+interface TourHighlight {
+  icon: string;
+  label: string;
+  detail: string;
+}
+
+interface TourAction {
+  label: string;
+  icon: string;
+  run: () => void;
+}
+
 interface TourStep {
   id: string;
+  category: string;
   icon: string;
   title: string;
   description: string;
+  highlights: TourHighlight[];
   selectors: string[];
   preferredSide: "bottom" | "top" | "center";
   padding?: number;
+  action?: TourAction;
 }
 
 interface SpotRect {
@@ -35,75 +50,309 @@ interface LayoutBox {
   viewportHeight: number;
 }
 
+function dispatchOpenSettings(): void {
+  const w = window as { toggleSettingsMenu?: () => void };
+  if (typeof w.toggleSettingsMenu === "function") {
+    w.toggleSettingsMenu();
+  } else {
+    document.getElementById("settings")?.click();
+  }
+}
+
 const TOUR_STEPS: TourStep[] = [
   {
     id: "welcome",
+    category: "overview",
     icon: "fa-cookie-bite",
     title: "welcome to operation cookie",
     description:
-      "your all-in-one spot for private browsing, unblocked games, apps, community chat, and custom themes. here is a quick 30-second tour.",
+      "your all-in-one private workspace for proxied browsing, hundreds of games, community chat, voice lounges, and deep visual customization.",
+    highlights: [
+      {
+        icon: "fa-globe",
+        label: "private web proxy",
+        detail: "scramjet & ultraviolet backends over libcurl or epoxy transports",
+      },
+      {
+        icon: "fa-comments",
+        label: "live community & voice",
+        detail: "real-time channels, dms, group chats, gifs, images & webrtc voice rooms",
+      },
+      {
+        icon: "fa-wand-magic-sparkles",
+        label: "deep customization",
+        detail: "12 site themes, animated profile cards, last.fm scrobbling & homepage decor",
+      },
+    ],
     selectors: ["#branding-container"],
     preferredSide: "bottom",
     padding: 8,
   },
   {
     id: "search",
+    category: "browsing",
     icon: "fa-magnifying-glass",
-    title: "search & proxied tabs",
+    title: "private search, tabs & split view",
     description:
-      "type any search query or website url here to open a private tab. manage open tabs and split-screen views from the sidebar on the left.",
+      "type any search query or website url here to open a cloaked browsing session with multi-tab and split-screen support.",
+    highlights: [
+      {
+        icon: "fa-compass",
+        label: "7 search engines",
+        detail: "switch duckduckgo, brave, startpage, mojeek, swisscows, google, or bing",
+      },
+      {
+        icon: "fa-table-columns",
+        label: "multi-tabs & split screen",
+        detail: "open extra tabs from the sidebar and view two pages side by side",
+      },
+      {
+        icon: "fa-bolt",
+        label: "switchable proxy stack",
+        detail: "swap scramjet/ultraviolet & epoxy/libcurl anytime inside settings",
+      },
+    ],
     selectors: [".search-bar"],
     preferredSide: "bottom",
     padding: 10,
   },
   {
-    id: "games-apps",
-    icon: "fa-gamepad",
-    title: "games & apps library",
+    id: "bookmarks",
+    category: "shortcuts",
+    icon: "fa-bookmark",
+    title: "custom bookmarks dock",
     description:
-      "jump into hundreds of games across multiple sources or launch popular web apps—all inside clean, customizable views.",
+      "pin your favorite sites and tools right below the search bar for instant one-click access whenever you open a new homepage.",
+    highlights: [
+      {
+        icon: "fa-plus",
+        label: "quick add & edit",
+        detail: "click + to add custom links or toggle edit mode to rename and remove",
+      },
+      {
+        icon: "fa-cloud",
+        label: "synced to your account",
+        detail: "your saved shortcuts travel across mirror links with cloud sync",
+      },
+    ],
+    selectors: ["#bookmarks-container"],
+    preferredSide: "top",
+    padding: 10,
+  },
+  {
+    id: "games-apps",
+    category: "entertainment",
+    icon: "fa-gamepad",
+    title: "games library & proxied apps",
+    description:
+      "browse hundreds of unblocked games across five catalog sources or launch popular web apps cleanly inside Operation Cookie.",
+    highlights: [
+      {
+        icon: "fa-layer-group",
+        label: "5 game sources",
+        detail: "switch selenite, gn-math, edurocks, velara, and truffled in settings",
+      },
+      {
+        icon: "fa-stopwatch",
+        label: "live game activity & stats",
+        detail: "track total playtime, top games, and currently-playing status on profiles",
+      },
+      {
+        icon: "fa-table-cells-large",
+        label: "one-click apps launcher",
+        detail: "open proxied social, media, and utility apps from the top bar",
+      },
+    ],
     selectors: ["#choi", "#apps-btn"],
     preferredSide: "bottom",
     padding: 8,
   },
   {
     id: "studio-shop",
+    category: "studio & coins",
     icon: "fa-wand-magic-sparkles",
-    title: "game studio & cookie shop",
+    title: "game studio & cookie coin shop",
     description:
-      "create and share your own mini-games in game studio, earn cookie coins by playing, and unlock items in the shop.",
+      "build and share your own mini-games in Game Studio, earn Cookie Coins as you play, and unlock live shop effects.",
+    highlights: [
+      {
+        icon: "fa-code",
+        label: "community game studio",
+        detail: "create custom playable games and showcase your creator studio profile",
+      },
+      {
+        icon: "fa-cookie-bite",
+        label: "cookie coin shop",
+        detail: "spend coins on sound blasts, tts speech, and 1x screen trolls on friends",
+      },
+      {
+        icon: "fa-trophy",
+        label: "playtime & high scores",
+        detail: "rack up sessions on leaderboards and earn coins automatically in games",
+      },
+    ],
     selectors: ["#studio-btn", "#shop-btn"],
     preferredSide: "bottom",
     padding: 8,
   },
   {
-    id: "chat",
+    id: "chat-features",
+    category: "community chat",
     icon: "fa-comments",
-    title: "live chatroom, gifs & voice",
+    title: "live chatroom, media & voice lounges",
     description:
-      "hang out with other players in chat, send klipy gifs, or hop into voice rooms right from the top bar.",
+      "hang out across public channels, start private DMs or custom group chats, share rich media, and talk live in voice rooms.",
+    highlights: [
+      {
+        icon: "fa-hashtag",
+        label: "channels, dms & group chats",
+        detail: "#general, #games, #anime, #music, #tech, private dms, plus user groups",
+      },
+      {
+        icon: "fa-camera",
+        label: "images, camera & klipy gifs",
+        detail: "upload photos/webp files, snap camera pics, send gifs, reply & react",
+      },
+      {
+        icon: "fa-headset",
+        label: "webrtc voice rooms",
+        detail: "join general voice, gaming lounge, or music & chill right from chat",
+      },
+    ],
     selectors: ["#chat-btn"],
     preferredSide: "bottom",
     padding: 8,
+    action: {
+      label: "open chat",
+      icon: "fa-comments",
+      run: () => {
+        window.setTimeout(() => {
+          document.dispatchEvent(new CustomEvent("toggleChatModal"));
+        }, 80);
+      },
+    },
+  },
+  {
+    id: "profile-custom",
+    category: "profile studio",
+    icon: "fa-id-card",
+    title: "custom profiles, collectibles & last.fm",
+    description:
+      "style your own profile card with animated collectibles, custom uploads, badges, and live music scrobbling synced to chat.",
+    highlights: [
+      {
+        icon: "fa-images",
+        label: "pfp, gif banners & cropping",
+        detail: "upload custom avatars/banners, pick display names, pronouns, tags & bio theme",
+      },
+      {
+        icon: "fa-star",
+        label: "animated frames & effects",
+        detail: "equip avatar decorations, particle card effects, glowing nameplates & fonts",
+      },
+      {
+        icon: "fa-music",
+        label: "last.fm live listening",
+        detail: "link your last.fm username to show what track you're scrobbling live",
+      },
+    ],
+    selectors: ["#auth-container"],
+    preferredSide: "bottom",
+    padding: 8,
+    action: {
+      label: "customize profile",
+      icon: "fa-wand-magic-sparkles",
+      run: () => {
+        window.setTimeout(() => {
+          window.dispatchEvent(new CustomEvent("openProfileCustomizer"));
+        }, 80);
+      },
+    },
   },
   {
     id: "cloud-master",
+    category: "sync & perks",
     icon: "fa-crown",
     title: "cloud sync & cookie master",
     description:
-      "sign in with cloud sync to carry your settings and coins across mirror links—or tap the crown for ad-free mode and daily bonus coins.",
-    selectors: ["#master-btn", "#auth-container"],
+      "sign in once with Cloud Sync so your data follows you everywhere, or grab Cookie Master for ad-free perks.",
+    highlights: [
+      {
+        icon: "fa-cloud-arrow-up",
+        label: "cross-mirror cloud sync",
+        detail: "sync settings, bookmarks, coins, and profile customizations across links",
+      },
+      {
+        icon: "fa-crown",
+        label: "cookie master perks",
+        detail: "ad-free mode, daily bonus cookie coins & supporter crown status",
+      },
+    ],
+    selectors: ["#master-btn"],
     preferredSide: "bottom",
     padding: 8,
   },
   {
-    id: "settings",
-    icon: "fa-sliders",
-    title: "themes, tab cloaking & legal",
+    id: "appearance-custom",
+    category: "appearance",
+    icon: "fa-palette",
+    title: "12 themes, dark mode & homepage decor",
     description:
-      "open settings anytime to switch themes, pick a tab cloak (coursera, classroom, drive), set panic keys, or replay this tour.",
+      "customize the whole look of Operation Cookie and place animated flair anywhere on your homepage.",
+    highlights: [
+      {
+        icon: "fa-swatchbook",
+        label: "12 built-in site themes",
+        detail: "catppuccin, dracula, synthwave, tokyo night, nord, sakura & more",
+      },
+      {
+        icon: "fa-wand-sparkles",
+        label: "homepage decorations (beta)",
+        detail: "drag, resize, rotate & layer up to 12 animated collectibles on home",
+      },
+      {
+        icon: "fa-laptop",
+        label: "dark mode & chromebook mode",
+        detail: "low-light wallpaper mode or blur-free battery saver for school laptops",
+      },
+    ],
     selectors: ["#settings"],
     preferredSide: "bottom",
+    padding: 8,
+    action: {
+      label: "open settings",
+      icon: "fa-sliders",
+      run: () => {
+        window.setTimeout(dispatchOpenSettings, 80);
+      },
+    },
+  },
+  {
+    id: "privacy-cloak",
+    category: "cloaking & help",
+    icon: "fa-shield-halved",
+    title: "tab cloaking, oxium speed & tour replay",
+    description:
+      "keep your session discreet with instant tab cloaking, anti-close protection, and proxy optimization controls.",
+    highlights: [
+      {
+        icon: "fa-mask",
+        label: "site, link & focus cloaks",
+        detail: "disguise as coursera, classroom, or drive, or wrap in about:blank / blob:",
+      },
+      {
+        icon: "fa-lock",
+        label: "prevent accidental close",
+        detail: "enable the close confirmation guard and optimize network speed with oxium",
+      },
+      {
+        icon: "fa-compass",
+        label: "replay anytime",
+        detail: "re-open this guide anytime in settings → preferences → replay tour",
+      },
+    ],
+    selectors: [],
+    preferredSide: "center",
     padding: 8,
   },
 ];
@@ -120,7 +369,7 @@ function isHomepageReady(): boolean {
     if (bodyClass.contains(cls)) return false;
   }
 
-  if (document.querySelector("#settings-menu.open, .chat-modal.open, #new-tab-modal.is-visible")) {
+  if (document.querySelector("#settings-menu.open, .chat-modal-overlay.open, #new-tab-modal.is-visible")) {
     return false;
   }
 
@@ -194,6 +443,7 @@ export default function WelcomeTour() {
   const closeTour = useCallback(() => {
     markSeen();
     setIsOpen(false);
+    setLayout(null);
   }, [markSeen]);
 
   const startTour = useCallback(
@@ -201,21 +451,23 @@ export default function WelcomeTour() {
       if (persistSeen) {
         markSeen();
       }
+      setLayout(null);
       setStepIndex(0);
       setIsOpen(true);
     },
     [markSeen],
   );
 
-  // Auto-launch once for first-time users after cloak reveal completes.
+  // Auto-launch once for first-time users after cloak reveal & Cloud Sync gate complete.
   useEffect(() => {
-    let seen = false;
-    try {
-      seen = localStorage.getItem(TOUR_STORAGE_KEY) === "done";
-    } catch {
-      seen = false;
-    }
-    if (seen) return;
+    const hasSeen = () => {
+      try {
+        return localStorage.getItem(TOUR_STORAGE_KEY) === "done";
+      } catch {
+        return false;
+      }
+    };
+    if (hasSeen()) return;
 
     let cancelled = false;
     let attempts = 0;
@@ -224,8 +476,20 @@ export default function WelcomeTour() {
 
     const tryAutoStart = () => {
       if (cancelled) return;
+      if (hasSeen()) {
+        cancelled = true;
+        return;
+      }
       if (isHomepageReady()) {
+        cancelled = true;
         startTour(true);
+        return;
+      }
+      const gated = Boolean(
+        document.getElementById("root") || document.getElementById("auth-gate-backdrop"),
+      );
+      if (gated) {
+        timerId = window.setTimeout(tryAutoStart, 600);
         return;
       }
       attempts += 1;
@@ -234,11 +498,21 @@ export default function WelcomeTour() {
       }
     };
 
+    const onAuthUnlock = () => {
+      if (cancelled) return;
+      if (timerId !== null) window.clearTimeout(timerId);
+      timerId = window.setTimeout(tryAutoStart, 350);
+    };
+
     timerId = window.setTimeout(tryAutoStart, 900);
+    window.addEventListener("cloudsync-auth-changed", onAuthUnlock);
+    document.addEventListener("cloudsync-restored", onAuthUnlock);
 
     return () => {
       cancelled = true;
       if (timerId !== null) window.clearTimeout(timerId);
+      window.removeEventListener("cloudsync-auth-changed", onAuthUnlock);
+      document.removeEventListener("cloudsync-restored", onAuthUnlock);
     };
   }, [startTour]);
 
@@ -270,8 +544,8 @@ export default function WelcomeTour() {
         ? null
         : measureStepSpot(step, rootRect, scaleX, scaleY);
 
-    const cardWidth = cardEl ? cardEl.offsetWidth : Math.min(348, vw - 24);
-    const cardHeight = cardEl ? cardEl.offsetHeight : 196;
+    const cardWidth = cardEl ? cardEl.offsetWidth : Math.min(416, vw - 24);
+    const cardHeight = cardEl ? cardEl.offsetHeight : 320;
     const margin = 12;
     const gap = 14;
 
@@ -285,13 +559,28 @@ export default function WelcomeTour() {
 
       const belowTop = spot.top + spot.height + gap;
       const aboveTop = spot.top - cardHeight - gap;
+      const fitsBelow = belowTop + cardHeight <= vh - margin;
+      const fitsAbove = aboveTop >= margin;
 
-      if (belowTop + cardHeight <= vh - margin) {
+      if (step.preferredSide === "top") {
+        if (fitsAbove) {
+          cardTop = aboveTop;
+        } else if (fitsBelow) {
+          cardTop = belowTop;
+        } else {
+          cardTop = Math.max(margin, Math.min(vh - cardHeight - margin, (vh - cardHeight) / 2));
+        }
+      } else if (fitsBelow) {
         cardTop = belowTop;
-      } else if (aboveTop >= margin) {
+      } else if (fitsAbove) {
         cardTop = aboveTop;
       } else {
-        cardTop = Math.max(margin, Math.min(vh - cardHeight - margin, (vh - cardHeight) / 2));
+        const spaceBelow = vh - margin - belowTop;
+        const spaceAbove = spot.top - gap - margin;
+        cardTop =
+          spaceBelow >= spaceAbove
+            ? Math.max(margin, Math.min(belowTop, vh - cardHeight - margin))
+            : margin;
       }
     }
 
@@ -362,7 +651,7 @@ export default function WelcomeTour() {
       ref={overlayRef}
       role="dialog"
       aria-modal="true"
-      aria-label="Operation Cookie welcome tour"
+      aria-label="Operation Cookie feature tour"
     >
       <svg
         class="tour-backdrop-svg"
@@ -392,7 +681,7 @@ export default function WelcomeTour() {
           y="0"
           width={vw}
           height={vh}
-          fill="rgba(5, 7, 11, 0.72)"
+          fill="rgba(5, 7, 11, 0.74)"
           mask="url(#sunshine-tour-mask)"
         />
       </svg>
@@ -420,9 +709,10 @@ export default function WelcomeTour() {
                 top: `${layout.cardTop}px`,
               }
             : {
-                left: "50%",
-                top: "50%",
-                transform: "translate(-50%, -50%)",
+                left: "12px",
+                top: "12px",
+                visibility: "hidden",
+                transition: "none",
               }
         }
         onClick={(e) => e.stopPropagation()}
@@ -431,7 +721,7 @@ export default function WelcomeTour() {
           <div class="tour-card-badge">
             <i class={`fa-solid ${currentStep.icon}`} aria-hidden="true" />
             <span>
-              step {stepIndex + 1} / {TOUR_STEPS.length}
+              step {stepIndex + 1} / {TOUR_STEPS.length} · {currentStep.category}
             </span>
           </div>
           <button
@@ -439,7 +729,7 @@ export default function WelcomeTour() {
             class="tour-close-btn"
             onClick={closeTour}
             aria-label="close tour"
-            title="skip tour"
+            title="skip tour (esc)"
           >
             <i class="fa-solid fa-xmark" aria-hidden="true" />
           </button>
@@ -448,22 +738,55 @@ export default function WelcomeTour() {
         <h3 class="tour-card-title">{currentStep.title}</h3>
         <p class="tour-card-body">{currentStep.description}</p>
 
-        <div class="tour-dots" aria-hidden="true">
+        {currentStep.highlights.length > 0 && (
+          <ul class="tour-feature-list">
+            {currentStep.highlights.map((item) => (
+              <li key={item.label} class="tour-feature-item">
+                <span class="tour-feature-icon" aria-hidden="true">
+                  <i class={`fa-solid ${item.icon}`} />
+                </span>
+                <div class="tour-feature-copy">
+                  <span class="tour-feature-label">{item.label}</span>
+                  <span class="tour-feature-detail">{item.detail}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div class="tour-dots" aria-label="tour steps">
           {TOUR_STEPS.map((step, idx) => (
             <button
               key={step.id}
               type="button"
               class={`tour-dot${idx === stepIndex ? " active" : ""}`}
               onClick={() => setStepIndex(idx)}
-              tabIndex={-1}
+              title={`${idx + 1}. ${step.title}`}
+              aria-label={`Jump to step ${idx + 1}: ${step.title}`}
             />
           ))}
         </div>
 
         <div class="tour-card-actions">
-          <button type="button" class="tour-skip-btn" onClick={closeTour}>
-            skip tour
-          </button>
+          <div class="tour-left-actions">
+            <button type="button" class="tour-skip-btn" onClick={closeTour}>
+              skip
+            </button>
+            {currentStep.action && (
+              <button
+                type="button"
+                class="tour-try-btn"
+                onClick={() => {
+                  const act = currentStep.action;
+                  closeTour();
+                  act?.run();
+                }}
+              >
+                <i class={`fa-solid ${currentStep.action.icon}`} aria-hidden="true" />
+                <span>{currentStep.action.label}</span>
+              </button>
+            )}
+          </div>
           <div class="tour-nav-btns">
             {!isFirst && (
               <button type="button" class="tour-btn-secondary" onClick={handleBack}>

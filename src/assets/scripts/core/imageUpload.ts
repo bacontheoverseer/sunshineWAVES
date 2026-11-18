@@ -32,11 +32,14 @@ export function compressCanvasToDataUrl(
   quality = 0.85,
 ): { dataUrl: string; mime: string } {
   const webp = canvas.toDataURL("image/webp", quality);
-  if (webp.startsWith("data:image/webp")) {
+  if (webp.length > 32 && webp.startsWith("data:image/webp")) {
     return { dataUrl: webp, mime: "image/webp" };
   }
   const jpeg = canvas.toDataURL("image/jpeg", quality);
-  return { dataUrl: jpeg, mime: "image/jpeg" };
+  if (jpeg.length > 32 && jpeg.startsWith("data:image/jpeg")) {
+    return { dataUrl: jpeg, mime: "image/jpeg" };
+  }
+  return { dataUrl: canvas.toDataURL("image/png"), mime: "image/png" };
 }
 
 export async function compressImageFile(
@@ -101,11 +104,14 @@ export async function compressImageFile(
     };
 
     let out = renderAt(1, quality);
-    if (out.bytes > 1.8 * 1024 * 1024) {
-      out = renderAt(0.75, Math.min(quality, 0.72));
+    if (out.bytes > 650 * 1024) {
+      out = renderAt(0.8, Math.min(quality, 0.74));
     }
-    if (out.bytes > 2.2 * 1024 * 1024) {
-      out = renderAt(0.55, 0.62);
+    if (out.bytes > 1.2 * 1024 * 1024) {
+      out = renderAt(0.58, 0.64);
+    }
+    if (out.bytes > 1.8 * 1024 * 1024) {
+      out = renderAt(0.42, 0.54);
     }
     return {
       dataUrl: out.dataUrl,

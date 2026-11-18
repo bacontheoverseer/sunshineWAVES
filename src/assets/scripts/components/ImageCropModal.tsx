@@ -119,10 +119,19 @@ export default function ImageCropModal({
         drawnH * scaleOutY
       );
 
-      const webp = canvas.toDataURL("image/webp", 0.88);
-      const finalUrl = webp.startsWith("data:image/webp")
-        ? webp
-        : canvas.toDataURL("image/jpeg", 0.88);
+      let finalUrl = "";
+      for (const q of [0.88, 0.72, 0.56]) {
+        const webp = canvas.toDataURL("image/webp", q);
+        const candidate =
+          webp.length > 32 && webp.startsWith("data:image/webp")
+            ? webp
+            : canvas.toDataURL("image/jpeg", q);
+        finalUrl = candidate;
+        if (candidate.length <= 420_000) break;
+      }
+      if (!finalUrl || finalUrl.length > 445_000) {
+        finalUrl = canvas.toDataURL("image/jpeg", 0.42);
+      }
       onApply(finalUrl);
     } catch (err) {
       setError((err as Error).message || "Failed to crop image");
