@@ -72,7 +72,7 @@ export async function compressImageFile(
     };
   }
 
-  if (!file.type.startsWith("image/") && !/\.(png|jpe?g|webp|bmp|avif)$/i.test(file.name)) {
+  if (!file.type.startsWith("image/") && !/\.(png|jpe?g|webp|bmp|avif|jfif)$/i.test(file.name)) {
     throw new Error("Please select an image file (PNG, JPG, WebP, or GIF)");
   }
 
@@ -84,22 +84,35 @@ export async function compressImageFile(
       el.onerror = () => reject(new Error("Could not load selected image"));
       el.src = rawUrl;
     });
-    const ratio = Math.min(1, maxWidth / Math.max(1, img.width), maxHeight / Math.max(1, img.height));
-    const w = Math.max(1, Math.round(img.width * ratio));
-    const h = Math.max(1, Math.round(img.height * ratio));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Canvas unavailable");
-    ctx.drawImage(img, 0, 0, w, h);
-    const { dataUrl, mime } = compressCanvasToDataUrl(canvas, quality);
+    const renderAt = (scaleFactor: number, q: number) => {
+      const ratio =
+        Math.min(1, maxWidth / Math.max(1, img.width), maxHeight / Math.max(1, img.height)) *
+        scaleFactor;
+      const w = Math.max(1, Math.round(img.width * ratio));
+      const h = Math.max(1, Math.round(img.height * ratio));
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas unavailable");
+      ctx.drawImage(img, 0, 0, w, h);
+      const { dataUrl, mime } = compressCanvasToDataUrl(canvas, q);
+      return { dataUrl, mime, w, h, bytes: estimateDataUrlBytes(dataUrl) };
+    };
+
+    let out = renderAt(1, quality);
+    if (out.bytes > 1.8 * 1024 * 1024) {
+      out = renderAt(0.75, Math.min(quality, 0.72));
+    }
+    if (out.bytes > 2.2 * 1024 * 1024) {
+      out = renderAt(0.55, 0.62);
+    }
     return {
-      dataUrl,
-      mime,
-      width: w,
-      height: h,
-      bytes: estimateDataUrlBytes(dataUrl),
+      dataUrl: out.dataUrl,
+      mime: out.mime,
+      width: out.w,
+      height: out.h,
+      bytes: out.bytes,
       name: cleanName,
     };
   } finally {
@@ -141,7 +154,7 @@ export async function uploadChatImage(
     authToken = localStorage.getItem("auth_token") || "";
   } catch {}
   if (!authToken) {
-    throw new Error("Sign in to CloudSync to upload images");
+    throw Object.assign(new Error("Sign in to CloudSync to upload images"), { status: 401 });
   }
 
   const res = await fetch("/api/chat/upload-image", {
@@ -155,7 +168,9 @@ export async function uploadChatImage(
   });
   const data = await res.json().catch(() => null);
   if (!res.ok || !data?.success || !data?.imageUrl) {
-    throw new Error(data?.error || `Image upload failed (HTTP ${res.status})`);
+    throw Object.assign(new Error(data?.error || `Image upload failed (HTTP ${res.status})`), {
+      status: res.status,
+    });
   }
   return {
     imageUrl: String(data.imageUrl),

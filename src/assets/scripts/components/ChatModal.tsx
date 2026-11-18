@@ -16,16 +16,27 @@ import {
 import { formatPlayTime } from "../core/cookieCoins.ts";
 import {
   ChatRole,
+  LastfmProfileState,
   ProfileCustomization,
   fallbackAvatarColor,
   getBannerInlineStyle,
   getDefaultCustomization,
   loadLocalProfileCustomization,
   sanitizeCustomization,
+  sanitizeLastfmUsername,
   saveLocalProfileCustomization,
 } from "../core/profileCustomization.ts";
+import LastfmListeningCard from "./LastfmListeningCard.tsx";
 import ProfileCustomizerModal from "./ProfileCustomizerModal.tsx";
-import StaffManagerModal from "./StaffManagerModal.tsx";
+import StaffManagerModal, {
+  STAFF_NOTE_CATEGORIES,
+  type StaffActionLogRecord,
+  type StaffNoteCategory,
+  type StaffNoteRecord,
+  buildModAuthHeaders,
+  formatStaffLogActionMeta,
+  formatStaffTimestamp,
+} from "./StaffManagerModal.tsx";
 import EmojiPicker, { getJumboEmojiCount } from "./EmojiPicker.tsx";
 import GroupChatModal, { ChatGroupDef } from "./GroupChatModal.tsx";
 import {
@@ -128,6 +139,8 @@ interface UserProfileDetails {
   bio: string;
   statusText: string;
   customization?: ProfileCustomization | null;
+  lastfmConfigured?: boolean | undefined;
+  lastfm?: LastfmProfileState | null | undefined;
   role?: ChatRole;
   isGoat?: boolean | undefined;
   isTimedOut?: boolean;
@@ -157,6 +170,8 @@ interface UserProfileDetails {
     icon: string;
   } | null;
   publishedGamesCount: number;
+  staffNotes?: StaffNoteRecord[];
+  staffLogs?: StaffActionLogRecord[];
 }
 
 interface VoiceParticipant {
@@ -263,7 +278,8 @@ function isStaleUninitializedCustom(c: ProfileCustomization | null | undefined):
     (!c.nameStyle || c.nameStyle === "default") &&
     (!c.nameFont || c.nameFont === "default") &&
     (!c.nameplate || c.nameplate === "none") &&
-    (!c.profileEffect || c.profileEffect === "none")
+    (!c.profileEffect || c.profileEffect === "none") &&
+    !c.lastfmUsername
   );
 }
 
@@ -455,6 +471,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onOpenImageLightbox,
 }: ChatMessageRowProps) {
   const replyRef = msg.replyTo || null;
+  const [imgBroken, setImgBroken] = useState(false);
+  useEffect(() => {
+    setImgBroken(false);
+  }, [msg.imageUrl]);
 
   return (
     <div
@@ -604,20 +624,31 @@ const ChatMessageRow = memo(function ChatMessageRow({
           )}
           {isAllowedChatImageUrl(msg.imageUrl) && (
             <div class="chat-entry-image-wrap">
-              <button
-                type="button"
-                class="chat-entry-image-btn"
-                title={`View full image${msg.imageName ? ` (${msg.imageName})` : ""}`}
-                onClick={() => onOpenImageLightbox(msg.imageUrl!, msg.imageName)}
-              >
-                <img
-                  class="chat-entry-image"
-                  src={msg.imageUrl}
-                  alt={msg.imageName || "Uploaded image"}
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
+              {imgBroken ? (
+                <div class="chat-entry-image-broken" role="img" aria-label={msg.imageName || "Image unavailable"}>
+                  <i class="fa-regular fa-image" aria-hidden="true"></i>
+                  <div class="chat-entry-image-broken-text">
+                    <span>image unavailable</span>
+                    {msg.imageName && <small title={msg.imageName}>{msg.imageName}</small>}
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  class="chat-entry-image-btn"
+                  title={`View full image${msg.imageName ? ` (${msg.imageName})` : ""}`}
+                  onClick={() => onOpenImageLightbox(msg.imageUrl!, msg.imageName)}
+                >
+                  <img
+                    class="chat-entry-image"
+                    src={msg.imageUrl}
+                    alt={msg.imageName || "Uploaded image"}
+                    loading="lazy"
+                    decoding="async"
+                    onError={() => setImgBroken(true)}
+                  />
+                </button>
+              )}
             </div>
           )}
           {msg.reactions && Object.keys(msg.reactions).length > 0 && (
@@ -920,6 +951,10 @@ export default function ChatModal() {
     url: string;
     name?: string | undefined;
   } | null>(null);
+  const [lightboxBroken, setLightboxBroken] = useState(false);
+  useEffect(() => {
+    setLightboxBroken(false);
+  }, [lightboxImage?.url]);
   const [dragOverChat, setDragOverChat] = useState(false);
   const imageFileInputRef = useRef<HTMLInputElement>(null);
   const [gifSearch, setGifSearch] = useState("");
@@ -998,6 +1033,7 @@ export default function ChatModal() {
   const [viewingProfileUsername, setViewingProfileUsername] = useState<string | null>(null);
   const [profileData, setProfileData] = useState<UserProfileDetails | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
+  const [lastfmRefreshing, setLastfmRefreshing] = useState(false);
   const [selfCreatedAt, setSelfCreatedAt] = useState<number | undefined>(undefined);
   const viewingProfileRef = useRef<string | null>(null);
   viewingProfileRef.current = viewingProfileUsername;
@@ -1020,6 +1056,10 @@ export default function ChatModal() {
   });
   const [showCustomizer, setShowCustomizer] = useState(false);
   const [showStaffModal, setShowStaffModal] = useState(false);
+  const [profileAuditTab, setProfileAuditTab] = useState<"notes" | "logs">("notes");
+  const [profileNoteDraft, setProfileNoteDraft] = useState("");
+  const [profileNoteCategory, setProfileNoteCategory] = useState<StaffNoteCategory>("general");
+  const [savingProfileNote, setSavingProfileNote] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [staffMods, setStaffMods] = useState<string[]>([]);
   const [ownerUsers, setOwnerUsers] = useState<string[]>([]);
@@ -1123,6 +1163,7 @@ export default function ChatModal() {
     setViewingProfileUsername(null);
     setProfileData(null);
     setProfileLoading(false);
+    setProfileNoteDraft("");
   }, []);
 
   useEffect(() => {
@@ -1157,12 +1198,14 @@ export default function ChatModal() {
       viewingProfileRef.current = clean;
       setViewingProfileUsername(clean);
       setProfileData(null);
+      setProfileNoteDraft("");
       setProfileLoading(true);
       try {
         const res = await fetch(
           `/api/chat/user-profile?username=${encodeURIComponent(clean)}`,
           {
             cache: "no-store",
+            headers: buildModAuthHeaders(),
             ...(controller ? { signal: controller.signal } : {}),
           }
         );
@@ -1219,12 +1262,54 @@ export default function ChatModal() {
     [cloudUser]
   );
 
+  const refreshProfileLastfm = useCallback(async (targetUsername: string, force = false) => {
+    const clean = targetUsername.trim();
+    if (!clean) return;
+    const cleanLower = clean.toLowerCase();
+    if (force) setLastfmRefreshing(true);
+    try {
+      const res = await fetch(
+        `/api/chat/lastfm?username=${encodeURIComponent(clean)}${force ? "&force=1" : ""}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (!data || viewingProfileRef.current?.toLowerCase() !== cleanLower) return;
+      setProfileData((prev) => {
+        if (!prev || prev.username.toLowerCase() !== cleanLower) return prev;
+        return {
+          ...prev,
+          lastfmConfigured: Boolean(data.configured),
+          lastfm: data.lastfm ?? null,
+        };
+      });
+    } catch {}
+    finally {
+      if (force) setLastfmRefreshing(false);
+    }
+  }, []);
+
+  // Poll Last.fm listening status gently while viewing a profile with a linked account
+  const activeProfileLastfmUser = profileData?.lastfm?.username || "";
+  useEffect(() => {
+    const target = viewingProfileUsername;
+    if (!target || !activeProfileLastfmUser) return;
+    const id = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        void refreshProfileLastfm(target, false);
+      }
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [viewingProfileUsername, activeProfileLastfmUser, refreshProfileLastfm]);
+
   const applyProfileUpdateLocally = useCallback(
     (payload: {
       username: string;
       bio?: string;
       statusText?: string;
       customization?: ProfileCustomization;
+      lastfm?: LastfmProfileState | null;
+      lastfmConfigured?: boolean;
       role?: "owner" | "mod" | "member";
     }) => {
       const cleanName = String(payload.username || "").trim();
@@ -1266,6 +1351,10 @@ export default function ChatModal() {
             ? { statusText: payload.statusText }
             : {}),
           ...(cleanCustom ? { customization: cleanCustom } : {}),
+          ...(payload.lastfm !== undefined ? { lastfm: payload.lastfm } : {}),
+          ...(typeof payload.lastfmConfigured === "boolean"
+            ? { lastfmConfigured: payload.lastfmConfigured }
+            : {}),
           ...(payload.role ? { role: payload.role } : {}),
         };
       });
@@ -1356,6 +1445,10 @@ export default function ChatModal() {
           bio: savedBio,
           statusText: savedStatusText,
           customization: savedCustom,
+          lastfm: data.profile?.lastfm ?? null,
+          ...(typeof data.profile?.lastfmConfigured === "boolean"
+            ? { lastfmConfigured: data.profile.lastfmConfigured }
+            : {}),
         });
         try {
           broadcastRef.current?.postMessage({
@@ -2599,6 +2692,7 @@ export default function ChatModal() {
           bio: typeof detail.bio === "string" ? detail.bio : undefined,
           statusText: typeof detail.statusText === "string" ? detail.statusText : undefined,
           customization: detail.customization,
+          ...(detail.lastfm !== undefined ? { lastfm: detail.lastfm } : {}),
           role: detail.role,
         });
       } else if (evtKind === "MOD_UPDATE" && detail.targetUsername) {
@@ -3075,9 +3169,21 @@ export default function ChatModal() {
           };
           if (imageOverride === undefined) setPendingImage(null);
         } catch (err: any) {
-          notifyToast(err?.message || "image upload failed", "error");
-          setIsSending(false);
-          return;
+          const status = Number(err?.status) || 0;
+          const isTransient = status === 0 || status === 408 || status === 429 || status >= 500;
+          // Fall back to bounded inline data URL only on transient/network server failure,
+          // never bypassing explicit 4xx auth, validation, or quota rejections.
+          if (isTransient && isAllowedChatImageUrl(imageToSend.dataUrl)) {
+            uploadedImageMeta = {
+              imageUrl: imageToSend.dataUrl,
+              imageName: imageToSend.name,
+            };
+            if (imageOverride === undefined) setPendingImage(null);
+          } else {
+            notifyToast(err?.message || "image upload failed", "error");
+            setIsSending(false);
+            return;
+          }
         }
       }
 
@@ -3462,19 +3568,125 @@ export default function ChatModal() {
     notifyToast("original message is no longer in chat history", "info");
   }, []);
 
+  const refreshViewingUserStaffAudit = useCallback(async (targetUsername: string) => {
+    const lower = targetUsername.trim().toLowerCase();
+    if (!lower || viewingProfileRef.current?.toLowerCase() !== lower) return;
+    try {
+      const [notesRes, logsRes] = await Promise.all([
+        fetch(`/api/chat/mod/notes?username=${encodeURIComponent(targetUsername)}`, {
+          cache: "no-store",
+          headers: buildModAuthHeaders(),
+        }),
+        fetch(`/api/chat/mod/logs?username=${encodeURIComponent(targetUsername)}&limit=60`, {
+          cache: "no-store",
+          headers: buildModAuthHeaders(),
+        }),
+      ]);
+      const notesJson = notesRes.ok ? await notesRes.json().catch(() => null) : null;
+      const logsJson = logsRes.ok ? await logsRes.json().catch(() => null) : null;
+      if (viewingProfileRef.current?.toLowerCase() !== lower) return;
+      setProfileData((prev) =>
+        prev && prev.username.toLowerCase() === lower
+          ? {
+              ...prev,
+              ...(Array.isArray(notesJson?.notes) ? { staffNotes: notesJson.notes } : {}),
+              ...(Array.isArray(logsJson?.logs) ? { staffLogs: logsJson.logs } : {}),
+            }
+          : prev
+      );
+    } catch {}
+  }, []);
+
+  const handleAddProfileStaffNote = useCallback(
+    async (targetUsername: string) => {
+      const cleanNote = profileNoteDraft.trim();
+      if (!targetUsername || !cleanNote || savingProfileNote) return;
+      setSavingProfileNote(true);
+      try {
+        const res = await fetch("/api/chat/mod/notes", {
+          method: "POST",
+          headers: buildModAuthHeaders(),
+          body: JSON.stringify({
+            username: targetUsername,
+            note: cleanNote,
+            category: profileNoteCategory,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not save staff note", "error");
+          return;
+        }
+        setProfileNoteDraft("");
+        const targetLower = targetUsername.toLowerCase();
+        setProfileData((prev) =>
+          prev &&
+          prev.username.toLowerCase() === targetLower &&
+          viewingProfileRef.current?.toLowerCase() === targetLower
+            ? {
+                ...prev,
+                staffNotes: Array.isArray(data.notes) ? data.notes : prev.staffNotes,
+                staffLogs: Array.isArray(data.userLogs) ? data.userLogs : prev.staffLogs,
+              }
+            : prev
+        );
+        notifyToast(`saved private note on @${targetUsername}`, "success");
+      } catch {
+        notifyToast("failed to save staff note", "error");
+      } finally {
+        setSavingProfileNote(false);
+      }
+    },
+    [profileNoteDraft, profileNoteCategory, savingProfileNote]
+  );
+
+  const handleDeleteProfileStaffNote = useCallback(
+    async (noteId: string, targetUsername: string) => {
+      if (!noteId || !targetUsername) return;
+      try {
+        const res = await fetch(
+          `/api/chat/mod/notes/${encodeURIComponent(noteId)}?username=${encodeURIComponent(
+            targetUsername
+          )}`,
+          {
+            method: "DELETE",
+            headers: buildModAuthHeaders(),
+          }
+        );
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not remove staff note", "error");
+          return;
+        }
+        const targetLower = targetUsername.toLowerCase();
+        setProfileData((prev) =>
+          prev &&
+          prev.username.toLowerCase() === targetLower &&
+          viewingProfileRef.current?.toLowerCase() === targetLower
+            ? {
+                ...prev,
+                staffNotes: Array.isArray(data.notes) ? data.notes : [],
+                staffLogs: Array.isArray(data.userLogs) ? data.userLogs : prev.staffLogs,
+              }
+            : prev
+        );
+        notifyToast("removed staff note", "success");
+      } catch {
+        notifyToast("failed to remove staff note", "error");
+      }
+    },
+    []
+  );
+
   const handleTimeoutUser = useCallback(
     async (targetUsername: string, durationMinutes: number) => {
-      if (!cloudUser || !targetUsername) return;
-      let token = "";
-      try { token = localStorage.getItem("auth_token") || ""; } catch {}
-      if (!token) return;
+      if (!targetUsername) return;
+      const headers = buildModAuthHeaders();
+      if (!headers.Authorization && !headers["x-admin-key"]) return;
       try {
         const res = await fetch("/api/chat/mod/timeout", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers,
           body: JSON.stringify({
             username: targetUsername,
             durationMinutes,
@@ -3492,7 +3704,8 @@ export default function ChatModal() {
             ? {
                 ...prev,
                 isTimedOut: durationMinutes > 0,
-                timeoutUntil: data.timeout?.until || 0,
+                timeoutUntil: data.until || 0,
+                ...(Array.isArray(data.userLogs) ? { staffLogs: data.userLogs } : {}),
               }
             : prev
         );
@@ -3506,22 +3719,18 @@ export default function ChatModal() {
         notifyToast("moderation request failed", "error");
       }
     },
-    [cloudUser]
+    []
   );
 
   const handlePurgeUserMessages = useCallback(
     async (targetUsername: string) => {
-      if (!cloudUser || !targetUsername) return;
-      let token = "";
-      try { token = localStorage.getItem("auth_token") || ""; } catch {}
-      if (!token) return;
+      if (!targetUsername) return;
+      const headers = buildModAuthHeaders();
+      if (!headers.Authorization && !headers["x-admin-key"]) return;
       try {
         const res = await fetch("/api/chat/mod/clear-channel", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers,
           body: JSON.stringify({
             channel: activeChannel,
             targetUsername,
@@ -3536,12 +3745,13 @@ export default function ChatModal() {
         filterMessagesLocally(
           (m) => !(m.channel === activeChannel && m.author.toLowerCase() === lower)
         );
+        void refreshViewingUserStaffAudit(targetUsername);
         notifyToast(`cleared @${targetUsername}'s messages in #${activeChannel}`, "success");
       } catch {
         notifyToast("failed to purge messages", "error");
       }
     },
-    [cloudUser, activeChannel, filterMessagesLocally]
+    [activeChannel, filterMessagesLocally, refreshViewingUserStaffAudit]
   );
 
   const goatSet = useMemo(
@@ -3555,17 +3765,13 @@ export default function ChatModal() {
 
   const handleToggleGoatUser = useCallback(
     async (targetUsername: string, granted: boolean) => {
-      if (!cloudUser || !targetUsername) return;
-      let token = "";
-      try { token = localStorage.getItem("auth_token") || ""; } catch {}
-      if (!token) return;
+      if (!targetUsername) return;
+      const headers = buildModAuthHeaders();
+      if (!headers.Authorization && !headers["x-admin-key"]) return;
       try {
         const res = await fetch("/api/chat/mod/goat", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers,
           body: JSON.stringify({
             username: targetUsername,
             granted,
@@ -3586,6 +3792,7 @@ export default function ChatModal() {
             ? { ...prev, isGoat: Boolean(data.granted) }
             : prev
         );
+        void refreshViewingUserStaffAudit(targetUsername);
         notifyToast(
           data.granted
             ? `awarded golden GOAT title to @${data.targetUsername || targetUsername}`
@@ -3596,7 +3803,7 @@ export default function ChatModal() {
         notifyToast("GOAT update request failed", "error");
       }
     },
-    [cloudUser]
+    [refreshViewingUserStaffAudit]
   );
 
   const handleSendMessage = async (e?: Event) => {
@@ -5397,6 +5604,18 @@ export default function ChatModal() {
               const canGrantGoat = Boolean(
                 cloudUser && (selfRole === "owner" || selfRole === "mod")
               );
+              const canViewStaffAudit = Boolean(
+                verifiedProfile
+                  ? Array.isArray(verifiedProfile.staffNotes) ||
+                      Array.isArray(verifiedProfile.staffLogs)
+                  : selfRole === "owner" || selfRole === "mod"
+              );
+              const targetStaffNotes = Array.isArray(verifiedProfile?.staffNotes)
+                ? verifiedProfile.staffNotes
+                : [];
+              const targetStaffLogs = Array.isArray(verifiedProfile?.staffLogs)
+                ? verifiedProfile.staffLogs
+                : [];
 
               return (
                 <div
@@ -5516,10 +5735,39 @@ export default function ChatModal() {
                         </div>
                       )}
 
+                      {/* Live Last.fm Listening / Scrobble Card */}
+                      {(() => {
+                        const displayLastfmHandle = isViewingSelf
+                          ? sanitizeLastfmUsername(custom.lastfmUsername || "")
+                          : sanitizeLastfmUsername(
+                              verifiedProfile?.lastfm?.username || custom.lastfmUsername || "",
+                            );
+                        if (!displayLastfmHandle) return null;
+                        const matchingLastfm =
+                          verifiedProfile?.lastfm &&
+                          verifiedProfile.lastfm.username.toLowerCase() ===
+                            displayLastfmHandle.toLowerCase()
+                            ? verifiedProfile.lastfm
+                            : null;
+                        return (
+                          <LastfmListeningCard
+                            lastfmUsername={displayLastfmHandle}
+                            lastfm={matchingLastfm}
+                            loading={
+                              (profileLoading && !verifiedProfile) ||
+                              (isViewingSelf && !matchingLastfm && Boolean(custom.lastfmUsername))
+                            }
+                            nowMs={nowMs}
+                            refreshing={lastfmRefreshing}
+                            onRefresh={() => void refreshProfileLastfm(targetName, true)}
+                          />
+                        );
+                      })()}
+
                       {/* Bio / About Section (Editable for Own Profile + Joined Date) */}
                       {isViewingSelf ? (
                         <form class="chat-profile-edit-form" onSubmit={handleSaveMyProfile}>
-                          <div class="chat-profile-section-title">your status & bio</div>
+                          <div class="chat-profile-section-title">your status, bio &amp; last.fm</div>
                           <input
                             type="text"
                             class="chat-mod-input"
@@ -5540,6 +5788,39 @@ export default function ChatModal() {
                               setEditingBio((e.target as HTMLTextAreaElement).value)
                             }
                           />
+                          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                            <input
+                              type="text"
+                              class="chat-mod-input"
+                              placeholder="last.fm username or profile url..."
+                              maxLength={80}
+                              value={editingCustom.lastfmUsername}
+                              onInput={(e) => {
+                                const val = sanitizeLastfmUsername(
+                                  (e.target as HTMLInputElement).value
+                                );
+                                setEditingCustom((prev) => ({
+                                  ...prev,
+                                  lastfmUsername: val,
+                                }));
+                              }}
+                            />
+                            {editingCustom.lastfmUsername && (
+                              <button
+                                type="button"
+                                class="chat-profile-pill-btn"
+                                style={{ flexShrink: 0 }}
+                                onClick={() =>
+                                  setEditingCustom((prev) => ({
+                                    ...prev,
+                                    lastfmUsername: "",
+                                  }))
+                                }
+                              >
+                                unlink
+                              </button>
+                            )}
+                          </div>
                           <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
                             <button
                               type="button"
@@ -5777,6 +6058,156 @@ export default function ChatModal() {
                           </div>
                         </div>
                       )}
+
+                      {canViewStaffAudit && (
+                        <div
+                          class="chat-profile-section chat-profile-staff-audit"
+                          style={{
+                            borderColor: "rgba(167, 139, 250, 0.35)",
+                            background: "rgba(30, 27, 46, 0.65)",
+                          }}
+                        >
+                          <div class="chat-profile-section-title" style={{ color: "#c4b5fd" }}>
+                            <i class="fa-solid fa-lock"></i> staff notes &amp; action log · admins/staff only
+                          </div>
+
+                          <div class="chat-staff-tabs" style={{ marginBottom: "6px" }}>
+                            <button
+                              type="button"
+                              class={`chat-staff-tab ${profileAuditTab === "notes" ? "active" : ""}`}
+                              onClick={() => setProfileAuditTab("notes")}
+                            >
+                              <i class="fa-solid fa-note-sticky" /> notes ({targetStaffNotes.length})
+                            </button>
+                            <button
+                              type="button"
+                              class={`chat-staff-tab ${profileAuditTab === "logs" ? "active" : ""}`}
+                              onClick={() => setProfileAuditTab("logs")}
+                            >
+                              <i class="fa-solid fa-clock-rotate-left" /> action log ({targetStaffLogs.length})
+                            </button>
+                          </div>
+
+                          {profileAuditTab === "notes" ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "7px" }}>
+                              <form
+                                style={{ display: "flex", flexDirection: "column", gap: "5px" }}
+                                onSubmit={(e) => {
+                                  e.preventDefault();
+                                  void handleAddProfileStaffNote(targetName);
+                                }}
+                              >
+                                <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                                  {STAFF_NOTE_CATEGORIES.map((cat) => (
+                                    <button
+                                      key={cat.id}
+                                      type="button"
+                                      class={`chat-note-cat-btn cat-${cat.id} ${
+                                        profileNoteCategory === cat.id ? "active" : ""
+                                      }`}
+                                      onClick={() => setProfileNoteCategory(cat.id)}
+                                    >
+                                      <i class={`fa-solid ${cat.icon}`} /> {cat.label}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div style={{ display: "flex", gap: "5px" }}>
+                                  <input
+                                    type="text"
+                                    class="chat-mod-input"
+                                    placeholder={`private staff note on @${targetName}...`}
+                                    maxLength={400}
+                                    value={profileNoteDraft}
+                                    onInput={(e) =>
+                                      setProfileNoteDraft((e.target as HTMLInputElement).value)
+                                    }
+                                  />
+                                  <button
+                                    type="submit"
+                                    class="chat-profile-pill-btn primary"
+                                    disabled={savingProfileNote || !profileNoteDraft.trim()}
+                                    style={{ flexShrink: 0 }}
+                                  >
+                                    {savingProfileNote ? "..." : "save"}
+                                  </button>
+                                </div>
+                              </form>
+
+                              {profileLoading && !verifiedProfile ? (
+                                <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                                  loading staff notes...
+                                </div>
+                              ) : targetStaffNotes.length === 0 ? (
+                                <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                                  no staff notes on @{targetName} yet.
+                                </div>
+                              ) : (
+                                <div class="chat-staff-log-list is-compact">
+                                  {targetStaffNotes.map((n) => (
+                                    <div
+                                      key={n.id}
+                                      class={`chat-staff-note-card cat-${n.category || "general"}`}
+                                    >
+                                      <div class="chat-staff-note-head">
+                                        <span class={`chat-note-cat-pill cat-${n.category || "general"}`}>
+                                          {n.category || "general"}
+                                        </span>
+                                        <span class="chat-staff-log-time">
+                                          @{n.author} · {formatStaffTimestamp(n.createdAt)}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          class="chat-staff-note-del"
+                                          title="Delete note"
+                                          onClick={() =>
+                                            void handleDeleteProfileStaffNote(n.id, targetName)
+                                          }
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
+                                      <div class="chat-staff-note-body">{n.note}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ) : profileLoading && !verifiedProfile ? (
+                            <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                              loading action log...
+                            </div>
+                          ) : targetStaffLogs.length === 0 ? (
+                            <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                              no staff actions logged on @{targetName} yet.
+                            </div>
+                          ) : (
+                            <div class="chat-staff-log-list is-compact">
+                              {targetStaffLogs.map((log) => {
+                                const meta = formatStaffLogActionMeta(log.action);
+                                return (
+                                  <div key={log.id} class="chat-staff-log-item">
+                                    <div class="chat-staff-log-top">
+                                      <span class={`chat-action-badge ${meta.tone}`}>
+                                        {meta.label}
+                                      </span>
+                                      {log.channel && (
+                                        <span class="chat-staff-log-channel">#{log.channel}</span>
+                                      )}
+                                      <span class="chat-staff-log-time">
+                                        {formatStaffTimestamp(log.timestamp)}
+                                      </span>
+                                    </div>
+                                    <div class="chat-staff-log-meta">
+                                      <span>by @{log.actor}</span>
+                                      {log.details ? <span> · {log.details}</span> : null}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -5872,17 +6303,21 @@ export default function ChatModal() {
           >
             <div class="chat-lightbox-card" onClick={(e) => e.stopPropagation()}>
               <div class="chat-lightbox-topbar">
-                <span>{lightboxImage.name || "image preview"}</span>
-                <div style={{ display: "flex", gap: "8px" }}>
-                  <a
-                    href={lightboxImage.url}
-                    download={lightboxImage.name || "chat-image"}
-                    class="chat-header-btn"
-                    style={{ textDecoration: "none" }}
-                  >
-                    <i class="fa-solid fa-download"></i>
-                    <span>save</span>
-                  </a>
+                <span title={lightboxImage.name || "image preview"}>
+                  {lightboxImage.name || "image preview"}
+                </span>
+                <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                  {!lightboxBroken && (
+                    <a
+                      href={lightboxImage.url}
+                      download={lightboxImage.name || "chat-image"}
+                      class="chat-header-btn"
+                      style={{ textDecoration: "none" }}
+                    >
+                      <i class="fa-solid fa-download"></i>
+                      <span>save</span>
+                    </a>
+                  )}
                   <button
                     type="button"
                     class="chat-header-btn"
@@ -5892,11 +6327,20 @@ export default function ChatModal() {
                   </button>
                 </div>
               </div>
-              <img
-                src={lightboxImage.url}
-                alt={lightboxImage.name || "Full image preview"}
-                class="chat-lightbox-img"
-              />
+              {lightboxBroken ? (
+                <div class="chat-lightbox-broken">
+                  <i class="fa-regular fa-image" aria-hidden="true"></i>
+                  <span>image could not be loaded</span>
+                  {lightboxImage.name && <small title={lightboxImage.name}>{lightboxImage.name}</small>}
+                </div>
+              ) : (
+                <img
+                  src={lightboxImage.url}
+                  alt={lightboxImage.name || "Full image preview"}
+                  class="chat-lightbox-img"
+                  onError={() => setLightboxBroken(true)}
+                />
+              )}
             </div>
           </div>
         )}

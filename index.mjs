@@ -145,6 +145,7 @@ const apiLimiter = rateLimit({
   max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => String(req.path || "").startsWith("/chat/media/"),
   message: { error: "too many requests, please try again later!" },
 });
 
@@ -1308,6 +1309,11 @@ const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
 const goatUsers = new Set(); // Set<usernameLower> - golden GOAT title honorees
 const chatTimeouts = new Map(); // usernameLower -> { until, reason, by, updatedAt }
 const chatGroups = new Map(); // groupId -> { id, name, creator, members, createdAt }
+const staffActionLogs = []; // Array<{ id, timestamp, action, actor, actorRole, targetUsername, channel, details }>
+const staffUserNotes = new Map(); // usernameLower -> Array<{ id, targetUsername, author, authorRole, note, category, createdAt }>
+const deletedStaffNoteIds = new Set(); // Set<noteId>
+const MAX_STAFF_ACTION_LOGS = 500;
+const MAX_NOTES_PER_USER = 50;
 let chatMetaLoadedFromDb = false;
 
 const CLOUDSYNC_JWT_SECRET =
@@ -1354,6 +1360,7 @@ function getSharedCloudSyncDb() {
     } catch {}
     sharedCloudSyncDb = new Database(dbFile);
     sharedCloudSyncDbPath = dbFile;
+    cloudSyncDbInitialized = false;
     sharedCloudSyncDb.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
@@ -1404,6 +1411,11 @@ function getSharedCloudSyncDb() {
 }
 
 const RESERVED_SYSTEM_KV_USERNAME = "__sunshine_kv__";
+const RESERVED_MEDIA_SHARD_PREFIX = "__sunshine_media_";
+function isReservedSystemUsername(username) {
+  const k = String(username || "").trim().toLowerCase();
+  return k === RESERVED_SYSTEM_KV_USERNAME || k.startsWith(RESERVED_MEDIA_SHARD_PREFIX);
+}
 const STUDIO_GAMES_KV_KEY = "studio_games_v1";
 const STUDIO_PROFILES_KV_KEY = "studio_profiles_v1";
 const publishedStudioGames = [];
@@ -1419,6 +1431,9 @@ const CHAT_META_KV_KEYS = [
   "chat_timeouts_v1",
   "chat_groups_v1",
   "chat_history_v1",
+  "staff_action_logs_v1",
+  "staff_user_notes_v1",
+  "staff_user_notes_deleted_v1",
   STUDIO_GAMES_KV_KEY,
   STUDIO_PROFILES_KV_KEY,
   OXIUM_PARTNERS_KV_KEY,
@@ -1499,6 +1514,7 @@ let supabaseProfilesBackfillStarted = false;
 let lastRemoteUserProfilesSnapshot = {};
 const locallyDirtyProfileKeys = new Set();
 const deletedProfileKeys = new Set();
+const clearedLastfmKeys = new Set();
 const singleProfileSyncRecoveryChecked = new Map(); // usernameLower -> ts
 const pendingSupabaseKvTimers = new Map();
 
@@ -1519,7 +1535,13 @@ function scheduleSupabaseKvSync(key) {
   if (pendingSupabaseKvTimers.has(k)) {
     clearTimeout(pendingSupabaseKvTimers.get(k));
   }
-  const delayMs = k === "staff_moderators_v1" || k === "goat_users_v1" ? 10 : 250;
+  const delayMs =
+    k === "staff_moderators_v1" ||
+    k === "goat_users_v1" ||
+    k === "staff_action_logs_v1" ||
+    k === "staff_user_notes_v1"
+      ? 10
+      : 250;
   const timer = setTimeout(() => {
     pendingSupabaseKvTimers.delete(k);
     void persistKvKeyToSupabaseAsync(k).catch((e) => {
@@ -1595,6 +1617,15 @@ function sanitizeCustomMediaUrlServer(val) {
   }
 }
 
+function sanitizeLastfmUsernameServer(raw) {
+  if (typeof raw !== "string") return "";
+  let s = raw.trim();
+  const urlMatch = /^https?:\/\/(?:www\.)?last\.fm\/user\/([^/?#]+)/i.exec(s);
+  if (urlMatch) s = urlMatch[1];
+  s = s.replace(/^@+/, "");
+  return s.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 32);
+}
+
 function sanitizeProfileCustomizationServer(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   const emoji = typeof src.avatarEmoji === "string" ? src.avatarEmoji.trim() : "";
@@ -1602,6 +1633,7 @@ function sanitizeProfileCustomizationServer(raw) {
     displayName: typeof src.displayName === "string" ? src.displayName.trim().slice(0, 32) : "",
     pronouns: typeof src.pronouns === "string" ? src.pronouns.trim().slice(0, 24) : "",
     customTag: typeof src.customTag === "string" ? src.customTag.trim().slice(0, 18) : "",
+    lastfmUsername: sanitizeLastfmUsernameServer(src.lastfmUsername),
     avatarUrl: sanitizeCustomMediaUrlServer(src.avatarUrl),
     bannerUrl: sanitizeCustomMediaUrlServer(src.bannerUrl),
     decorationUrl: sanitizeCustomMediaUrlServer(src.decorationUrl),
@@ -1648,6 +1680,7 @@ function hasMeaningfulCustomization(raw) {
     c.displayName ||
     c.pronouns ||
     c.customTag ||
+    c.lastfmUsername ||
     c.avatarUrl ||
     c.bannerUrl ||
     c.decorationUrl ||
@@ -1712,7 +1745,11 @@ function mergeSingleUserProfileEntry(existing, incoming, { preferIncoming = fals
   };
 }
 
-function mergeUserProfilesDict(remoteObj, localObj, { deletedKeys = new Set(), dirtyKeys = new Set() } = {}) {
+function mergeUserProfilesDict(
+  remoteObj,
+  localObj,
+  { deletedKeys = new Set(), dirtyKeys = new Set(), clearedLastfm = new Set() } = {},
+) {
   const out = {};
   if (remoteObj && typeof remoteObj === "object" && !Array.isArray(remoteObj)) {
     for (const [k, v] of Object.entries(remoteObj)) {
@@ -1725,9 +1762,13 @@ function mergeUserProfilesDict(remoteObj, localObj, { deletedKeys = new Set(), d
     for (const [k, v] of Object.entries(localObj)) {
       const lower = String(k || "").trim().toLowerCase();
       if (!lower || deletedKeys.has(lower) || !v || typeof v !== "object") continue;
-      out[lower] = mergeSingleUserProfileEntry(out[lower], v, {
+      const merged = mergeSingleUserProfileEntry(out[lower], v, {
         preferIncoming: dirtyKeys.has(lower),
       });
+      if (clearedLastfm.has(lower) && merged?.customization) {
+        merged.customization.lastfmUsername = "";
+      }
+      out[lower] = merged;
     }
   }
   return out;
@@ -1741,6 +1782,7 @@ function mergeKvValueBeforeRemoteWrite(key, remoteVal, localVal) {
     return mergeUserProfilesDict(remoteVal, localVal, {
       deletedKeys: deletedSet,
       dirtyKeys: locallyDirtyProfileKeys,
+      clearedLastfm: clearedLastfmKeys,
     });
   }
   if (k === STUDIO_GAMES_KV_KEY) {
@@ -1773,6 +1815,37 @@ function mergeKvValueBeforeRemoteWrite(key, remoteVal, localVal) {
   }
   if ((k === "staff_moderators_v1" || k === "goat_users_v1" || k === "deleted_users_v1") && Array.isArray(remoteVal) && Array.isArray(localVal)) {
     return Array.from(new Set([...remoteVal, ...localVal].map((s) => String(s || "").trim().toLowerCase()).filter(Boolean)));
+  }
+  if (k === "staff_user_notes_deleted_v1" && Array.isArray(remoteVal) && Array.isArray(localVal)) {
+    return Array.from(new Set([...remoteVal, ...localVal].map((s) => String(s || "").trim()).filter(Boolean))).slice(-300);
+  }
+  if (k === "staff_action_logs_v1" && Array.isArray(remoteVal) && Array.isArray(localVal)) {
+    const byId = new Map();
+    for (const item of [...remoteVal, ...localVal]) {
+      if (!item || !item.id) continue;
+      byId.set(String(item.id), item);
+    }
+    return Array.from(byId.values())
+      .sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0))
+      .slice(-MAX_STAFF_ACTION_LOGS);
+  }
+  if (k === "staff_user_notes_v1" && typeof remoteVal === "object" && typeof localVal === "object") {
+    const merged = {};
+    const keys = new Set([...Object.keys(remoteVal || {}), ...Object.keys(localVal || {})]);
+    for (const uk of keys) {
+      const rArr = Array.isArray(remoteVal?.[uk]) ? remoteVal[uk] : [];
+      const lArr = Array.isArray(localVal?.[uk]) ? localVal[uk] : [];
+      const byId = new Map();
+      for (const n of [...rArr, ...lArr]) {
+        if (!n || !n.id || deletedStaffNoteIds.has(String(n.id))) continue;
+        byId.set(String(n.id), n);
+      }
+      const list = Array.from(byId.values())
+        .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
+        .slice(0, MAX_NOTES_PER_USER);
+      if (list.length > 0) merged[uk] = list;
+    }
+    return merged;
   }
   if (remoteVal && typeof remoteVal === "object" && !Array.isArray(remoteVal) && localVal && typeof localVal === "object" && !Array.isArray(localVal)) {
     return { ...remoteVal, ...localVal };
@@ -1823,7 +1896,7 @@ function extractCustomizationFromSyncPayload(username, payloadJsonOrObj) {
 function recoverUserProfileFromSyncPayload(username, payloadJsonOrObj, updatedAt = "") {
   const clean = String(username || "").trim();
   const key = clean.toLowerCase();
-  if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key) || deletedProfileKeys.has(key)) {
+  if (!clean || isReservedSystemUsername(clean) || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key) || deletedProfileKeys.has(key)) {
     return false;
   }
   const custom = extractCustomizationFromSyncPayload(clean, payloadJsonOrObj);
@@ -2070,6 +2143,44 @@ function applyChatMetaKvMap(kvMap) {
     const mergedStudios = mergeStudioProfilesLists(customStudios, sStudios);
     customStudios.splice(0, customStudios.length, ...mergedStudios);
   }
+  const delNoteIds = kvMap.staff_user_notes_deleted_v1;
+  if (Array.isArray(delNoteIds)) {
+    for (const nid of delNoteIds) {
+      const cleanId = String(nid || "").trim();
+      if (cleanId) deletedStaffNoteIds.add(cleanId);
+    }
+  }
+  const sLogs = kvMap.staff_action_logs_v1;
+  if (Array.isArray(sLogs)) {
+    const byId = new Map();
+    for (const item of [...staffActionLogs, ...sLogs]) {
+      if (!item || typeof item !== "object" || !item.id || !item.action) continue;
+      byId.set(String(item.id), item);
+    }
+    const mergedLogs = Array.from(byId.values())
+      .sort((a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0))
+      .slice(-MAX_STAFF_ACTION_LOGS);
+    staffActionLogs.splice(0, staffActionLogs.length, ...mergedLogs);
+  }
+  const sNotes = kvMap.staff_user_notes_v1;
+  if (sNotes && typeof sNotes === "object") {
+    for (const [rawKey, list] of Object.entries(sNotes)) {
+      const uk = String(rawKey || "").trim().toLowerCase();
+      if (!uk || !Array.isArray(list)) continue;
+      const existing = staffUserNotes.get(uk) || [];
+      const byId = new Map();
+      for (const n of [...existing, ...list]) {
+        if (!n || typeof n !== "object" || !n.id || !n.note) continue;
+        if (deletedStaffNoteIds.has(String(n.id))) continue;
+        byId.set(String(n.id), n);
+      }
+      const nextList = Array.from(byId.values())
+        .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
+        .slice(0, MAX_NOTES_PER_USER);
+      if (nextList.length > 0) staffUserNotes.set(uk, nextList);
+      else staffUserNotes.delete(uk);
+    }
+  }
 }
 
 function ensureChatMetaLoaded() {
@@ -2082,30 +2193,33 @@ function ensureChatMetaLoaded() {
     chat_timeouts_v1: kvGetJson("chat_timeouts_v1", {}),
     chat_history_v1: kvGetJson("chat_history_v1", []),
     chat_groups_v1: kvGetJson("chat_groups_v1", {}),
+    staff_action_logs_v1: kvGetJson("staff_action_logs_v1", []),
+    staff_user_notes_v1: kvGetJson("staff_user_notes_v1", {}),
+    staff_user_notes_deleted_v1: kvGetJson("staff_user_notes_deleted_v1", []),
     [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
     [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
   });
   recoverProfilesFromLocalSqliteAndHistory();
 }
 
+async function getOrCreateReservedSystemUserId(username) {
+  const existing = await dbFindUserByUsername(username);
+  if (existing?.id) {
+    return Number(existing.id);
+  }
+  const created = await dbCreateUser(username, "!locked_system_kv_account!");
+  if (created?.id) {
+    return Number(created.id);
+  }
+  const refetched = await dbFindUserByUsername(username);
+  return refetched?.id ? Number(refetched.id) : null;
+}
+
 async function getOrCreateSupabaseSystemKvUserId() {
   if (supabaseKvSysUserId) return supabaseKvSysUserId;
-  const existing = await dbFindUserByUsername(RESERVED_SYSTEM_KV_USERNAME);
-  if (existing?.id) {
-    supabaseKvSysUserId = Number(existing.id);
-    return supabaseKvSysUserId;
-  }
-  const created = await dbCreateUser(RESERVED_SYSTEM_KV_USERNAME, "!locked_system_kv_account!");
-  if (created?.id) {
-    supabaseKvSysUserId = Number(created.id);
-    return supabaseKvSysUserId;
-  }
-  const refetched = await dbFindUserByUsername(RESERVED_SYSTEM_KV_USERNAME);
-  if (refetched?.id) {
-    supabaseKvSysUserId = Number(refetched.id);
-    return supabaseKvSysUserId;
-  }
-  return null;
+  const resolved = await getOrCreateReservedSystemUserId(RESERVED_SYSTEM_KV_USERNAME);
+  if (resolved) supabaseKvSysUserId = resolved;
+  return resolved;
 }
 
 async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
@@ -2155,6 +2269,7 @@ async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
       if (k === "user_profiles_v2") {
         lastRemoteUserProfilesSnapshot = val && typeof val === "object" ? { ...val } : {};
         locallyDirtyProfileKeys.clear();
+        clearedLastfmKeys.clear();
       }
       return { ok: true };
     }
@@ -2180,6 +2295,7 @@ async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
   if (!isSupabaseDegraded() && k === "user_profiles_v2") {
     lastRemoteUserProfilesSnapshot = val && typeof val === "object" ? { ...val } : {};
     locallyDirtyProfileKeys.clear();
+    clearedLastfmKeys.clear();
   }
   return { ok: !isSupabaseDegraded() };
 }
@@ -2379,6 +2495,82 @@ function persistChatTimeouts() {
   kvSetJson("chat_timeouts_v1", out);
 }
 
+function persistStaffActionLogs() {
+  kvSetJson("staff_action_logs_v1", staffActionLogs.slice(-MAX_STAFF_ACTION_LOGS));
+}
+
+function persistStaffUserNotes({ includeTombstones = false } = {}) {
+  const out = {};
+  for (const [k, list] of staffUserNotes.entries()) {
+    if (Array.isArray(list) && list.length > 0) {
+      out[k] = list.slice(0, MAX_NOTES_PER_USER);
+    }
+  }
+  kvSetJson("staff_user_notes_v1", out);
+  if (includeTombstones) {
+    kvSetJson("staff_user_notes_deleted_v1", Array.from(deletedStaffNoteIds).slice(-300));
+  }
+}
+
+function recordStaffAction({
+  action,
+  actor = null,
+  targetUsername = "",
+  channel = "",
+  details = "",
+}) {
+  ensureChatMetaLoaded();
+  const entry = {
+    id: `slog_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: Date.now(),
+    action: String(action || "mod_action").trim().slice(0, 48),
+    actor: String(actor?.username || "staff").trim().slice(0, 40) || "staff",
+    actorRole: String(actor?.role || "mod").trim().slice(0, 20) || "mod",
+    targetUsername: String(targetUsername || "").trim().replace(/^@/, "").slice(0, 40),
+    channel: String(channel || "").trim().slice(0, 40),
+    details: String(details || "").trim().slice(0, 240),
+  };
+  staffActionLogs.push(entry);
+  if (staffActionLogs.length > MAX_STAFF_ACTION_LOGS) {
+    staffActionLogs.splice(0, staffActionLogs.length - MAX_STAFF_ACTION_LOGS);
+  }
+  persistStaffActionLogs();
+  return entry;
+}
+
+function getStaffLogsForUser(usernameLower, limit = 60) {
+  ensureChatMetaLoaded();
+  const cleanKey = String(usernameLower || "").trim().replace(/^@/, "").toLowerCase();
+  if (!cleanKey) return [];
+  const matches = [];
+  for (let i = staffActionLogs.length - 1; i >= 0; i--) {
+    const log = staffActionLogs[i];
+    if (String(log?.targetUsername || "").toLowerCase() === cleanKey) {
+      matches.push(log);
+      if (matches.length >= limit) break;
+    }
+  }
+  return matches;
+}
+
+function getStaffNotesForUser(usernameLower) {
+  ensureChatMetaLoaded();
+  const cleanKey = String(usernameLower || "").trim().replace(/^@/, "").toLowerCase();
+  if (!cleanKey) return [];
+  const list = staffUserNotes.get(cleanKey);
+  return Array.isArray(list) ? list : [];
+}
+
+function getAllStaffNotesList(limit = 100) {
+  ensureChatMetaLoaded();
+  const combined = [];
+  for (const list of staffUserNotes.values()) {
+    if (Array.isArray(list)) combined.push(...list);
+  }
+  combined.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
+  return combined.slice(0, limit);
+}
+
 function persistChatHistory() {
   if (typeof chatHistory !== "undefined") {
     kvSetJson("chat_history_v1", chatHistory.slice(-250));
@@ -2544,7 +2736,7 @@ function unmarkDeletedUsername(username) {
 
 function mirrorLocalUserRecord({ username, passwordHash = "", tokenVersion = 1 }) {
   const clean = String(username || "").trim();
-  if (!clean || clean.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) return null;
+  if (!clean || isReservedSystemUsername(clean)) return null;
   const db = openCloudSyncDb(false);
   try {
     const existing = db
@@ -2587,7 +2779,7 @@ function saveRegisteredUsersDirCache(rows) {
     const clean = String(r?.username || "").trim();
     const k = clean.toLowerCase();
     const id = Number(r?.id) || 0;
-    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || isTemporaryGuestName(clean)) continue;
     incomingKeys.add(k);
     if (id > 0) incomingById.set(id, { id, username: clean, created_at: r.created_at || null });
     // Clear any prior alias if this exact username is now active in Supabase
@@ -2600,7 +2792,7 @@ function saveRegisteredUsersDirCache(rows) {
       const clean = String(r?.username || "").trim();
       const k = clean.toLowerCase();
       const id = Number(r?.id) || 0;
-      if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+      if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || isTemporaryGuestName(clean)) continue;
       if (id > 0 && incomingById.has(id)) {
         const fresh = incomingById.get(id);
         if (fresh.username.toLowerCase() !== k && !incomingKeys.has(k)) {
@@ -2618,7 +2810,7 @@ function saveRegisteredUsersDirCache(rows) {
     const clean = String(r?.username || "").trim();
     const k = clean.toLowerCase();
     const id = Number(r?.id) || 0;
-    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || isTemporaryGuestName(clean)) continue;
     if (id > 0) {
       for (const [existingKey, existingRec] of byKey.entries()) {
         if (existingKey !== k && existingRec.id === id && !incomingKeys.has(existingKey)) {
@@ -2650,7 +2842,7 @@ function collectFallbackUserRows(primaryRows = []) {
     const clean = String(r?.username || "").trim();
     const k = clean.toLowerCase();
     const id = Number(r?.id) || 0;
-    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) continue;
+    if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || isTemporaryGuestName(clean)) continue;
     primaryKeys.add(k);
     if (id > 0) primaryById.set(id, { id, username: clean, created_at: r.created_at || null });
   }
@@ -2659,7 +2851,7 @@ function collectFallbackUserRows(primaryRows = []) {
     const clean = String(username || "").trim();
     const k = clean.toLowerCase();
     const numId = Number(id) || 0;
-    if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || isTemporaryGuestName(clean)) {
+    if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || isTemporaryGuestName(clean)) {
       return;
     }
     if (!isPrimary && staleUsernameAliases.has(k)) {
@@ -2987,7 +3179,7 @@ async function dbCountUsers() {
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, contentRange, text } = await supabaseRest(
-        "cloudsync_users?select=*",
+        "cloudsync_users?username=not.like.__sunshine_*&select=*",
         {
           method: "HEAD",
           headers: { Prefer: "count=exact" },
@@ -2998,8 +3190,7 @@ async function dbCountUsers() {
       if (parsed === null) {
         throw new Error(`Supabase exact count missing Content-Range: ${contentRange}`);
       }
-      const sysAdjustment = supabaseHasAppKvTable === false && supabaseKvSysUserId ? 1 : 0;
-      const exactCount = Math.max(0, parsed - sysAdjustment);
+      const exactCount = Math.max(0, parsed);
       localKvSetJson(USERS_COUNT_KV_KEY, { count: exactCount, updatedAt: Date.now() });
       return exactCount;
     } catch (err) {
@@ -3016,7 +3207,7 @@ async function dbListUsers({ limit = USERS_DIR_PAGE_SIZE, offset = 0 } = {}) {
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?select=id,username,created_at&order=id.desc&limit=${safeLimit}&offset=${safeOffset}`
+        `cloudsync_users?username=not.like.__sunshine_*&select=id,username,created_at&order=id.desc&limit=${safeLimit}&offset=${safeOffset}`
       );
       if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
       const batch = Array.isArray(json) ? json : [];
@@ -3117,7 +3308,7 @@ async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false }
   if (!claims || !claims.id || !claims.username) return null;
   const claimsUsername = String(claims.username).trim();
   const claimsLower = claimsUsername.toLowerCase();
-  if (!claimsUsername || claimsLower === RESERVED_SYSTEM_KV_USERNAME) return null;
+  if (!claimsUsername || isReservedSystemUsername(claimsUsername)) return null;
   if (getDeletedUsersSet().has(claimsLower)) return null;
 
   try {
@@ -3159,7 +3350,7 @@ app.post("/api/auth/register", async (req, res) => {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
 
-    if (username.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) {
+    if (isReservedSystemUsername(username)) {
       return res
         .status(400)
         .json({ success: false, user: null, error: "reserved username" });
@@ -3223,7 +3414,7 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
-    if (!username || !password || username.toLowerCase() === RESERVED_SYSTEM_KV_USERNAME) {
+    if (!username || !password || isReservedSystemUsername(username)) {
       return res
         .status(400)
         .json({ success: false, user: null, error: "missing username or password" });
@@ -3447,7 +3638,7 @@ function buildCloudSyncUsersMap(rows) {
     if (r && r.username) {
       const clean = String(r.username).trim();
       const k = clean.toLowerCase();
-      if (!clean || k === RESERVED_SYSTEM_KV_USERNAME || deleted.has(k) || staleUsernameAliases.has(k)) continue;
+      if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || staleUsernameAliases.has(k)) continue;
       const numId = Number(r.id) || 0;
       if (numId > 0 && keyById.has(numId) && keyById.get(numId) !== k) {
         continue;
@@ -3467,7 +3658,7 @@ function upsertUserInCaches(row, countDelta = 0) {
   const clean = String(row?.username || "").trim();
   const key = clean.toLowerCase();
   const numId = Number(row?.id) || 0;
-  if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean)) return;
+  if (!clean || isReservedSystemUsername(clean) || isTemporaryGuestName(clean)) return;
   missingUserLookupCache.delete(key);
   staleUsernameAliases.delete(key);
   saveRegisteredUsersDirCache([{ id: numId, username: clean, created_at: row.created_at || null }]);
@@ -3664,7 +3855,7 @@ async function ensureCloudSyncUserInMap(username) {
   const csMap = await getCloudSyncUsersMapAsync().catch(() => getCloudSyncUsersMap());
   const clean = String(username || "").trim();
   const key = clean.toLowerCase();
-  if (!clean || key === RESERVED_SYSTEM_KV_USERNAME || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key)) {
+  if (!clean || isReservedSystemUsername(clean) || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key)) {
     return { csMap, user: null };
   }
   if (csMap.has(key)) {
@@ -4295,6 +4486,22 @@ app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
   };
 
   const count = broadcastToClients(payload, target);
+  if (target && target !== "all") {
+    const clientMatch = liveClients.get(target) || httpHeartbeats.get(target);
+    const targetName = String(clientMatch?.username || "").trim();
+    if (targetName && targetName.toLowerCase() !== "anonymous") {
+      recordStaffAction({
+        action: `admin_${String(action).trim().slice(0, 32)}`,
+        actor: { username: ADMIN_USERNAME, role: "owner" },
+        targetUsername: targetName,
+        details: data?.message
+          ? String(data.message).slice(0, 120)
+          : data?.sound
+          ? `sound: ${String(data.sound).slice(0, 80)}`
+          : `admin effect (${count} session)`,
+      });
+    }
+  }
   res.json({ success: true, count, target, action });
 });
 
@@ -5287,6 +5494,247 @@ app.get("/api/chat/image-proxy", async (req, res) => {
   }
 });
 
+const LASTFM_API_KEY = (process.env.LASTFM_API_KEY || process.env.LASTFM_APP_KEY || "").trim();
+const LASTFM_API_BASE = (process.env.LASTFM_API_BASE || "https://ws.audioscrobbler.com/2.0/").trim();
+const LASTFM_DEFAULT_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f";
+const lastfmRecentCache = new LRUCache({ max: 500, ttl: 20 * 1000 });
+const lastfmInflightFetches = new Map();
+const lastfmForceCooldown = new LRUCache({ max: 500, ttl: 5 * 1000 });
+
+function sanitizeLastfmLinkUrl(rawUrl, fallbackUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return fallbackUrl;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const host = parsed.hostname.toLowerCase();
+    if (
+      (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+      (host === "last.fm" || host.endsWith(".last.fm"))
+    ) {
+      parsed.protocol = "https:";
+      return parsed.href;
+    }
+  } catch {}
+  return fallbackUrl;
+}
+
+function pickLastfmAlbumArt(images) {
+  if (!Array.isArray(images)) return "";
+  const rank = { extralarge: 4, mega: 4, large: 3, medium: 2, small: 1 };
+  const sorted = [...images]
+    .filter((img) => img && typeof img["#text"] === "string" && img["#text"].trim())
+    .sort((a, b) => (rank[String(b.size || "").toLowerCase()] || 0) - (rank[String(a.size || "").toLowerCase()] || 0));
+  for (const img of sorted) {
+    try {
+      const parsed = new URL(img["#text"].trim());
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") continue;
+      parsed.protocol = "https:";
+      if (parsed.href.includes(LASTFM_DEFAULT_PLACEHOLDER_HASH)) continue;
+      return parsed.href;
+    } catch {}
+  }
+  return "";
+}
+
+async function fetchLastfmRecentTrackAsync(rawUsername, { force = false } = {}) {
+  const username = sanitizeLastfmUsernameServer(rawUsername);
+  if (!username) return null;
+  const profileUrl = `https://www.last.fm/user/${encodeURIComponent(username)}`;
+
+  if (!LASTFM_API_KEY) {
+    return {
+      username,
+      configured: false,
+      found: false,
+      nowPlaying: false,
+      track: null,
+      profileUrl,
+      fetchedAt: Date.now(),
+    };
+  }
+
+  const cacheKey = username.toLowerCase();
+  const cached = lastfmRecentCache.get(cacheKey);
+  if (cached && (!force || lastfmForceCooldown.get(cacheKey))) {
+    return cached;
+  }
+
+  if (lastfmInflightFetches.has(cacheKey)) {
+    return lastfmInflightFetches.get(cacheKey);
+  }
+
+  const reqPromise = (async () => {
+    try {
+      const base = LASTFM_API_BASE.replace(/\/+$/, "") + "/";
+      const endpoint = `${base}?method=user.getrecenttracks&user=${encodeURIComponent(
+        username,
+      )}&api_key=${encodeURIComponent(LASTFM_API_KEY)}&format=json&limit=1`;
+      const upstream = await fetch(endpoint, {
+        headers: {
+          "User-Agent": "sunshineWAVES/1.0 (lastfm-profile-widget)",
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+      const data = await upstream.json().catch(() => null);
+
+      if (data && typeof data.error === "number") {
+        const errCode = data.error;
+        const result = {
+          username,
+          configured: errCode !== 10 && errCode !== 26,
+          found: errCode !== 6,
+          privateProfile: errCode === 17,
+          nowPlaying: false,
+          track: null,
+          profileUrl,
+          fetchedAt: Date.now(),
+          error:
+            errCode === 6
+              ? "Last.fm user not found"
+              : errCode === 17
+                ? "Recent tracks are private on Last.fm"
+                : errCode === 10 || errCode === 26
+                  ? "Server Last.fm API key was rejected"
+                  : String(data.message || "Last.fm lookup failed"),
+        };
+        lastfmRecentCache.set(cacheKey, result);
+        if (force) lastfmForceCooldown.set(cacheKey, true);
+        return result;
+      }
+
+      if (!upstream.ok || !data?.recenttracks) {
+        if (cached) return cached;
+        return {
+          username,
+          configured: true,
+          found: false,
+          nowPlaying: false,
+          track: null,
+          profileUrl,
+          fetchedAt: Date.now(),
+          error: "Could not reach Last.fm right now",
+        };
+      }
+
+      const rawTracks = data.recenttracks.track;
+      const list = Array.isArray(rawTracks) ? rawTracks : rawTracks ? [rawTracks] : [];
+      const activeTrack =
+        list.find(
+          (t) =>
+            t &&
+            (t["@attr"]?.nowplaying === "true" || t["@attr"]?.nowplaying === true),
+        ) || list[0];
+
+      if (!activeTrack || !activeTrack.name) {
+        const emptyResult = {
+          username,
+          configured: true,
+          found: true,
+          nowPlaying: false,
+          track: null,
+          profileUrl,
+          fetchedAt: Date.now(),
+        };
+        lastfmRecentCache.set(cacheKey, emptyResult);
+        if (force) lastfmForceCooldown.set(cacheKey, true);
+        return emptyResult;
+      }
+
+      const nowPlaying = Boolean(
+        activeTrack["@attr"]?.nowplaying === "true" ||
+          activeTrack["@attr"]?.nowplaying === true,
+      );
+      const scrobbledUts = Number(activeTrack.date?.uts || 0);
+      const track = {
+        name: String(activeTrack.name || "").trim().slice(0, 180),
+        artist: String(
+          activeTrack.artist?.["#text"] ||
+            activeTrack.artist?.name ||
+            (typeof activeTrack.artist === "string" ? activeTrack.artist : "") ||
+            "",
+        )
+          .trim()
+          .slice(0, 140),
+        album: String(activeTrack.album?.["#text"] || activeTrack.album?.name || "")
+          .trim()
+          .slice(0, 140),
+        albumArt: pickLastfmAlbumArt(activeTrack.image),
+        url: sanitizeLastfmLinkUrl(activeTrack.url, profileUrl),
+        nowPlaying,
+        scrobbledAt: nowPlaying ? 0 : scrobbledUts > 0 ? scrobbledUts * 1000 : 0,
+      };
+
+      const result = {
+        username,
+        configured: true,
+        found: true,
+        nowPlaying,
+        track,
+        profileUrl,
+        fetchedAt: Date.now(),
+      };
+      lastfmRecentCache.set(cacheKey, result);
+      if (force) lastfmForceCooldown.set(cacheKey, true);
+      return result;
+    } catch {
+      if (cached) return cached;
+      return {
+        username,
+        configured: true,
+        found: false,
+        nowPlaying: false,
+        track: null,
+        profileUrl,
+        fetchedAt: Date.now(),
+        error: "Could not reach Last.fm right now",
+      };
+    } finally {
+      lastfmInflightFetches.delete(cacheKey);
+    }
+  })();
+
+  lastfmInflightFetches.set(cacheKey, reqPromise);
+  return reqPromise;
+}
+
+app.get("/api/chat/lastfm", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+
+  const directLastfm = req.query?.lastfmUser !== undefined ? String(req.query.lastfmUser || "") : "";
+  const targetUser = req.query?.username !== undefined ? String(req.query.username || "") : "";
+  const force = req.query?.force === "1" || req.query?.force === "true";
+
+  let lastfmHandle = "";
+  if (directLastfm) {
+    lastfmHandle = sanitizeLastfmUsernameServer(directLastfm);
+    if (!lastfmHandle) {
+      return res.status(400).json({ success: false, error: "Invalid Last.fm username" });
+    }
+  } else if (targetUser.trim()) {
+    const prof = userProfiles.get(targetUser.trim().toLowerCase());
+    lastfmHandle = sanitizeLastfmUsernameServer(prof?.customization?.lastfmUsername);
+    if (!lastfmHandle) {
+      return res.json({
+        success: true,
+        configured: Boolean(LASTFM_API_KEY),
+        linked: false,
+        lastfm: null,
+      });
+    }
+  } else {
+    return res.status(400).json({ success: false, error: "username or lastfmUser is required" });
+  }
+
+  const lastfm = await fetchLastfmRecentTrackAsync(lastfmHandle, { force });
+  return res.json({
+    success: true,
+    configured: Boolean(LASTFM_API_KEY),
+    linked: true,
+    lastfm,
+  });
+});
+
 app.post("/api/chat/moderate", async (req, res) => {
   try {
     const { text } = req.body || {};
@@ -5305,12 +5753,163 @@ const CHAT_UPLOAD_ALLOWED_MIMES = new Set([
   "image/gif",
 ]);
 const chatUploadedMediaCache = new LRUCache({
-  max: 120,
-  maxSize: 28 * 1024 * 1024,
-  ttl: 1000 * 60 * 60,
+  max: 180,
+  maxSize: 40 * 1024 * 1024,
+  ttl: 1000 * 60 * 60 * 6,
   ttlAutopurge: true,
   sizeCalculation: (entry) => (entry?.body?.length || 0) + 128,
 });
+
+const CHAT_MEDIA_SHARD_COUNT = 8;
+const CHAT_MEDIA_SHARD_MAX_ITEMS = 12;
+const CHAT_MEDIA_SHARD_MAX_JSON_BYTES = 2400 * 1024;
+const chatMediaShardUserIds = new Map();
+const chatMediaShardQueues = new Map();
+
+function getChatMediaShardName(id) {
+  let hash = 0;
+  const s = String(id || "");
+  for (let i = 0; i < s.length; i++) {
+    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return `${RESERVED_MEDIA_SHARD_PREFIX}${hash % CHAT_MEDIA_SHARD_COUNT}`;
+}
+
+async function withChatMediaShardLock(shardName, fn) {
+  const prev = chatMediaShardQueues.get(shardName) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  chatMediaShardQueues.set(shardName, next);
+  try {
+    return await next;
+  } finally {
+    if (chatMediaShardQueues.get(shardName) === next) {
+      chatMediaShardQueues.delete(shardName);
+    }
+  }
+}
+
+async function getChatMediaShardUserId(shardName, { createIfMissing = false } = {}) {
+  if (chatMediaShardUserIds.has(shardName)) {
+    return chatMediaShardUserIds.get(shardName);
+  }
+  const id = createIfMissing
+    ? await getOrCreateReservedSystemUserId(shardName)
+    : Number((await dbFindUserByUsername(shardName))?.id) || null;
+  if (id) chatMediaShardUserIds.set(shardName, id);
+  return id;
+}
+
+async function persistChatMediaRemoteAsync(id, entry) {
+  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return false;
+  try {
+    await ensureChatMetaReadyAsync();
+  } catch {}
+  if (isSupabaseDegraded()) return false;
+
+  if (supabaseHasAppKvTable !== false) {
+    try {
+      const res = await supabaseRest("app_kv?on_conflict=k", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          k: `chat_media_${id}`,
+          v: JSON.stringify(entry),
+          updated_at: new Date().toISOString(),
+        }),
+        timeoutMs: 9000,
+      });
+      if (res.ok) {
+        supabaseHasAppKvTable = true;
+        return true;
+      }
+      if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
+        supabaseHasAppKvTable = false;
+      } else {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  // When app_kv does not exist on Supabase (PGRST205 / cloudsync_sync mode),
+  // shard media entries across reserved system accounts in cloudsync_sync.
+  const shardName = getChatMediaShardName(id);
+  return await withChatMediaShardLock(shardName, async () => {
+    try {
+      const uid = await getChatMediaShardUserId(shardName, { createIfMissing: true });
+      if (!uid) return false;
+      const existingRow = await dbGetSyncPayload(uid);
+      let items = [];
+      if (existingRow?.payload_json) {
+        try {
+          const parsed = JSON.parse(String(existingRow.payload_json));
+          if (Array.isArray(parsed?.items)) items = parsed.items;
+        } catch {}
+      }
+      const filtered = items.filter((it) => it && it.id !== id);
+      const nextItems = [{ id, ...entry }, ...filtered].slice(0, CHAT_MEDIA_SHARD_MAX_ITEMS);
+      let serialized = JSON.stringify({ items: nextItems });
+      while (nextItems.length > 1 && serialized.length > CHAT_MEDIA_SHARD_MAX_JSON_BYTES) {
+        nextItems.pop();
+        serialized = JSON.stringify({ items: nextItems });
+      }
+      await dbUpsertSyncPayload(uid, serialized, new Date().toISOString());
+      return !isSupabaseDegraded();
+    } catch (err) {
+      console.warn("Supabase sharded chat_media write warning:", err?.message);
+      return false;
+    }
+  });
+}
+
+async function loadChatMediaRemoteAsync(id) {
+  if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return null;
+  try {
+    await ensureChatMetaReadyAsync();
+  } catch {}
+  if (isSupabaseDegraded()) return null;
+
+  if (supabaseHasAppKvTable !== false) {
+    try {
+      const { ok, status, json } = await supabaseRest(
+        `app_kv?k=eq.${encodeURIComponent(`chat_media_${id}`)}&select=v&limit=1`,
+        { timeoutMs: 8000 },
+      );
+      if (ok && Array.isArray(json) && json[0]?.v) {
+        const parsed = JSON.parse(json[0].v);
+        if (parsed?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(parsed.mime)) {
+          return parsed;
+        }
+      } else if (status === 404 || status === 400 || json?.code === "PGRST205") {
+        supabaseHasAppKvTable = false;
+      }
+    } catch {}
+  }
+
+  try {
+    const shardName = getChatMediaShardName(id);
+    const uid = await getChatMediaShardUserId(shardName, { createIfMissing: false });
+    if (!uid) return null;
+    const row = await dbGetSyncPayload(uid);
+    if (!row?.payload_json) return null;
+    const parsed = JSON.parse(String(row.payload_json));
+    if (!Array.isArray(parsed?.items)) return null;
+    const found = parsed.items.find((it) => it && it.id === id);
+    if (found?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(found.mime)) {
+      return found;
+    }
+  } catch {}
+  return null;
+}
+
+function sendChatMediaResponse(res, mime, body) {
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  return res.send(body);
+}
 
 function detectUploadedImageMime(buf) {
   if (!buf || buf.length < 12) return null;
@@ -5449,28 +6048,18 @@ app.post("/api/chat/upload-image", async (req, res) => {
         "INSERT OR REPLACE INTO chat_media (id, author, mime, data_b64, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
       ).run(id, authUser.username, detectedMime, cleanB64);
       db.query(
-        "DELETE FROM chat_media WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 400)",
+        "DELETE FROM chat_media WHERE id NOT IN (SELECT id FROM chat_media ORDER BY created_at DESC LIMIT 500)",
       ).run();
     } catch (e) {
       console.warn("SQLite chat_media store warning:", e?.message);
     }
 
-    if (USE_SUPABASE_CLOUDSYNC && supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
-      void supabaseRest("app_kv?on_conflict=k", {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({
-          k: `chat_media_${id}`,
-          v: JSON.stringify({
-            mime: detectedMime,
-            dataB64: cleanB64,
-            author: authUser.username,
-            createdAt: Date.now(),
-          }),
-        }),
-        timeoutMs: 8000,
-      }).catch(() => {});
-    }
+    await persistChatMediaRemoteAsync(id, {
+      mime: detectedMime,
+      dataB64: cleanB64,
+      author: authUser.username,
+      createdAt: Date.now(),
+    });
 
     const imageName = typeof req.body?.filename === "string"
       ? req.body.filename.trim().slice(0, 80)
@@ -5496,11 +6085,7 @@ app.get("/api/chat/media/:id", async (req, res) => {
 
   const cached = chatUploadedMediaCache.get(id);
   if (cached) {
-    res.setHeader("Content-Type", cached.mime);
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-    return res.send(cached.body);
+    return sendChatMediaResponse(res, cached.mime, cached.body);
   }
 
   try {
@@ -5509,40 +6094,25 @@ app.get("/api/chat/media/:id", async (req, res) => {
     if (row?.data_b64 && CHAT_UPLOAD_ALLOWED_MIMES.has(row.mime)) {
       const body = Buffer.from(row.data_b64, "base64");
       chatUploadedMediaCache.set(id, { body, mime: row.mime });
-      res.setHeader("Content-Type", row.mime);
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-      return res.send(body);
+      return sendChatMediaResponse(res, row.mime, body);
     }
   } catch {}
 
-  if (USE_SUPABASE_CLOUDSYNC && supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
+  const remoteMedia = await loadChatMediaRemoteAsync(id);
+  if (remoteMedia?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(remoteMedia.mime)) {
+    const body = Buffer.from(remoteMedia.dataB64, "base64");
+    chatUploadedMediaCache.set(id, { body, mime: remoteMedia.mime });
     try {
-      const { ok, json } = await supabaseRest(
-        `app_kv?k=eq.${encodeURIComponent(`chat_media_${id}`)}&select=v&limit=1`,
-        { timeoutMs: 8000 },
-      );
-      const rawVal = ok && Array.isArray(json) && json[0]?.v ? JSON.parse(json[0].v) : null;
-      if (rawVal?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(rawVal.mime)) {
-        const body = Buffer.from(rawVal.dataB64, "base64");
-        chatUploadedMediaCache.set(id, { body, mime: rawVal.mime });
-        try {
-          getSharedCloudSyncDb()
-            .query(
-              "INSERT OR REPLACE INTO chat_media (id, author, mime, data_b64, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            )
-            .run(id, String(rawVal.author || ""), rawVal.mime, rawVal.dataB64);
-        } catch {}
-        res.setHeader("Content-Type", rawVal.mime);
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-        res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-        return res.send(body);
-      }
+      getSharedCloudSyncDb()
+        .query(
+          "INSERT OR REPLACE INTO chat_media (id, author, mime, data_b64, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .run(id, String(remoteMedia.author || ""), remoteMedia.mime, remoteMedia.dataB64);
     } catch {}
+    return sendChatMediaResponse(res, remoteMedia.mime, body);
   }
 
+  res.setHeader("Cache-Control", "no-store, max-age=0");
   return res.status(404).send("Media not found");
 });
 
@@ -5665,7 +6235,7 @@ app.get(["/api/users", "/api/cloudsync/users"], async (req, res) => {
           id: Number(r.id) || 0,
           username: String(r.username || "").trim(),
           createdAt: r.created_at || r.createdAt || null,
-        })).filter((u) => u.username && u.username.toLowerCase() !== RESERVED_SYSTEM_KV_USERNAME);
+        })).filter((u) => u.username && !isReservedSystemUsername(u.username));
         const payload = {
           success: true,
           users,
@@ -5694,6 +6264,7 @@ app.get(["/api/users", "/api/cloudsync/users"], async (req, res) => {
 
 app.get("/api/chat/user-profile", async (req, res) => {
   await ensureChatMetaReadyAsync();
+  const actor = await getModActor(req);
   const rawTarget = (req.query.username || req.query.user || "").toString().trim();
   if (!rawTarget) {
     return res.status(400).json({ success: false, exists: false, error: "username is required" });
@@ -5775,6 +6346,10 @@ app.get("/api/chat/user-profile", async (req, res) => {
   const userPublishedGames = publishedStudioGames.filter(
     (g) => (g.author || "").toLowerCase() === key
   );
+  const linkedLastfmUser = sanitizeLastfmUsernameServer(prof?.customization?.lastfmUsername);
+  const lastfmState = linkedLastfmUser
+    ? await fetchLastfmRecentTrackAsync(linkedLastfmUser).catch(() => null)
+    : null;
 
   res.json({
     success: true,
@@ -5786,6 +6361,8 @@ app.get("/api/chat/user-profile", async (req, res) => {
       bio: prof.bio || "",
       statusText: prof.statusText || "",
       customization: prof.customization || null,
+      lastfmConfigured: Boolean(LASTFM_API_KEY),
+      lastfm: lastfmState,
       role: getUserChatRole(canonicalName),
       isGoat: goatUsers.has(key),
       isTimedOut: Boolean(timeoutEntry),
@@ -5811,6 +6388,12 @@ app.get("/api/chat/user-profile", async (req, res) => {
           }
         : null,
       publishedGamesCount: userPublishedGames.length,
+      ...(actor.isMod
+        ? {
+            staffNotes: getStaffNotesForUser(key),
+            staffLogs: getStaffLogsForUser(key, 60),
+          }
+        : {}),
     },
   });
 });
@@ -5851,6 +6434,7 @@ app.post("/api/chat/user-profile", async (req, res) => {
       nextCustomization.displayName,
       nextCustomization.pronouns,
       nextCustomization.customTag,
+      nextCustomization.lastfmUsername,
     ]
       .filter(Boolean)
       .join(" ");
@@ -5865,6 +6449,12 @@ app.post("/api/chat/user-profile", async (req, res) => {
       }
     }
 
+    if (nextCustomization.lastfmUsername) {
+      clearedLastfmKeys.delete(key);
+    } else {
+      clearedLastfmKeys.add(key);
+    }
+
     const updated = {
       bio: cleanBio,
       statusText: cleanStatus,
@@ -5877,6 +6467,10 @@ app.post("/api/chat/user-profile", async (req, res) => {
       awaitRemote: true,
       timeoutMs: 12000,
     });
+
+    const lastfmState = nextCustomization.lastfmUsername
+      ? await fetchLastfmRecentTrackAsync(nextCustomization.lastfmUsername, { force: true }).catch(() => null)
+      : null;
 
     // Update cached recent messages authored by this user so avatars/names reflect changes
     for (let i = 0; i < chatHistory.length; i++) {
@@ -5901,11 +6495,19 @@ app.post("/api/chat/user-profile", async (req, res) => {
         bio: cleanBio,
         statusText: cleanStatus,
         customization: nextCustomization,
+        lastfm: lastfmState,
         role,
       },
       "all",
     );
-    res.json({ success: true, profile: updated });
+    res.json({
+      success: true,
+      profile: {
+        ...updated,
+        lastfmConfigured: Boolean(LASTFM_API_KEY),
+        lastfm: lastfmState,
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -6520,6 +7122,12 @@ app.get("/api/chat/staff", async (req, res) => {
     totalUsersCount: getCloudSyncUsersCountSync(csMap),
     timeouts: timeoutsList,
     actorRole: actor.role,
+    ...(actor.isMod
+      ? {
+          recentLogs: staffActionLogs.slice(-80).reverse(),
+          recentNotes: getAllStaffNotesList(100),
+        }
+      : {}),
   });
 });
 
@@ -6572,6 +7180,13 @@ app.post("/api/chat/staff", async (req, res) => {
 
     const canonicalMods = getCanonicalStaffMods(csMap);
     const canonicalOwners = getCanonicalOwnerUsers(csMap);
+    const resolvedTarget = csMap.get(key)?.username || rawUsername;
+    recordStaffAction({
+      action: action === "add" ? "promote_mod" : "remove_mod",
+      actor,
+      targetUsername: resolvedTarget,
+      details: action === "add" ? "promoted to staff moderator" : "removed from staff",
+    });
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     broadcastToClients(
       {
@@ -6579,7 +7194,7 @@ app.post("/api/chat/staff", async (req, res) => {
         event: "STAFF_UPDATED",
         staffMods: canonicalMods,
         ownerUsers: canonicalOwners,
-        targetUsername: csMap.get(key)?.username || rawUsername,
+        targetUsername: resolvedTarget,
         role: nextRole,
       },
       "all"
@@ -6588,7 +7203,7 @@ app.post("/api/chat/staff", async (req, res) => {
     res.json({
       success: true,
       staffMods: canonicalMods,
-      targetUsername: csMap.get(key)?.username || rawUsername,
+      targetUsername: resolvedTarget,
       role: nextRole,
     });
   } catch (err) {
@@ -6644,6 +7259,12 @@ app.post("/api/chat/mod/goat", async (req, res) => {
 
     const canonicalTarget = csMap.get(key)?.username || rawUsername;
     const canonicalGoats = getCanonicalGoatUsers(csMap);
+    recordStaffAction({
+      action: shouldGrant ? "award_goat" : "remove_goat",
+      actor,
+      targetUsername: canonicalTarget,
+      details: shouldGrant ? "awarded golden GOAT title" : "removed GOAT title",
+    });
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     broadcastToClients(
       {
@@ -6696,6 +7317,22 @@ app.post("/api/chat/mod/delete-message", async (req, res) => {
       chatHistory.splice(idx, 1);
       persistChatHistory();
     }
+    if (actor.isMod && targetMsg && (!isAuthor || actor.hasAdminSecret)) {
+      const snippet = targetMsg.text
+        ? String(targetMsg.text).slice(0, 90)
+        : targetMsg.imageUrl
+        ? "[image attachment]"
+        : targetMsg.gifUrl
+        ? "[gif]"
+        : "[message]";
+      recordStaffAction({
+        action: "delete_message",
+        actor,
+        targetUsername: targetMsg.author || "",
+        channel: targetMsg.channel || "",
+        details: snippet,
+      });
+    }
 
     broadcastChatPayload(targetMsg?.channel || "", {
       type: "chat-event",
@@ -6740,6 +7377,14 @@ app.post("/api/chat/mod/clear-channel", async (req, res) => {
       }
     }
     if (removed > 0) persistChatHistory();
+
+    recordStaffAction({
+      action: "purge_messages",
+      actor,
+      targetUsername,
+      channel,
+      details: `cleared ${removed} message(s)${channel ? ` in #${channel}` : ""}`,
+    });
 
     broadcastToClients(
       {
@@ -6794,6 +7439,21 @@ app.post("/api/chat/mod/timeout", async (req, res) => {
     }
     persistChatTimeouts();
 
+    const durationLabel =
+      durationMinutes === 0
+        ? "unmuted user"
+        : durationMinutes < 0 || durationMinutes >= 525600
+        ? "permanent mute"
+        : durationMinutes >= 60
+        ? `muted ${Math.round(durationMinutes / 60)}h`
+        : `muted ${durationMinutes}m`;
+    recordStaffAction({
+      action: durationMinutes === 0 ? "unmute" : "timeout",
+      actor,
+      targetUsername,
+      details: reason ? `${durationLabel} · ${reason}` : durationLabel,
+    });
+
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
     broadcastToClients(
       {
@@ -6813,6 +7473,169 @@ app.post("/api/chat/mod/timeout", async (req, res) => {
       username: targetUsername,
       until: entry ? entry.until : 0,
       reason,
+      userLogs: getStaffLogsForUser(targetKey, 60),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Staff-only audit logs and private moderation notes on users (never exposed to non-staff)
+const ALLOWED_STAFF_NOTE_CATEGORIES = new Set(["general", "warning", "watch", "positive"]);
+
+app.get("/api/chat/mod/logs", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const actor = await getModActor(req);
+  if (!actor.isMod) {
+    return res.status(403).json({ success: false, error: "Staff or admin access required" });
+  }
+  const filterUser = String(req.query.username || "").trim().replace(/^@/, "").toLowerCase();
+  const limitRaw = parseInt(String(req.query.limit || "100"), 10);
+  const limit = Number.isFinite(limitRaw) ? Math.min(250, Math.max(1, limitRaw)) : 100;
+  const logs = filterUser
+    ? getStaffLogsForUser(filterUser, limit)
+    : staffActionLogs.slice(-limit).reverse();
+  res.json({ success: true, logs });
+});
+
+app.get("/api/chat/mod/notes", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const actor = await getModActor(req);
+  if (!actor.isMod) {
+    return res.status(403).json({ success: false, error: "Staff or admin access required" });
+  }
+  const rawUser = String(req.query.username || "").trim().replace(/^@/, "");
+  if (rawUser) {
+    const key = rawUser.toLowerCase();
+    return res.json({
+      success: true,
+      username: rawUser,
+      notes: getStaffNotesForUser(key),
+    });
+  }
+  res.json({
+    success: true,
+    recentNotes: getAllStaffNotesList(120),
+  });
+});
+
+app.post("/api/chat/mod/notes", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff or admin access required" });
+    }
+    const rawUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const noteText = String(req.body?.note || "").trim().slice(0, 400);
+    const rawCat = String(req.body?.category || "general").trim().toLowerCase();
+    const category = ALLOWED_STAFF_NOTE_CATEGORIES.has(rawCat) ? rawCat : "general";
+
+    if (!rawUsername || rawUsername.length > 40) {
+      return res.status(400).json({ success: false, error: "Valid target username is required" });
+    }
+    if (!noteText) {
+      return res.status(400).json({ success: false, error: "Note text cannot be empty" });
+    }
+
+    const key = rawUsername.toLowerCase();
+    let csMap = await getCloudSyncUsersMapAsync();
+    if (csMap.size > 0 && !csMap.has(key)) {
+      ({ csMap } = await ensureCloudSyncUserInMap(rawUsername));
+    }
+    if (csMap.size > 0 && !csMap.has(key) && !knownUsers.has(key)) {
+      return res.status(404).json({
+        success: false,
+        error: `User "@${rawUsername}" not found in CloudSync`,
+      });
+    }
+
+    const canonicalTarget = csMap.get(key)?.username || rawUsername;
+    const entry = {
+      id: `snote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      targetUsername: canonicalTarget,
+      author: actor.username || "staff",
+      authorRole: actor.role || "mod",
+      note: noteText,
+      category,
+      createdAt: Date.now(),
+    };
+    const existing = staffUserNotes.get(key) || [];
+    const nextList = [entry, ...existing].slice(0, MAX_NOTES_PER_USER);
+    staffUserNotes.set(key, nextList);
+    persistStaffUserNotes();
+
+    recordStaffAction({
+      action: "note_added",
+      actor,
+      targetUsername: canonicalTarget,
+      details: `[${category}] ${noteText.slice(0, 120)}`,
+    });
+
+    res.status(201).json({
+      success: true,
+      note: entry,
+      notes: nextList,
+      userLogs: getStaffLogsForUser(key, 60),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/chat/mod/notes/:noteId", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff or admin access required" });
+    }
+    const noteId = String(req.params.noteId || "").trim();
+    if (!noteId) {
+      return res.status(400).json({ success: false, error: "noteId required" });
+    }
+
+    let foundKey = "";
+    let removedEntry = null;
+    const hintKey = String(req.query.username || req.body?.username || "")
+      .trim()
+      .replace(/^@/, "")
+      .toLowerCase();
+    const keysToScan = hintKey ? [hintKey] : Array.from(staffUserNotes.keys());
+
+    for (const uk of keysToScan) {
+      const list = staffUserNotes.get(uk);
+      if (!Array.isArray(list)) continue;
+      const idx = list.findIndex((n) => n && n.id === noteId);
+      if (idx >= 0) {
+        foundKey = uk;
+        removedEntry = list[idx];
+        const nextList = list.filter((n) => n && n.id !== noteId);
+        if (nextList.length > 0) staffUserNotes.set(uk, nextList);
+        else staffUserNotes.delete(uk);
+        break;
+      }
+    }
+
+    if (!removedEntry) {
+      return res.status(404).json({ success: false, error: "Staff note not found" });
+    }
+
+    deletedStaffNoteIds.add(noteId);
+    persistStaffUserNotes({ includeTombstones: true });
+
+    recordStaffAction({
+      action: "note_deleted",
+      actor,
+      targetUsername: removedEntry.targetUsername || foundKey,
+      details: `removed [${removedEntry.category || "general"}] note`,
+    });
+
+    res.json({
+      success: true,
+      noteId,
+      notes: getStaffNotesForUser(foundKey),
+      userLogs: getStaffLogsForUser(foundKey, 60),
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

@@ -69,10 +69,33 @@ export type BioStyleId = "frosted" | "minimal" | "neon-border" | "accent-tint";
 
 export type ChatRole = "owner" | "mod" | "member";
 
+export interface LastfmTrackInfo {
+  name: string;
+  artist: string;
+  album: string;
+  albumArt: string;
+  url: string;
+  nowPlaying: boolean;
+  scrobbledAt: number;
+}
+
+export interface LastfmProfileState {
+  username: string;
+  configured: boolean;
+  found: boolean;
+  privateProfile?: boolean;
+  nowPlaying: boolean;
+  track: LastfmTrackInfo | null;
+  profileUrl: string;
+  fetchedAt?: number;
+  error?: string;
+}
+
 export interface ProfileCustomization {
   displayName: string;
   pronouns: string;
   customTag: string;
+  lastfmUsername: string;
   avatarUrl: string;
   bannerUrl: string;
   decorationUrl: string;
@@ -314,12 +337,22 @@ function pickId<T extends string>(
   return options.some((o) => o.id === raw) ? (raw as T) : fallback;
 }
 
+export function sanitizeLastfmUsername(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  let s = raw.trim();
+  const urlMatch = /^https?:\/\/(?:www\.)?last\.fm\/user\/([^/?#]+)/i.exec(s);
+  if (urlMatch && urlMatch[1]) s = urlMatch[1];
+  s = s.replace(/^@+/, "");
+  return s.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 32);
+}
+
 export function getDefaultCustomization(username = ""): ProfileCustomization {
   const baseColor = username ? fallbackAvatarColor(username) : "#6366f1";
   return {
     displayName: "",
     pronouns: "",
     customTag: "",
+    lastfmUsername: "",
     avatarUrl: "",
     bannerUrl: "",
     decorationUrl: "",
@@ -363,6 +396,7 @@ export function sanitizeCustomization(
       typeof obj.pronouns === "string" ? obj.pronouns.trim().slice(0, 24) : "",
     customTag:
       typeof obj.customTag === "string" ? obj.customTag.trim().slice(0, 18) : "",
+    lastfmUsername: sanitizeLastfmUsername(obj.lastfmUsername),
     avatarUrl: isValidCustomMediaUrl(obj.avatarUrl) ? obj.avatarUrl.trim() : "",
     bannerUrl: isValidCustomMediaUrl(obj.bannerUrl) ? obj.bannerUrl.trim() : "",
     decorationUrl: isValidCustomMediaUrl(obj.decorationUrl) ? obj.decorationUrl.trim() : "",

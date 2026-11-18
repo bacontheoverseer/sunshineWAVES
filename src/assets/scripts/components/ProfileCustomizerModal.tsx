@@ -9,13 +9,16 @@ import {
   COLOR_SWATCHES,
   CUSTOM_TAG_PRESETS,
   ChatRole,
+  LastfmProfileState,
   NAME_FONTS,
   NAME_STYLES,
   ProfileCustomization,
   getBannerInlineStyle,
   getDefaultCustomization,
   getSafeMediaProxySrc,
+  sanitizeLastfmUsername,
 } from "../core/profileCustomization.ts";
+import LastfmListeningCard from "./LastfmListeningCard.tsx";
 import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
 import {
   GoatBadge,
@@ -82,6 +85,8 @@ export default function ProfileCustomizerModal({
   const [cropDraft, setCropDraft] = useState<{ kind: "avatar" | "banner"; src: string } | null>(
     null
   );
+  const [lastfmPreview, setLastfmPreview] = useState<LastfmProfileState | null>(null);
+  const [lastfmPreviewLoading, setLastfmPreviewLoading] = useState(false);
 
   const avatarFileRef = useRef<HTMLInputElement>(null);
   const bannerFileRef = useRef<HTMLInputElement>(null);
@@ -94,6 +99,52 @@ export default function ProfileCustomizerModal({
     setBio(initialBio);
     setStatusText(initialStatusText);
   }, [initialCustom, initialBio, initialStatusText]);
+
+  // Live-fetch Last.fm track preview whenever custom.lastfmUsername changes
+  useEffect(() => {
+    const handle = sanitizeLastfmUsername(custom.lastfmUsername);
+    if (!handle) {
+      setLastfmPreview(null);
+      setLastfmPreviewLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLastfmPreviewLoading(true);
+    const t = window.setTimeout(() => {
+      fetch(`/api/chat/lastfm?lastfmUser=${encodeURIComponent(handle)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled && data?.lastfm) setLastfmPreview(data.lastfm);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setLastfmPreviewLoading(false);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [custom.lastfmUsername]);
+
+  const refreshLastfmPreview = async () => {
+    const handle = sanitizeLastfmUsername(custom.lastfmUsername);
+    if (!handle) return;
+    setLastfmPreviewLoading(true);
+    try {
+      const res = await fetch(
+        `/api/chat/lastfm?lastfmUser=${encodeURIComponent(handle)}&force=1`,
+        { cache: "no-store" },
+      );
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.lastfm) setLastfmPreview(data.lastfm);
+      }
+    } catch {}
+    finally {
+      setLastfmPreviewLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!gifPickerFor) return;
@@ -152,7 +203,10 @@ export default function ProfileCustomizerModal({
         updateField(kind === "avatar" ? "avatarUrl" : "bannerUrl", dataUrl);
         return;
       }
-      if (!file.type.startsWith("image/")) {
+      if (
+        !file.type.startsWith("image/") &&
+        !/\.(png|jpe?g|webp|bmp|avif|gif|jfif)$/i.test(file.name)
+      ) {
         throw new Error("Please select an image file");
       }
       const rawDataUrl = await new Promise<string>((resolve, reject) => {
@@ -205,6 +259,7 @@ export default function ProfileCustomizerModal({
                 setCustom(getDefaultCustomization(username));
                 setBio("");
                 setStatusText("");
+                setLastfmPreview(null);
               }}
             >
               reset defaults
@@ -386,6 +441,44 @@ export default function ProfileCustomizerModal({
                         {st}
                       </button>
                     ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "4px" }}>
+                    last.fm listening (live music on profile)
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                    <input
+                      type="text"
+                      class="chat-mod-input"
+                      placeholder="last.fm username or profile url..."
+                      maxLength={80}
+                      value={custom.lastfmUsername}
+                      onInput={(e) => {
+                        const raw = (e.target as HTMLInputElement).value;
+                        updateField("lastfmUsername", sanitizeLastfmUsername(raw));
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="chat-style-chip"
+                      disabled={!sanitizeLastfmUsername(custom.lastfmUsername) || lastfmPreviewLoading}
+                      onClick={() => void refreshLastfmPreview()}
+                      title="Fetch latest Last.fm track"
+                    >
+                      {lastfmPreviewLoading ? "..." : "test"}
+                    </button>
+                    {custom.lastfmUsername && (
+                      <button
+                        type="button"
+                        class="chat-style-chip"
+                        onClick={() => updateField("lastfmUsername", "")}
+                        title="Unlink Last.fm"
+                      >
+                        unlink
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -872,6 +965,15 @@ export default function ProfileCustomizerModal({
                       <div class="chat-profile-custom-status">{statusText}</div>
                     )}
                   </div>
+
+                  <LastfmListeningCard
+                    lastfmUsername={custom.lastfmUsername}
+                    lastfm={lastfmPreview}
+                    loading={lastfmPreviewLoading}
+                    refreshing={lastfmPreviewLoading}
+                    onRefresh={() => void refreshLastfmPreview()}
+                    compact
+                  />
 
                   <div class={`chat-profile-section chat-profile-bio-card ${bioClass}`}>
                     <div class="chat-profile-bio-text">
