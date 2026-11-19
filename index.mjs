@@ -2884,8 +2884,9 @@ function unmarkDeletedUsername(username) {
   }
 }
 
-function mirrorLocalUserRecord({ username, passwordHash = "", tokenVersion = 1 }) {
+function mirrorLocalUserRecord({ id = 0, username, passwordHash = "", tokenVersion = 1 }) {
   const clean = String(username || "").trim();
+  const numId = Number(id) || 0;
   if (!clean || isReservedSystemUsername(clean)) return null;
   const db = openCloudSyncDb(false);
   try {
@@ -2904,6 +2905,18 @@ function mirrorLocalUserRecord({ username, passwordHash = "", tokenVersion = 1 }
       return Number(existing.id);
     }
     if (!passwordHash) return null;
+    if (numId > 0) {
+      const byId = db.query("SELECT id FROM users WHERE id = ?").get(numId);
+      if (!byId) {
+        db.query("INSERT INTO users (id, username, password_hash, token_version) VALUES (?, ?, ?, ?)").run(
+          numId,
+          clean,
+          passwordHash,
+          Number(tokenVersion || 1),
+        );
+        return numId;
+      }
+    }
     const res = db
       .query("INSERT INTO users (username, password_hash, token_version) VALUES (?, ?, ?)")
       .run(clean, passwordHash, Number(tokenVersion || 1));
@@ -2946,8 +2959,6 @@ function saveRegisteredUsersDirCache(rows) {
       if (id > 0 && incomingById.has(id)) {
         const fresh = incomingById.get(id);
         if (fresh.username.toLowerCase() !== k && !incomingKeys.has(k)) {
-          // User renamed in Supabase (same id, new username) -> drop stale cached record & remember alias
-          staleUsernameAliases.set(k, { id: fresh.id, username: fresh.username });
           continue;
         }
       }
@@ -3010,7 +3021,6 @@ function collectFallbackUserRows(primaryRows = []) {
     if (!isPrimary && numId > 0 && primaryById.has(numId)) {
       const fresh = primaryById.get(numId);
       if (fresh.username.toLowerCase() !== k && !primaryKeys.has(k)) {
-        staleUsernameAliases.set(k, { id: fresh.id, username: fresh.username });
         return;
       }
     }
@@ -3137,14 +3147,20 @@ async function dbFindUserByUsername(username, { includePasswordHash = false } = 
       const selectCols = includePasswordHash
         ? "id,username,password_hash,token_version"
         : "id,username,token_version";
-      const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?or=(username_lower.eq.${encodeURIComponent(lower)},username.ilike.${encodeURIComponent(clean)})&select=${selectCols}&limit=1`
+      let { ok, status, json, text } = await supabaseRest(
+        `cloudsync_users?or=(username_lower.eq.${encodeURIComponent(lower)},username.eq.${encodeURIComponent(clean)},username.ilike.${encodeURIComponent(clean)})&select=${selectCols}&limit=1`
       );
+      if (!ok && status === 400) {
+        ({ ok, status, json, text } = await supabaseRest(
+          `cloudsync_users?username=ilike.${encodeURIComponent(clean)}&select=${selectCols}&limit=1`
+        ));
+      }
       if (!ok) throw new Error(`Supabase select username failed (${status}): ${text}`);
       const row = Array.isArray(json) && json[0] ? json[0] : null;
       if (row) {
         cacheCloudSyncUserRecord(row);
         mirrorLocalUserRecord({
+          id: row.id,
           username: row.username,
           passwordHash: row.password_hash,
           tokenVersion: row.token_version,
@@ -4078,9 +4094,65 @@ function getCloudSyncUsersMap(forceRefresh = false) {
 }
 
 // Single-row indexed lookup for an uncached @username (replaces full-table rescans!)
+function findKnownOrDisplayNameUser(rawInput, csMap) {
+  const clean = String(rawInput || "").trim().replace(/^@/, "");
+  const key = clean.toLowerCase();
+  if (!clean || isReservedSystemUsername(clean) || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key)) {
+    return null;
+  }
+  if (csMap && csMap.has(key)) {
+    return csMap.get(key);
+  }
+  const byNameCached = cloudSyncUserByNameCache.get(key);
+  if (byNameCached && byNameCached.username) {
+    return {
+      id: Number(byNameCached.id) || 0,
+      username: String(byNameCached.username).trim(),
+      createdAt: byNameCached.created_at || null,
+    };
+  }
+  // Check active live SSE clients & HTTP heartbeats
+  for (const c of liveClients.values()) {
+    const u = String(c?.verifiedUsername || c?.username || "").trim();
+    if (u && u.toLowerCase() === key && !isTemporaryGuestName(u)) {
+      return { id: Number(c?.userId) || 0, username: u, createdAt: null };
+    }
+  }
+  for (const hb of httpHeartbeats.values()) {
+    const u = String(hb?.verifiedUsername || hb?.username || "").trim();
+    if (u && u.toLowerCase() === key && !isTemporaryGuestName(u)) {
+      return { id: Number(hb?.userId) || 0, username: u, createdAt: null };
+    }
+  }
+  // Check knownUsers, userProfiles, staff/owners/goats, and chatHistory
+  if (knownUsers.has(key)) {
+    const ku = knownUsers.get(key);
+    return { id: 0, username: ku?.username || clean, createdAt: null };
+  }
+  if (userProfiles.has(key) || OWNER_USERNAMES.has(key) || staffModerators.has(key) || goatUsers.has(key)) {
+    return { id: 0, username: clean, createdAt: null };
+  }
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const author = String(chatHistory[i]?.author || "").trim();
+    if (author && author.toLowerCase() === key && !isTemporaryGuestName(author)) {
+      return { id: 0, username: author, createdAt: null };
+    }
+  }
+  // Check if the query matches a user's custom displayName in userProfiles
+  for (const [profKey, prof] of userProfiles.entries()) {
+    const dName = String(prof?.customization?.displayName || "").trim();
+    if (dName && dName.toLowerCase() === key && !getDeletedUsersSet().has(profKey)) {
+      if (csMap && csMap.has(profKey)) return csMap.get(profKey);
+      const ku = knownUsers.get(profKey);
+      return { id: 0, username: ku?.username || profKey, createdAt: null };
+    }
+  }
+  return null;
+}
+
 async function ensureCloudSyncUserInMap(username) {
   const csMap = await getCloudSyncUsersMapAsync().catch(() => getCloudSyncUsersMap());
-  const clean = String(username || "").trim();
+  const clean = String(username || "").trim().replace(/^@/, "");
   const key = clean.toLowerCase();
   if (!clean || isReservedSystemUsername(clean) || isTemporaryGuestName(clean) || getDeletedUsersSet().has(key)) {
     return { csMap, user: null };
@@ -4089,13 +4161,19 @@ async function ensureCloudSyncUserInMap(username) {
     return { csMap, user: csMap.get(key) };
   }
   const now = Date.now();
-  if (now < (missingUserLookupCache.get(key) || 0) || (USE_SUPABASE_CLOUDSYNC && isSupabaseDegraded())) {
+  if (now < (missingUserLookupCache.get(key) || 0)) {
+    const fallbackKnown = findKnownOrDisplayNameUser(clean, csMap);
+    if (fallbackKnown) {
+      csMap.set(fallbackKnown.username.toLowerCase(), fallbackKnown);
+      return { csMap, user: fallbackKnown };
+    }
     return { csMap, user: null };
   }
   if (singleUserLookupInFlight.has(key)) {
     await singleUserLookupInFlight.get(key);
     const updatedMap = getCloudSyncUsersMap();
-    return { csMap: updatedMap, user: updatedMap.get(key) || null };
+    const resolved = updatedMap.get(key) || findKnownOrDisplayNameUser(clean, updatedMap);
+    return { csMap: updatedMap, user: resolved || null };
   }
   const lookupPromise = (async () => {
     try {
@@ -4104,10 +4182,17 @@ async function ensureCloudSyncUserInMap(username) {
         upsertUserInCaches({ id: row.id, username: row.username });
         return row;
       }
-      missingUserLookupCache.set(key, Date.now() + 30_000);
+      const fallbackKnown = findKnownOrDisplayNameUser(clean, csMap);
+      if (fallbackKnown) {
+        upsertUserInCaches({ id: fallbackKnown.id || 0, username: fallbackKnown.username });
+        return fallbackKnown;
+      }
+      if (!isSupabaseDegraded()) {
+        missingUserLookupCache.set(key, Date.now() + 5_000);
+      }
       return null;
     } catch {
-      return null;
+      return findKnownOrDisplayNameUser(clean, csMap);
     } finally {
       singleUserLookupInFlight.delete(key);
     }
@@ -4115,12 +4200,16 @@ async function ensureCloudSyncUserInMap(username) {
   singleUserLookupInFlight.set(key, lookupPromise);
   const foundRow = await lookupPromise;
   const latestMap = getCloudSyncUsersMap();
-  if (foundRow && foundRow.username && !latestMap.has(key)) {
-    latestMap.set(key, {
-      id: Number(foundRow.id) || 0,
-      username: String(foundRow.username).trim(),
-      createdAt: foundRow.created_at || null,
-    });
+  if (foundRow && foundRow.username) {
+    const foundKey = String(foundRow.username).trim().toLowerCase();
+    if (!latestMap.has(foundKey)) {
+      latestMap.set(foundKey, {
+        id: Number(foundRow.id) || 0,
+        username: String(foundRow.username).trim(),
+        createdAt: foundRow.created_at || foundRow.createdAt || null,
+      });
+    }
+    return { csMap: latestMap, user: latestMap.get(foundKey) || null };
   }
   return { csMap: latestMap, user: latestMap.get(key) || null };
 }
@@ -6651,7 +6740,8 @@ app.get("/api/chat/user-profile", async (req, res) => {
   }
 
   const canonicalName = csUser ? csUser.username : rawTarget;
-  let prof = userProfiles.get(key) || {};
+  const canonicalKey = canonicalName.toLowerCase();
+  let prof = userProfiles.get(canonicalKey) || userProfiles.get(key) || {};
   // Egress guard: once app_kv (user_profiles_v2) is hydrated in RAM, only check an already-cached cloudsync_sync blob
   // in RAM (or run if remote KV has not hydrated yet) — never trigger a live Supabase save-file download on profile clicks!
   if (

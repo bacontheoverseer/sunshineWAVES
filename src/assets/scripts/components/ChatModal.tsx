@@ -1270,7 +1270,8 @@ export default function ChatModal() {
           if (data?.profile) {
             const fetchedName = String(data.profile.username || "").trim();
             if (fetchedName && fetchedName.toLowerCase() !== cleanLower) {
-              return;
+              viewingProfileRef.current = fetchedName;
+              setViewingProfileUsername(fetchedName);
             }
             setProfileData(data.profile);
             if (cloudUser && cleanLower === cloudUser.toLowerCase()) {
@@ -1567,55 +1568,45 @@ export default function ChatModal() {
 
       // Verify target user exists in the CloudSync database before allowing DM
       let canonicalTarget = clean;
-      if (registeredCloudSyncUsers.length > 0) {
-        const foundInRegistry = registeredCloudSyncUsers.find(
-          (u) => u.toLowerCase() === peerLower
-        );
-        if (!foundInRegistry) {
-          // Double-check live with server in case user just registered seconds ago
-          try {
-            const checkRes = await fetch(
-              `/api/chat/user-profile?username=${encodeURIComponent(clean)}`
-            );
-            const checkData = await checkRes.json().catch(() => null);
-            if (!checkData || checkData.exists === false) {
-              notifyToast(
-                `user "@${clean}" does not exist in cloudsync`,
-                "error"
-              );
-              return;
-            }
-            if (checkData.profile?.username) {
-              canonicalTarget = checkData.profile.username;
-            }
-          } catch {
-            notifyToast(`user "@${clean}" does not exist in cloudsync`, "error");
-            return;
-          }
-        } else {
-          canonicalTarget = foundInRegistry;
-        }
+      const foundInOnlineOrMeta =
+        serverOnlineUsers.find(
+          (u) =>
+            u.username.toLowerCase() === peerLower ||
+            u.customization?.displayName?.trim().toLowerCase() === peerLower
+        )?.username ||
+        serverOfflineUsers.find(
+          (u) =>
+            u.username.toLowerCase() === peerLower ||
+            u.customization?.displayName?.trim().toLowerCase() === peerLower
+        )?.username ||
+        registeredCloudSyncUsers.find((u) => u.toLowerCase() === peerLower);
+
+      if (foundInOnlineOrMeta) {
+        canonicalTarget = foundInOnlineOrMeta;
       } else {
         try {
           const checkRes = await fetch(
             `/api/chat/user-profile?username=${encodeURIComponent(clean)}`
           );
           const checkData = await checkRes.json().catch(() => null);
-          if (checkData && checkData.exists === false) {
+          if (!checkData || checkData.exists === false) {
             notifyToast(
-              checkData.error || `user "@${clean}" does not exist in cloudsync`,
+              checkData?.error || `user "@${clean}" does not exist in cloudsync`,
               "error"
             );
             return;
           }
-          if (checkData?.profile?.username) {
+          if (checkData.profile?.username) {
             canonicalTarget = checkData.profile.username;
           }
-        } catch {}
+        } catch {
+          notifyToast(`user "@${clean}" does not exist in cloudsync`, "error");
+          return;
+        }
       }
 
       setDmPeers((prev) => {
-        if (prev.some((p) => p.toLowerCase() === peerLower)) return prev;
+        if (prev.some((p) => p.toLowerCase() === canonicalTarget.toLowerCase())) return prev;
         const next = [canonicalTarget, ...prev];
         try {
           localStorage.setItem("cookie_chat_dm_peers_v1", JSON.stringify(next));
@@ -1627,7 +1618,14 @@ export default function ChatModal() {
       closeUserProfile();
       setUnreadCounts((prev) => ({ ...prev, [dmChannel]: 0 }));
     },
-    [cloudUser, registeredCloudSyncUsers, openUserProfile, closeUserProfile]
+    [
+      cloudUser,
+      serverOnlineUsers,
+      serverOfflineUsers,
+      registeredCloudSyncUsers,
+      openUserProfile,
+      closeUserProfile,
+    ]
   );
 
   // Sync audio element volumes and mute states when deafened / blocked / volume slider changes
