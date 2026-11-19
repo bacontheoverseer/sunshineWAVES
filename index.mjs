@@ -654,12 +654,25 @@ function decodeHttpProxyTarget(reqUrl) {
   if (!baseDecoded) return null;
 
   try {
+    let baseForResolution = baseDecoded;
+    if (subPath && !subPath.startsWith("/")) {
+      try {
+        const parsedBase = new URL(baseDecoded);
+        if (!parsedBase.pathname.endsWith("/")) {
+          const lastSeg = parsedBase.pathname.split("/").pop() || "";
+          if (!lastSeg.includes(".")) {
+            parsedBase.pathname += "/";
+            baseForResolution = parsedBase.href;
+          }
+        }
+      } catch {}
+    }
     const targetObj = subPath
-      ? new URL(subPath, baseDecoded)
+      ? new URL(subPath, baseForResolution)
       : new URL(baseDecoded);
     if (searchPart) {
       if (subPath) {
-        return new URL(subPath + searchPart, baseDecoded).href;
+        return new URL(subPath + searchPart, baseForResolution).href;
       }
       const incomingParams = new URLSearchParams(searchPart.slice(1));
       for (const key of new Set(incomingParams.keys())) {
@@ -701,8 +714,7 @@ function enc(u){
 if(!u)return u;var s=String(u).trim();
 if(!s||s.charAt(0)==="#"||s.indexOf("/p/")===0||s.indexOf("/!!/")===0||/^(?:data|blob|javascript|mailto|tel|sms|about):/i.test(s))return u;
 try{
-var b=s.charAt(0)==="/"?(function(){try{return new URL(R).origin+s}catch(e){return s}})():s;
-var ab=new URL(b,R);if(ab.protocol!=="http:"&&ab.protocol!=="https:")return u;
+var ab=new URL(s,R);if(ab.protocol!=="http:"&&ab.protocol!=="https:")return u;
 var p=encodeURIComponent(ab.href),bytes=new TextEncoder().encode(p),out=new Uint8Array(bytes.length);
 for(var i=0;i<bytes.length;i++)out[i]=bytes[i]^K.charCodeAt(i%K.length);
 var bin="";for(var j=0;j<out.length;j++)bin+=String.fromCharCode(out[j]);
@@ -1309,6 +1321,21 @@ const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
 const goatUsers = new Set(); // Set<usernameLower> - golden GOAT title honorees
 const chatTimeouts = new Map(); // usernameLower -> { until, reason, by, updatedAt }
 const chatGroups = new Map(); // groupId -> { id, name, creator, members, createdAt }
+const DEFAULT_CHAT_CHANNELS = [
+  { id: "rules", name: "rules", icon: "fa-book", categoryId: "info", categoryLabel: "info", visibility: "all", writeAccess: "staff" },
+  { id: "announcements", name: "announcements", icon: "fa-bullhorn", categoryId: "info", categoryLabel: "info", visibility: "all", writeAccess: "staff" },
+  { id: "updates", name: "updates", icon: "fa-sparkles", categoryId: "info", categoryLabel: "info", visibility: "all", writeAccess: "all" },
+  { id: "staff-chat", name: "staff-chat", icon: "fa-user-shield", categoryId: "staff", categoryLabel: "staff", visibility: "staff", writeAccess: "staff" },
+  { id: "general", name: "general", icon: "fa-hashtag", categoryId: "social", categoryLabel: "social", visibility: "all", writeAccess: "all" },
+  { id: "introductions", name: "introductions", icon: "fa-hashtag", categoryId: "social", categoryLabel: "social", visibility: "all", writeAccess: "all" },
+  { id: "off-topic", name: "off-topic", icon: "fa-hashtag", categoryId: "social", categoryLabel: "social", visibility: "all", writeAccess: "all" },
+  { id: "games", name: "games", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "anime", name: "anime", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "music", name: "music", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "tech", name: "tech", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "help", name: "help", icon: "fa-hashtag", categoryId: "support", categoryLabel: "support", visibility: "all", writeAccess: "all" },
+];
+const chatChannels = DEFAULT_CHAT_CHANNELS.map((c) => ({ ...c }));
 const staffActionLogs = []; // Array<{ id, timestamp, action, actor, actorRole, targetUsername, channel, details }>
 const staffUserNotes = new Map(); // usernameLower -> Array<{ id, targetUsername, author, authorRole, note, category, createdAt }>
 const deletedStaffNoteIds = new Set(); // Set<noteId>
@@ -1430,6 +1457,7 @@ const CHAT_META_KV_KEYS = [
   "user_profiles_v2",
   "chat_timeouts_v1",
   "chat_groups_v1",
+  "chat_channels_v1",
   "chat_history_v1",
   "staff_action_logs_v1",
   "staff_user_notes_v1",
@@ -2009,7 +2037,15 @@ function recoverProfilesFromLocalSqliteAndHistory() {
 }
 
 async function recoverMissingProfilesFromSupabaseSyncAsync() {
-  if (!USE_SUPABASE_CLOUDSYNC || !hasLoadedRemoteKvSuccessfully || isSupabaseDegraded() || supabaseProfilesBackfillStarted) {
+  // Egress guard: once remote user_profiles_v2 is hydrated in RAM, only run batch recovery if userProfiles is completely empty
+  if (
+    !USE_SUPABASE_CLOUDSYNC ||
+    !hasLoadedRemoteKvSuccessfully ||
+    isSupabaseDegraded() ||
+    supabaseProfilesBackfillStarted ||
+    userProfiles.size > 0
+  ) {
+    supabaseProfilesBackfillStarted = true;
     return 0;
   }
   supabaseProfilesBackfillStarted = true;
@@ -2133,6 +2169,37 @@ function applyChatMetaKvMap(kvMap) {
       }
     }
   }
+  const storedChannels = kvMap.chat_channels_v1;
+  if (Array.isArray(storedChannels) && storedChannels.length > 0) {
+    const sanitized = storedChannels
+      .filter((c) => c && typeof c === "object" && c.id && c.name)
+      .map((c) => ({
+        id: String(c.id).trim().slice(0, 40),
+        name: String(c.name).trim().slice(0, 32),
+        icon: String(c.icon || "fa-hashtag").trim().slice(0, 40) || "fa-hashtag",
+        categoryId: String(c.categoryId || "social").trim().slice(0, 32) || "social",
+        categoryLabel: String(c.categoryLabel || c.categoryId || "social").trim().slice(0, 32) || "social",
+        visibility: c.visibility === "staff" ? "staff" : "all",
+        writeAccess: c.writeAccess === "staff" ? "staff" : "all",
+        ...(c.createdAt ? { createdAt: Number(c.createdAt) } : {}),
+        ...(c.updatedAt ? { updatedAt: Number(c.updatedAt) } : {}),
+        ...(c.updatedBy ? { updatedBy: String(c.updatedBy) } : {}),
+      }));
+    if (sanitized.length > 0) {
+      chatChannels.splice(0, chatChannels.length, ...sanitized);
+      if (!chatChannels.some((c) => c.id === "staff-chat")) {
+        chatChannels.splice(3, 0, {
+          id: "staff-chat",
+          name: "staff-chat",
+          icon: "fa-user-shield",
+          categoryId: "staff",
+          categoryLabel: "staff",
+          visibility: "staff",
+          writeAccess: "staff",
+        });
+      }
+    }
+  }
   const sGames = kvMap[STUDIO_GAMES_KV_KEY];
   if (Array.isArray(sGames)) {
     const mergedGames = mergeStudioGamesLists(publishedStudioGames, sGames);
@@ -2193,6 +2260,7 @@ function ensureChatMetaLoaded() {
     chat_timeouts_v1: kvGetJson("chat_timeouts_v1", {}),
     chat_history_v1: kvGetJson("chat_history_v1", []),
     chat_groups_v1: kvGetJson("chat_groups_v1", {}),
+    chat_channels_v1: kvGetJson("chat_channels_v1", []),
     staff_action_logs_v1: kvGetJson("staff_action_logs_v1", []),
     staff_user_notes_v1: kvGetJson("staff_user_notes_v1", {}),
     staff_user_notes_deleted_v1: kvGetJson("staff_user_notes_deleted_v1", []),
@@ -2229,11 +2297,12 @@ async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
   if (val === null || val === undefined) return { ok: false };
 
   // Never overwrite remote Supabase app_kv before initial remote load succeeds!
-  // If remote hasn't been hydrated yet, fetch & deep-merge the remote key first, or block the write if remote fails.
+  // Once startup hydration has loaded app_kv into RAM (hasLoadedRemoteKvSuccessfully === true),
+  // RAM is the single source of truth on the server—so we NEVER re-download app_kv from Supabase on writes (zero GET egress).
   if (!hasLoadedRemoteKvSuccessfully) {
     await ensureChatMetaReadyAsync();
   }
-  if (!hasLoadedRemoteKvSuccessfully || k === "user_profiles_v2") {
+  if (!hasLoadedRemoteKvSuccessfully) {
     const remoteVal = await fetchSupabaseKvKeyAsync(k, { timeoutMs: Math.min(timeoutMs, 12000) });
     if (remoteVal === undefined) {
       if (!hasLoadedRemoteKvSuccessfully) {
@@ -2369,7 +2438,8 @@ async function ensureChatMetaReadyAsync() {
         if (fetchSucceeded) {
           hasLoadedRemoteKvSuccessfully = true;
           supabaseMetaHydrated = true;
-          invalidateCloudSyncUsersCache();
+          studioGamesRemoteSyncedAt = Date.now();
+          studioStudiosRemoteSyncedAt = Date.now();
           if (locallyDirtyProfileKeys.size > 0) {
             scheduleSupabaseKvSync("user_profiles_v2");
           }
@@ -2421,6 +2491,28 @@ function persistChatGroups() {
   kvSetJson("chat_groups_v1", out);
 }
 
+function persistChatChannels() {
+  kvSetJson("chat_channels_v1", chatChannels.slice(0, 100));
+}
+
+function isStaffRoleUser(usernameOrLower) {
+  const clean = String(usernameOrLower || "").trim().toLowerCase();
+  if (!clean) return false;
+  const role = getUserChatRole(clean);
+  return role === "owner" || role === "mod";
+}
+
+function getChatChannelConfig(channelId) {
+  const ch = String(channelId || "").trim();
+  if (!ch) return null;
+  return chatChannels.find((c) => c.id === ch) || null;
+}
+
+function getVisibleChatChannels(usernameLower) {
+  const staff = isStaffRoleUser(usernameLower);
+  return chatChannels.filter((c) => c.visibility !== "staff" || staff);
+}
+
 function canAccessChatChannel(channel, usernameLower) {
   const ch = String(channel || "");
   if (ch.startsWith("dm:")) {
@@ -2436,6 +2528,13 @@ function canAccessChatChannel(channel, usernameLower) {
     if (!usernameLower) return false;
     const grp = chatGroups.get(ch);
     return Boolean(grp && Array.isArray(grp.members) && grp.members.includes(usernameLower));
+  }
+  const chCfg = getChatChannelConfig(ch);
+  if (chCfg && chCfg.visibility === "staff") {
+    return isStaffRoleUser(usernameLower);
+  }
+  if (ch === "staff-chat") {
+    return isStaffRoleUser(usernameLower);
   }
   return true;
 }
@@ -2620,12 +2719,63 @@ function openCloudSyncDb(_readonly = false) {
 }
 
 const USERS_DIR_PAGE_SIZE = 50; // Strict limit=50 per paginated Supabase query
-const USERS_CACHE_TTL_MS = 60_000; // 60-second in-memory cache TTL
+const USERS_CACHE_TTL_MS = 10 * 60_000; // 10-minute in-memory cache TTL to slash Supabase GET egress
 const SUPABASE_DEGRADED_COOLDOWN_MS = 25_000; // 25s circuit-breaker cooldown (15-30s backoff)
 const USERS_DIR_KV_KEY = "registered_users_cache_v1";
 const USERS_COUNT_KV_KEY = "registered_users_count_v1";
 const DELETED_USERS_KV_KEY = "deleted_users_v1";
 let supabaseDegradedUntil = 0;
+
+// In-memory LRU caches for Supabase reads (slashing outbound GET egress to near zero after startup)
+const cloudSyncUserByIdCache = new LRUCache({ max: 2000, ttl: 1000 * 60 * 10 }); // 10-minute TTL
+const cloudSyncUserByNameCache = new LRUCache({ max: 2000, ttl: 1000 * 60 * 10 }); // 10-minute TTL
+const cloudSyncBlobCache = new LRUCache({ max: 500, ttl: 1000 * 60 * 10 }); // 10-minute TTL for cloudsync_sync (cloudsync_blobs) payloads
+const cloudSyncMetaCache = new LRUCache({ max: 1000, ttl: 1000 * 60 * 10 }); // 10-minute TTL for cloudsync_sync updated_at timestamps
+const chatMediaShardItemsCache = new LRUCache({ max: 64, ttl: 1000 * 60 * 30 }); // 30-minute TTL for sharded chat media items
+const stripeSubscriptionLookupCache = new LRUCache({ max: 500, ttl: 1000 * 60 * 10 }); // 10-minute TTL for stripe_subscriptions lookups
+
+function cacheCloudSyncUserRecord(row) {
+  if (!row || !row.username) return;
+  const numId = Number(row.id) || 0;
+  const cleanName = String(row.username).trim();
+  const lower = cleanName.toLowerCase();
+  if (!cleanName || !lower) return;
+  const prevByName = cloudSyncUserByNameCache.get(lower);
+  const prevById = numId > 0 ? cloudSyncUserByIdCache.get(numId) : null;
+  if (prevById && prevById.username && String(prevById.username).toLowerCase() !== lower) {
+    cloudSyncUserByNameCache.delete(String(prevById.username).toLowerCase());
+  }
+  const merged = {
+    id: numId || Number(prevByName?.id || prevById?.id || 0),
+    username: cleanName,
+    token_version: Number(row.token_version ?? prevByName?.token_version ?? prevById?.token_version ?? 1),
+    password_hash: row.password_hash ?? prevByName?.password_hash ?? prevById?.password_hash ?? undefined,
+    created_at: row.created_at ?? row.createdAt ?? prevByName?.created_at ?? prevById?.created_at ?? null,
+  };
+  if (merged.id > 0) {
+    cloudSyncUserByIdCache.set(merged.id, merged);
+  }
+  cloudSyncUserByNameCache.set(lower, merged);
+}
+
+function evictCloudSyncUserRecord({ userId = 0, username = "" } = {}) {
+  const numId = Number(userId) || 0;
+  const lower = String(username || "").trim().toLowerCase();
+  if (numId > 0) {
+    const existing = cloudSyncUserByIdCache.get(numId);
+    if (existing?.username) {
+      cloudSyncUserByNameCache.delete(String(existing.username).toLowerCase());
+    }
+    cloudSyncUserByIdCache.delete(numId);
+  }
+  if (lower) {
+    const existing = cloudSyncUserByNameCache.get(lower);
+    if (existing?.id) {
+      cloudSyncUserByIdCache.delete(Number(existing.id));
+    }
+    cloudSyncUserByNameCache.delete(lower);
+  }
+}
 
 function markSupabaseDegraded(reason = "") {
   const until = Date.now() + SUPABASE_DEGRADED_COOLDOWN_MS;
@@ -2902,15 +3052,11 @@ function collectFallbackUserRows(primaryRows = []) {
       if (localId > 0 && primaryById.has(localId)) {
         const fresh = primaryById.get(localId);
         if (fresh.username.toLowerCase() !== k && !primaryKeys.has(k)) {
-          staleUsernameAliases.set(k, { id: fresh.id, username: fresh.username });
           continue;
         }
       }
       // If running with Supabase primary rows and this local SQLite user isn't in Supabase/cache, only include when degraded/local
       if (USE_SUPABASE_CLOUDSYNC && (primaryRows || []).length > 0 && !isSupabaseDegraded() && !byKey.has(k)) {
-        if (localId > 0 && byId.has(localId)) {
-          staleUsernameAliases.set(k, { id: localId, username: byId.get(localId).username });
-        }
         continue;
       }
       addRow(localId, clean, r?.created_at);
@@ -2931,13 +3077,20 @@ function collectFallbackUserRows(primaryRows = []) {
 }
 
 async function dbFindUserById(userId) {
+  const numId = Number(userId) || 0;
+  if (numId <= 0) return null;
+  const cached = cloudSyncUserByIdCache.get(numId);
+  if (cached && cached.username) {
+    return cached;
+  }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?id=eq.${Number(userId)}&select=id,username,token_version&limit=1`
+        `cloudsync_users?id=eq.${numId}&select=id,username,token_version&limit=1`
       );
       if (!ok) throw new Error(`Supabase select user failed (${status}): ${text}`);
       const row = Array.isArray(json) && json[0] ? json[0] : null;
+      if (row) cacheCloudSyncUserRecord(row);
       return row;
     } catch (err) {
       markSupabaseDegraded(err?.message);
@@ -2945,47 +3098,73 @@ async function dbFindUserById(userId) {
   }
   const db = openCloudSyncDb(true);
   try {
-    return (
+    const localRow =
       db
         .query("SELECT id, username, token_version FROM users WHERE id = ?")
-        .get(Number(userId)) || null
-    );
+        .get(numId) || null;
+    if (localRow) cacheCloudSyncUserRecord(localRow);
+    return localRow;
   } finally {
     db.close();
   }
 }
 
-async function dbFindUserByUsername(username) {
+async function dbFindUserByUsername(username, { includePasswordHash = false } = {}) {
   const clean = String(username || "").trim();
   const lower = clean.toLowerCase();
+  if (!clean) return null;
+  const cached = cloudSyncUserByNameCache.get(lower);
+  if (cached && cached.username && (!includePasswordHash || cached.password_hash)) {
+    return cached;
+  }
+  if (!includePasswordHash && cloudSyncUsersCache.map && cloudSyncUsersCache.map.has(lower)) {
+    const dirRec = cloudSyncUsersCache.map.get(lower);
+    if (dirRec && Number(dirRec.id) > 0) {
+      const byId = cloudSyncUserByIdCache.get(Number(dirRec.id));
+      if (byId) return byId;
+      const hydrated = {
+        id: Number(dirRec.id),
+        username: dirRec.username,
+        token_version: 1,
+        created_at: dirRec.createdAt || null,
+      };
+      cacheCloudSyncUserRecord(hydrated);
+      return hydrated;
+    }
+  }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
+      const selectCols = includePasswordHash
+        ? "id,username,password_hash,token_version"
+        : "id,username,token_version";
       const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id,username,password_hash,token_version&limit=1`
+        `cloudsync_users?or=(username_lower.eq.${encodeURIComponent(lower)},username.ilike.${encodeURIComponent(clean)})&select=${selectCols}&limit=1`
       );
       if (!ok) throw new Error(`Supabase select username failed (${status}): ${text}`);
       const row = Array.isArray(json) && json[0] ? json[0] : null;
       if (row) {
+        cacheCloudSyncUserRecord(row);
         mirrorLocalUserRecord({
           username: row.username,
           passwordHash: row.password_hash,
           tokenVersion: row.token_version,
         });
+        return row;
       }
-      return row;
     } catch (err) {
       markSupabaseDegraded(err?.message);
     }
   }
   const db = openCloudSyncDb(true);
   try {
-    return (
+    const localRow =
       db
         .query(
           "SELECT id, username, password_hash, token_version FROM users WHERE LOWER(username) = LOWER(?)"
         )
-        .get(clean) || null
-    );
+        .get(clean) || null;
+    if (localRow) cacheCloudSyncUserRecord(localRow);
+    return localRow;
   } finally {
     db.close();
   }
@@ -3012,6 +3191,12 @@ async function dbCreateUser(username, passwordHash) {
       }
       if (!ok) throw new Error(`Supabase create user failed (${status}): ${text}`);
       const created = Array.isArray(json) ? json[0] : json;
+      cacheCloudSyncUserRecord({
+        id: Number(created.id),
+        username: String(created.username),
+        password_hash: passwordHash,
+        token_version: 1,
+      });
       mirrorLocalUserRecord({ username: created.username, passwordHash, tokenVersion: 1 });
       return {
         conflict: false,
@@ -3031,9 +3216,16 @@ async function dbCreateUser(username, passwordHash) {
     const result = db
       .query("INSERT INTO users (username, password_hash, token_version) VALUES (?, ?, 1)")
       .run(username, passwordHash);
+    const newId = Number(result.lastInsertRowid);
+    cacheCloudSyncUserRecord({
+      id: newId,
+      username,
+      password_hash: passwordHash,
+      token_version: 1,
+    });
     return {
       conflict: false,
-      id: Number(result.lastInsertRowid),
+      id: newId,
       username,
     };
   } finally {
@@ -3042,12 +3234,18 @@ async function dbCreateUser(username, passwordHash) {
 }
 
 async function dbDeleteUser(userId, username = "") {
+  const numId = Number(userId) || 0;
+  evictCloudSyncUserRecord({ userId: numId, username });
+  if (numId > 0) {
+    cloudSyncBlobCache.delete(numId);
+    cloudSyncMetaCache.delete(numId);
+  }
   if (username) recordDeletedUsername(username);
   if (USE_SUPABASE_CLOUDSYNC) {
     try {
-      await supabaseRest(`cloudsync_sync?user_id=eq.${Number(userId)}`, { method: "DELETE" });
+      await supabaseRest(`cloudsync_sync?user_id=eq.${numId}`, { method: "DELETE" });
       const { ok, status, text } = await supabaseRest(
-        `cloudsync_users?id=eq.${Number(userId)}`,
+        `cloudsync_users?id=eq.${numId}`,
         { method: "DELETE" }
       );
       if (!ok) throw new Error(`Supabase delete user failed (${status}): ${text}`);
@@ -3074,14 +3272,27 @@ async function dbDeleteUser(userId, username = "") {
 }
 
 async function dbGetSyncMetaUpdatedAt(userId, username = "") {
+  const numId = Number(userId) || 0;
+  if (numId > 0) {
+    const cachedBlob = cloudSyncBlobCache.get(numId);
+    if (cachedBlob && cachedBlob.updated_at !== undefined) {
+      return String(cachedBlob.updated_at || "");
+    }
+    const cachedMeta = cloudSyncMetaCache.get(numId);
+    if (cachedMeta !== undefined) {
+      return String(cachedMeta || "");
+    }
+  }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_sync?user_id=eq.${Number(userId)}&select=updated_at&limit=1`
+        `cloudsync_sync?user_id=eq.${numId}&select=updated_at&limit=1`
       );
       if (!ok) throw new Error(`Supabase meta failed (${status}): ${text}`);
       const row = Array.isArray(json) && json[0] ? json[0] : null;
-      if (row?.updated_at) return String(row.updated_at);
+      const updated = row?.updated_at ? String(row.updated_at) : "";
+      if (numId > 0) cloudSyncMetaCache.set(numId, updated);
+      if (updated) return updated;
     } catch (err) {
       markSupabaseDegraded(err?.message);
     }
@@ -3096,20 +3307,33 @@ async function dbGetSyncMetaUpdatedAt(userId, username = "") {
     const row =
       db.query("SELECT updated_at FROM sync_json WHERE user_id = ?").get(targetId) ||
       db.query("SELECT updated_at FROM sync_data WHERE user_id = ?").get(targetId);
-    return row?.updated_at ? String(row.updated_at) : "";
+    const updated = row?.updated_at ? String(row.updated_at) : "";
+    if (numId > 0 && updated) cloudSyncMetaCache.set(numId, updated);
+    return updated;
   } finally {
     db.close();
   }
 }
 
 async function dbGetSyncPayload(userId, username = "") {
+  const numId = Number(userId) || 0;
+  if (numId > 0) {
+    const cachedBlob = cloudSyncBlobCache.get(numId);
+    if (cachedBlob !== undefined) {
+      return cachedBlob;
+    }
+  }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_sync?user_id=eq.${Number(userId)}&select=payload_json,updated_at&limit=1`
+        `cloudsync_sync?user_id=eq.${numId}&select=payload_json,updated_at&limit=1`
       );
       if (!ok) throw new Error(`Supabase download failed (${status}): ${text}`);
       const remoteRow = Array.isArray(json) && json[0] ? json[0] : null;
+      if (numId > 0) {
+        cloudSyncBlobCache.set(numId, remoteRow);
+        cloudSyncMetaCache.set(numId, remoteRow?.updated_at ? String(remoteRow.updated_at) : "");
+      }
       if (remoteRow) return remoteRow;
     } catch (err) {
       markSupabaseDegraded(err?.message);
@@ -3122,24 +3346,34 @@ async function dbGetSyncPayload(userId, username = "") {
       const localRow = db.query("SELECT id FROM users WHERE LOWER(username) = LOWER(?)").get(username);
       if (localRow?.id) targetId = Number(localRow.id);
     }
-    return (
+    const localRow =
       db
         .query("SELECT payload_json, updated_at FROM sync_json WHERE user_id = ?")
-        .get(targetId) || null
-    );
+        .get(targetId) || null;
+    if (numId > 0 && localRow) {
+      cloudSyncBlobCache.set(numId, localRow);
+      cloudSyncMetaCache.set(numId, localRow.updated_at ? String(localRow.updated_at) : "");
+    }
+    return localRow;
   } finally {
     db.close();
   }
 }
 
 async function dbUpsertSyncPayload(userId, payloadJson, updatedAt, username = "") {
+  const numId = Number(userId) || 0;
+  if (numId > 0) {
+    const rowObj = { payload_json: payloadJson, updated_at: updatedAt };
+    cloudSyncBlobCache.set(numId, rowObj);
+    cloudSyncMetaCache.set(numId, String(updatedAt || ""));
+  }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, text } = await supabaseRest("cloudsync_sync?on_conflict=user_id", {
         method: "POST",
         headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({
-          user_id: Number(userId),
+          user_id: numId,
           payload_json: payloadJson,
           updated_at: updatedAt,
         }),
@@ -3174,12 +3408,12 @@ function getFallbackUsersCount(fallbackRows = null) {
   return Math.max(0, kvCount, rowsCount);
 }
 
-// Exact head-only Postgres count query (zero row payload, bypasses PostgREST 1,000-row cap)
+// Exact head-only Postgres count query (zero row payload, narrow select=id projection, bypasses PostgREST 1,000-row cap)
 async function dbCountUsers() {
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const { ok, status, contentRange, text } = await supabaseRest(
-        "cloudsync_users?username=not.like.__sunshine_*&select=*",
+        "cloudsync_users?username=not.like.__sunshine_*&select=id",
         {
           method: "HEAD",
           headers: { Prefer: "count=exact" },
@@ -3200,9 +3434,10 @@ async function dbCountUsers() {
   return getFallbackUsersCount();
 }
 
-// Paginated user directory fetch strictly capped at 50 rows per query (never scans full table)
-async function dbListUsers({ limit = USERS_DIR_PAGE_SIZE, offset = 0 } = {}) {
-  const safeLimit = Math.min(Math.max(1, Number(limit) || USERS_DIR_PAGE_SIZE), USERS_DIR_PAGE_SIZE);
+// Paginated user directory fetch (capped at 50 rows for external pagination, up to maxLimit for internal RAM directory seed)
+async function dbListUsers({ limit = USERS_DIR_PAGE_SIZE, offset = 0, maxLimit = USERS_DIR_PAGE_SIZE } = {}) {
+  const safeMax = Math.max(USERS_DIR_PAGE_SIZE, Number(maxLimit) || USERS_DIR_PAGE_SIZE);
+  const safeLimit = Math.min(Math.max(1, Number(limit) || USERS_DIR_PAGE_SIZE), safeMax);
   const safeOffset = Math.max(0, Number(offset) || 0);
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
@@ -3211,6 +3446,9 @@ async function dbListUsers({ limit = USERS_DIR_PAGE_SIZE, offset = 0 } = {}) {
       );
       if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
       const batch = Array.isArray(json) ? json : [];
+      for (const r of batch) {
+        if (r && r.username) cacheCloudSyncUserRecord(r);
+      }
       saveRegisteredUsersDirCache(batch);
       return safeOffset === 0 ? collectFallbackUserRows(batch) : batch;
     } catch (err) {
@@ -3313,34 +3551,29 @@ async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false }
 
   try {
     const byIdRow = await dbFindUserById(claims.id);
-    let row = byIdRow;
-    if ((!row || String(row.username).toLowerCase() !== claimsLower) && claimsUsername) {
+    let row = byIdRow && String(byIdRow.username).toLowerCase() === claimsLower ? byIdRow : null;
+    if (!row && claimsUsername) {
       row = await dbFindUserByUsername(claimsUsername);
     }
     if (!row) {
-      if (byIdRow && !isSupabaseDegraded() && Number(byIdRow.token_version || 1) === Number(claims.v || 1)) {
-        staleUsernameAliases.set(claimsLower, {
-          id: Number(byIdRow.id),
-          username: String(byIdRow.username),
-        });
-        if (allowUnmirroredJwt) {
-          return { id: Number(byIdRow.id), username: String(byIdRow.username) };
-        }
-        return null;
-      }
-      if (USE_SUPABASE_CLOUDSYNC && (allowUnmirroredJwt || Date.now() < supabaseDegradedUntil)) {
-        return { id: Number(claims.id), username: claimsUsername };
-      }
-      return null;
+      const authedFallback = { id: Number(claims.id), username: claimsUsername };
+      upsertUserInCaches(authedFallback);
+      return authedFallback;
     }
     if (String(row.username).toLowerCase() !== claimsLower) {
       return null;
     }
-    if (Number(row.token_version || 1) !== Number(claims.v || 1)) return null;
-    return { id: Number(row.id), username: String(row.username) };
+    if (row.id === Number(claims.id) && Number(row.token_version || 1) !== Number(claims.v || 1)) {
+      return null;
+    }
+    const authed = { id: Number(row.id), username: String(row.username) };
+    upsertUserInCaches(authed);
+    return authed;
   } catch {
     // Transient Supabase / DB connectivity blip should not silently strip verified moderator auth
-    return { id: Number(claims.id), username: claimsUsername };
+    const authedFallback = { id: Number(claims.id), username: claimsUsername };
+    upsertUserInCaches(authedFallback);
+    return authedFallback;
   }
 }
 
@@ -3425,7 +3658,7 @@ app.post("/api/auth/login", async (req, res) => {
         .json({ success: false, user: null, error: "password too long" });
     }
 
-    const row = await dbFindUserByUsername(username);
+    const row = await dbFindUserByUsername(username, { includePasswordHash: true });
     if (!row || !Bun.password.verifySync(password, String(row.password_hash))) {
       return res
         .status(401)
@@ -3659,6 +3892,7 @@ function upsertUserInCaches(row, countDelta = 0) {
   const key = clean.toLowerCase();
   const numId = Number(row?.id) || 0;
   if (!clean || isReservedSystemUsername(clean) || isTemporaryGuestName(clean)) return;
+  cacheCloudSyncUserRecord(row);
   missingUserLookupCache.delete(key);
   staleUsernameAliases.delete(key);
   saveRegisteredUsersDirCache([{ id: numId, username: clean, created_at: row.created_at || null }]);
@@ -3699,6 +3933,7 @@ function upsertUserInCaches(row, countDelta = 0) {
 function removeUserFromCaches(username) {
   const key = String(username || "").trim().toLowerCase();
   if (!key) return;
+  evictCloudSyncUserRecord({ username: key });
   if (cloudSyncUsersCache.map) {
     cloudSyncUsersCache.map.delete(key);
   }
@@ -3774,23 +4009,15 @@ async function getCloudSyncUsersMapAsync(forceRefresh = false) {
   const promise = (async () => {
     try {
       const [rows] = await Promise.all([
-        dbListUsers({ limit: USERS_DIR_PAGE_SIZE, offset: 0 }),
+        dbListUsers({ limit: 1000, offset: 0, maxLimit: 1000 }),
         getCloudSyncUsersCountAsync(forceRefresh),
       ]);
       const map = buildCloudSyncUsersMap(rows);
-      const mapById = new Map();
-      for (const [k, rec] of map.entries()) {
-        if (rec.id > 0) mapById.set(rec.id, k);
-      }
-      // Keep valid live point-looked-up users unless deleted or superseded by a renamed canonical id
+      // Keep valid live point-looked-up users unless deleted
       if (cloudSyncUsersCache.map) {
         const deleted = getDeletedUsersSet();
         for (const [k, rec] of cloudSyncUsersCache.map.entries()) {
           if (map.has(k) || deleted.has(k) || staleUsernameAliases.has(k)) continue;
-          if (rec.id > 0 && mapById.has(rec.id) && mapById.get(rec.id) !== k) {
-            staleUsernameAliases.set(k, { id: rec.id, username: map.get(mapById.get(rec.id)).username });
-            continue;
-          }
           map.set(k, rec);
         }
       }
@@ -3886,17 +4113,24 @@ async function ensureCloudSyncUserInMap(username) {
     }
   })();
   singleUserLookupInFlight.set(key, lookupPromise);
-  await lookupPromise;
+  const foundRow = await lookupPromise;
   const latestMap = getCloudSyncUsersMap();
+  if (foundRow && foundRow.username && !latestMap.has(key)) {
+    latestMap.set(key, {
+      id: Number(foundRow.id) || 0,
+      username: String(foundRow.username).trim(),
+      createdAt: foundRow.created_at || null,
+    });
+  }
   return { csMap: latestMap, user: latestMap.get(key) || null };
 }
 
 async function getCloudSyncUserAsync(username) {
   if (!username) return null;
-  const clean = String(username).trim().toLowerCase();
+  const clean = String(username).trim();
   if (!clean) return null;
-  const csMap = await getCloudSyncUsersMapAsync();
-  return csMap.get(clean) || null;
+  const { user } = await ensureCloudSyncUserInMap(clean);
+  return user || null;
 }
 
 function getCloudSyncUser(username) {
@@ -4015,7 +4249,8 @@ function getPresenceSnapshot() {
     const timeoutEntry = getActiveTimeout(canonicalKey) || getActiveTimeout(rawKey);
     const role = getUserChatRole(canonicalName);
     const existing = onlineByAccount.get(dedupKey);
-    const cIdle = Boolean(c.isIdle);
+    const cIdle = Boolean(c.isIdle) || prof?.customization?.presenceStatus === "idle";
+    const cPlayingGame = !cIdle && Boolean(c.isPlayingGame);
     const incomingMatchesCanonical = rawKey === canonicalKey;
     const existingMatchesCanonical = existing ? existing.username.toLowerCase() === canonicalKey : false;
     // Prefer latest canonical username session, then active (non-idle), playing game, or most recent heartbeat
@@ -4024,7 +4259,7 @@ function getPresenceSnapshot() {
       (incomingMatchesCanonical && !existingMatchesCanonical) ||
       (incomingMatchesCanonical === existingMatchesCanonical &&
         ((Boolean(existing.isIdle) && !cIdle) ||
-          (existing.isIdle === cIdle && ((c.isPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen))));
+          (existing.isIdle === cIdle && ((cPlayingGame && !existing.isPlayingGame) || c.lastSeen >= existing.lastSeen))));
     if (preferIncoming) {
       onlineByAccount.set(dedupKey, {
         id: c.id,
@@ -4033,9 +4268,9 @@ function getPresenceSnapshot() {
         online: true,
         isIdle: cIdle,
         page: c.page || "/",
-        game: c.game || "browsing",
-        isPlayingGame: Boolean(c.isPlayingGame),
-        gameStartedAt: Number(c.gameStartedAt) || 0,
+        game: cPlayingGame ? (c.game || "browsing") : "browsing",
+        isPlayingGame: cPlayingGame,
+        gameStartedAt: cPlayingGame ? (Number(c.gameStartedAt) || 0) : 0,
         lastSeen: c.lastSeen,
         bio: prof.bio || "",
         statusText: prof.statusText || "",
@@ -4113,11 +4348,31 @@ function verifyAdmin(req, res, next) {
   next();
 }
 
-function broadcastToClients(actionPayload, target = "all") {
+function broadcastToClients(actionPayload, target = "all", options = {}) {
+  const { excludeClientId = null } = options || {};
   const payloadStr = `data: ${JSON.stringify(actionPayload)}\n\n`;
   let delivered = 0;
+  let targetUserLower = "";
+  if (target && target !== "all") {
+    targetUserLower = String(target).trim().toLowerCase();
+    const matchedLive = liveClients.get(target);
+    if (matchedLive?.username && String(matchedLive.username).toLowerCase() !== "anonymous") {
+      targetUserLower = String(matchedLive.username).trim().toLowerCase();
+    } else if (typeof httpHeartbeats !== "undefined" && httpHeartbeats.has(target)) {
+      const hb = httpHeartbeats.get(target);
+      if (hb?.username && String(hb.username).toLowerCase() !== "anonymous") {
+        targetUserLower = String(hb.username).trim().toLowerCase();
+      }
+    }
+  }
   for (const [id, client] of liveClients.entries()) {
-    if (target === "all" || target === id || client.username === target) {
+    if (excludeClientId && id === excludeClientId && target === "all") continue;
+    const clientUserLower = String(client.username || "").trim().toLowerCase();
+    if (
+      target === "all" ||
+      target === id ||
+      (targetUserLower && clientUserLower && clientUserLower !== "anonymous" && clientUserLower === targetUserLower)
+    ) {
       try {
         client.res.write(payloadStr);
         delivered++;
@@ -4472,7 +4727,7 @@ app.get("/api/admin/clients", verifyAdmin, (_req, res) => {
 });
 
 app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
-  const { target = "all", action, data } = req.body || {};
+  const { target = "all", action, data, adminClientId = null } = req.body || {};
   if (!action) {
     return res.status(400).json({ success: false, error: "Action is required" });
   }
@@ -4485,7 +4740,11 @@ app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
     timestamp: Date.now(),
   };
 
-  const count = broadcastToClients(payload, target);
+  const excludeId =
+    target === "all" && action !== "killswitch" && action !== "clear-effects"
+      ? adminClientId
+      : null;
+  const count = broadcastToClients(payload, target, { excludeClientId: excludeId });
   if (target && target !== "all") {
     const clientMatch = liveClients.get(target) || httpHeartbeats.get(target);
     const targetName = String(clientMatch?.username || "").trim();
@@ -4667,7 +4926,7 @@ app.post("/api/admin/upload-sound", verifyAdmin, (req, res) => {
   }
 });
 
-app.get("/api/admin/myinstants-search", async (req, res) => {
+app.get("/api/admin/myinstants-search", verifyAdmin, async (req, res) => {
   try {
     const query = (req.query.query || "").toString().trim();
     const results = [];
@@ -4753,7 +5012,7 @@ app.get("/api/admin/myinstants-search", async (req, res) => {
   }
 });
 
-app.post("/api/admin/resolve-sound", async (req, res) => {
+app.post("/api/admin/resolve-sound", verifyAdmin, async (req, res) => {
   try {
     const rawUrl = (req.body?.url || "").toString().trim();
     if (!rawUrl || !isSafeExternalHttpUrl(rawUrl)) {
@@ -5900,17 +6159,20 @@ async function persistChatMediaRemoteAsync(id, entry) {
     try {
       const uid = await getChatMediaShardUserId(shardName, { createIfMissing: true });
       if (!uid) return false;
-      const existingRes = await supabaseDirectMediaRequest(
-        `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
-        { timeoutMs: 12000 },
-      );
-      let items = [];
-      const existingPayload = Array.isArray(existingRes.json) ? existingRes.json[0]?.payload_json : null;
-      if (existingPayload) {
-        try {
-          const parsed = JSON.parse(String(existingPayload));
-          if (Array.isArray(parsed?.items)) items = parsed.items;
-        } catch {}
+      let items = chatMediaShardItemsCache.get(shardName);
+      if (!Array.isArray(items)) {
+        const existingRes = await supabaseDirectMediaRequest(
+          `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
+          { timeoutMs: 12000 },
+        );
+        items = [];
+        const existingPayload = Array.isArray(existingRes.json) ? existingRes.json[0]?.payload_json : null;
+        if (existingPayload) {
+          try {
+            const parsed = JSON.parse(String(existingPayload));
+            if (Array.isArray(parsed?.items)) items = parsed.items;
+          } catch {}
+        }
       }
       const filtered = items.filter((it) => it && it.id !== id);
       const nextItems = [{ id, ...entry }, ...filtered].slice(0, CHAT_MEDIA_SHARD_MAX_ITEMS);
@@ -5933,6 +6195,7 @@ async function persistChatMediaRemoteAsync(id, entry) {
         console.warn(`Supabase sharded chat_media write failed (${upsertRes.status}): ${upsertRes.text}`);
         return false;
       }
+      chatMediaShardItemsCache.set(shardName, nextItems);
       return true;
     } catch (err) {
       console.warn("Supabase sharded chat_media write warning:", err?.message);
@@ -5966,17 +6229,22 @@ async function loadChatMediaRemoteAsync(id) {
 
   try {
     const shardName = getChatMediaShardName(id);
-    const uid = await getChatMediaShardUserId(shardName, { createIfMissing: false });
-    if (!uid) return null;
-    const rowRes = await supabaseDirectMediaRequest(
-      `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
-      { timeoutMs: 12000 },
-    );
-    const payloadJson = rowRes.ok && Array.isArray(rowRes.json) ? rowRes.json[0]?.payload_json : null;
-    if (!payloadJson) return null;
-    const parsed = JSON.parse(String(payloadJson));
-    if (!Array.isArray(parsed?.items)) return null;
-    const found = parsed.items.find((it) => it && it.id === id);
+    let shardItems = chatMediaShardItemsCache.get(shardName);
+    if (!Array.isArray(shardItems)) {
+      const uid = await getChatMediaShardUserId(shardName, { createIfMissing: false });
+      if (!uid) return null;
+      const rowRes = await supabaseDirectMediaRequest(
+        `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
+        { timeoutMs: 12000 },
+      );
+      const payloadJson = rowRes.ok && Array.isArray(rowRes.json) ? rowRes.json[0]?.payload_json : null;
+      if (!payloadJson) return null;
+      const parsed = JSON.parse(String(payloadJson));
+      if (!Array.isArray(parsed?.items)) return null;
+      shardItems = parsed.items;
+      chatMediaShardItemsCache.set(shardName, shardItems);
+    }
+    const found = shardItems.find((it) => it && it.id === id);
     if (found?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(found.mime)) {
       return found;
     }
@@ -6272,6 +6540,7 @@ app.get("/api/chat/state", async (req, res) => {
     presenceAt: presence.snapshotAt,
     usersLoaded: presence.usersLoaded,
     totalUsersCount: presence.totalUsersCount,
+    channels: getVisibleChatChannels(verifiedUserKey),
     groups: userGroups,
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
@@ -6317,9 +6586,11 @@ app.get(["/api/users", "/api/cloudsync/users"], async (req, res) => {
       try {
         const [totalCount, rows] = await Promise.all([
           getCloudSyncUsersCountAsync().catch(() => getCloudSyncUsersCountSync()),
-          isSupabaseDegraded() && cachedPage
-            ? Promise.resolve(cachedPage.data.users)
-            : dbListUsers({ limit, offset }).catch(() => cachedPage?.data?.users || []),
+          offset === 0 && cloudSyncUsersCache.map && Date.now() < cloudSyncUsersCache.expiresAt
+            ? Promise.resolve(Array.from(cloudSyncUsersCache.map.values()).slice(0, limit))
+            : isSupabaseDegraded() && cachedPage
+              ? Promise.resolve(cachedPage.data.users)
+              : dbListUsers({ limit, offset }).catch(() => cachedPage?.data?.users || []),
         ]);
         const users = (rows || []).map((r) => ({
           id: Number(r.id) || 0,
@@ -6381,25 +6652,41 @@ app.get("/api/chat/user-profile", async (req, res) => {
 
   const canonicalName = csUser ? csUser.username : rawTarget;
   let prof = userProfiles.get(key) || {};
+  // Egress guard: once app_kv (user_profiles_v2) is hydrated in RAM, only check an already-cached cloudsync_sync blob
+  // in RAM (or run if remote KV has not hydrated yet) — never trigger a live Supabase save-file download on profile clicks!
   if (
     (!prof || !hasMeaningfulCustomization(prof.customization)) &&
     csUser?.id > 0 &&
     !isSupabaseDegraded()
   ) {
-    const nowTs = Date.now();
-    const lastChecked = Number(singleProfileSyncRecoveryChecked.get(key) || 0);
-    if (nowTs - lastChecked > 60_000) {
-      singleProfileSyncRecoveryChecked.set(key, nowTs);
-      try {
-        const syncRow = await dbGetSyncPayload(csUser.id, canonicalName);
-        if (
-          syncRow?.payload_json &&
-          recoverUserProfileFromSyncPayload(canonicalName, syncRow.payload_json, syncRow.updated_at || "")
-        ) {
-          persistUserProfiles({ updatedKey: key });
-          prof = userProfiles.get(key) || {};
-        }
-      } catch {}
+    const cachedSyncRow = cloudSyncBlobCache.get(Number(csUser.id));
+    if (cachedSyncRow?.payload_json) {
+      if (
+        recoverUserProfileFromSyncPayload(
+          canonicalName,
+          cachedSyncRow.payload_json,
+          cachedSyncRow.updated_at || ""
+        )
+      ) {
+        persistUserProfiles({ updatedKey: key });
+        prof = userProfiles.get(key) || {};
+      }
+    } else if (!hasLoadedRemoteKvSuccessfully) {
+      const nowTs = Date.now();
+      const lastChecked = Number(singleProfileSyncRecoveryChecked.get(key) || 0);
+      if (nowTs - lastChecked > 60_000) {
+        singleProfileSyncRecoveryChecked.set(key, nowTs);
+        try {
+          const syncRow = await dbGetSyncPayload(csUser.id, canonicalName);
+          if (
+            syncRow?.payload_json &&
+            recoverUserProfileFromSyncPayload(canonicalName, syncRow.payload_json, syncRow.updated_at || "")
+          ) {
+            persistUserProfiles({ updatedKey: key });
+            prof = userProfiles.get(key) || {};
+          }
+        } catch {}
+      }
     }
   }
   const presence = getPresenceSnapshot();
@@ -6637,6 +6924,18 @@ function broadcastChatPayload(channel, eventPayload, extraUsernames = []) {
     }
     return;
   }
+  const chCfg = getChatChannelConfig(ch);
+  if ((chCfg && chCfg.visibility === "staff") || ch === "staff-chat") {
+    for (const [, client] of liveClients.entries()) {
+      const verifiedU = client.verifiedUsername;
+      if (verifiedU && isStaffRoleUser(verifiedU)) {
+        try {
+          client.res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
+        } catch {}
+      }
+    }
+    return;
+  }
   broadcastToClients(eventPayload, "all");
 }
 
@@ -6764,6 +7063,17 @@ app.post("/api/chat/send", async (req, res) => {
       }
       if (!grp.members.includes(authUser.username.toLowerCase())) {
         return res.status(403).json({ success: false, error: "You are not a member of this group chat" });
+      }
+    } else if (!sanitizedMsg.channel.startsWith("voice:")) {
+      const chCfg = getChatChannelConfig(sanitizedMsg.channel);
+      const isStaffSender = Boolean(authUser && isStaffRoleUser(authUser.username));
+      if ((chCfg && chCfg.visibility === "staff") || sanitizedMsg.channel === "staff-chat") {
+        if (!isStaffSender) {
+          return res.status(403).json({ success: false, error: "This channel is only visible to owners and mods" });
+        }
+      }
+      if (chCfg && chCfg.writeAccess === "staff" && !isStaffSender) {
+        return res.status(403).json({ success: false, error: `Only owners and mods can post in #${chCfg.name}` });
       }
     }
 
@@ -6960,6 +7270,104 @@ app.post("/api/chat/delete-chat", async (req, res) => {
 });
 
 // --- Group Chat Management & Emoji Reactions ---
+app.post("/api/chat/channels/create", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const authUser = await getAuthenticatedCloudSyncUser(req);
+  if (!authUser || !isStaffRoleUser(authUser.username)) {
+    return res.status(403).json({ success: false, error: "Only owners and mods can create channels" });
+  }
+  const body = req.body || {};
+  const rawName = String(body.name || "").trim().toLowerCase().slice(0, 32);
+  if (rawName.length < 2) {
+    return res.status(400).json({ success: false, error: "Channel name must be at least 2 characters" });
+  }
+  const baseSlug = rawName.replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "channel";
+  let slug = baseSlug;
+  let suffix = 2;
+  while (chatChannels.some((c) => c.id === slug)) {
+    slug = `${baseSlug.slice(0, 28)}-${suffix++}`;
+  }
+  const categoryLabel = String(body.categoryLabel || body.categoryId || "social").trim().toLowerCase().slice(0, 24) || "social";
+  const categoryId = categoryLabel.replace(/[^a-z0-9-]+/g, "-") || "social";
+  const icon = String(body.icon || "fa-hashtag").trim().slice(0, 40) || "fa-hashtag";
+  const visibility = body.visibility === "staff" ? "staff" : "all";
+  const writeAccess = body.writeAccess === "staff" ? "staff" : "all";
+
+  const created = {
+    id: slug,
+    name: rawName,
+    icon,
+    categoryId,
+    categoryLabel,
+    visibility,
+    writeAccess,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    updatedBy: authUser.username,
+  };
+  chatChannels.push(created);
+  persistChatChannels();
+  broadcastToClients({ type: "chat-event", event: "CHANNELS_UPDATED" }, "all");
+  res.json({ success: true, channel: created });
+});
+
+app.post("/api/chat/channels/edit", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const authUser = await getAuthenticatedCloudSyncUser(req);
+  if (!authUser || !isStaffRoleUser(authUser.username)) {
+    return res.status(403).json({ success: false, error: "Only owners and mods can edit channels" });
+  }
+  const body = req.body || {};
+  const targetId = String(body.id || "").trim();
+  const existing = chatChannels.find((c) => c.id === targetId);
+  if (!existing) {
+    return res.status(404).json({ success: false, error: "Channel not found" });
+  }
+  if (typeof body.name === "string") {
+    const cleanName = body.name.trim().toLowerCase().slice(0, 32);
+    if (cleanName.length >= 2) existing.name = cleanName;
+  }
+  if (typeof body.categoryLabel === "string" && body.categoryLabel.trim()) {
+    const catLabel = body.categoryLabel.trim().toLowerCase().slice(0, 24);
+    existing.categoryLabel = catLabel;
+    existing.categoryId = catLabel.replace(/[^a-z0-9-]+/g, "-") || existing.categoryId;
+  }
+  if (typeof body.icon === "string" && body.icon.trim()) {
+    existing.icon = body.icon.trim().slice(0, 40);
+  }
+  if (body.visibility === "staff" || body.visibility === "all") {
+    existing.visibility = body.visibility;
+  }
+  if (body.writeAccess === "staff" || body.writeAccess === "all") {
+    existing.writeAccess = body.writeAccess;
+  }
+  existing.updatedAt = Date.now();
+  existing.updatedBy = authUser.username;
+  persistChatChannels();
+  broadcastToClients({ type: "chat-event", event: "CHANNELS_UPDATED" }, "all");
+  res.json({ success: true, channel: existing });
+});
+
+app.post("/api/chat/channels/delete", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const authUser = await getAuthenticatedCloudSyncUser(req);
+  if (!authUser || !isStaffRoleUser(authUser.username)) {
+    return res.status(403).json({ success: false, error: "Only owners and mods can delete channels" });
+  }
+  const targetId = String(req.body?.id || "").trim();
+  if (!targetId || targetId === "general") {
+    return res.status(400).json({ success: false, error: "Cannot delete the #general channel" });
+  }
+  const idx = chatChannels.findIndex((c) => c.id === targetId);
+  if (idx === -1) {
+    return res.status(404).json({ success: false, error: "Channel not found" });
+  }
+  chatChannels.splice(idx, 1);
+  persistChatChannels();
+  broadcastToClients({ type: "chat-event", event: "CHANNELS_UPDATED" }, "all");
+  res.json({ success: true });
+});
+
 app.post("/api/chat/groups/create", async (req, res) => {
   ensureChatMetaLoaded();
   try {
@@ -7873,12 +8281,14 @@ let studioGamesRemoteRefreshPromise = null;
 async function getMergedStudioGamesAsync({ forceRemote = false } = {}) {
   await ensureChatMetaReadyAsync();
   const localGames = kvGetJson(STUDIO_GAMES_KV_KEY, []);
-  const now = Date.now();
   let remoteGames;
+  // Egress optimization: once app_kv is loaded on startup (hasLoadedRemoteKvSuccessfully === true),
+  // serve all studio games directly from RAM (publishedStudioGames) without re-downloading multi-MB HTML game blobs from Supabase.
   if (
     USE_SUPABASE_CLOUDSYNC &&
     !isSupabaseDegraded() &&
-    (forceRemote || now - studioGamesRemoteSyncedAt > 8000)
+    !hasLoadedRemoteKvSuccessfully &&
+    (forceRemote || Date.now() - studioGamesRemoteSyncedAt > 8000)
   ) {
     if (!studioGamesRemoteRefreshPromise) {
       studioGamesRemoteRefreshPromise = fetchSupabaseKvKeyAsync(STUDIO_GAMES_KV_KEY, { timeoutMs: 15000 })
@@ -7899,9 +8309,9 @@ async function getMergedStudioGamesAsync({ forceRemote = false } = {}) {
     Array.isArray(remoteGames) ? remoteGames : []
   );
   publishedStudioGames.splice(0, publishedStudioGames.length, ...merged);
-  if (merged.length > 0) {
+  if (merged.length > 0 && Array.isArray(remoteGames)) {
     localKvSetJson(STUDIO_GAMES_KV_KEY, merged);
-    if (Array.isArray(remoteGames) && merged.length > remoteGames.length) {
+    if (merged.length > remoteGames.length) {
       scheduleSupabaseKvSync(STUDIO_GAMES_KV_KEY);
     }
   }
@@ -8141,7 +8551,14 @@ async function getMergedStudiosAsync() {
   const localStudios = kvGetJson(STUDIO_PROFILES_KV_KEY, []);
   const now = Date.now();
   let remoteStudios;
-  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded() && now - studioStudiosRemoteSyncedAt > 15000) {
+  // Egress optimization: once app_kv is loaded on startup (hasLoadedRemoteKvSuccessfully === true),
+  // serve custom studios directly from RAM (customStudios) without polling Supabase every 15s.
+  if (
+    USE_SUPABASE_CLOUDSYNC &&
+    !isSupabaseDegraded() &&
+    !hasLoadedRemoteKvSuccessfully &&
+    now - studioStudiosRemoteSyncedAt > 15000
+  ) {
     const val = await fetchSupabaseKvKeyAsync(STUDIO_PROFILES_KV_KEY, { timeoutMs: 8000 });
     if (val !== undefined) {
       studioStudiosRemoteSyncedAt = now;
@@ -8154,7 +8571,9 @@ async function getMergedStudiosAsync() {
     Array.isArray(remoteStudios) ? remoteStudios : []
   );
   customStudios.splice(0, customStudios.length, ...merged);
-  if (merged.length > 0) localKvSetJson(STUDIO_PROFILES_KV_KEY, merged);
+  if (merged.length > 0 && Array.isArray(remoteStudios)) {
+    localKvSetJson(STUDIO_PROFILES_KV_KEY, merged);
+  }
   return customStudios;
 }
 
@@ -8304,17 +8723,28 @@ app.post("/api/shop/troll", async (req, res) => {
       timestamp: Date.now(),
     };
 
-    const normTarget = (targetUsername || "").trim().toLowerCase().replace(/[-_]/g, "");
+    const normTarget = (targetUsername || "").trim().toLowerCase();
     const cloudUser = targetUsername ? await getCloudSyncUserAsync(targetUsername) : null;
     let delivered = 0;
+    const matchedClients = [];
     for (const [id, client] of liveClients.entries()) {
       const matchId = targetClientId && id === targetClientId;
-      const clientNorm = (client.username || "").trim().toLowerCase().replace(/[-_]/g, "");
+      const clientNorm = (client.username || "").trim().toLowerCase();
       const matchUser = normTarget && clientNorm === normTarget;
       if (matchId || matchUser) {
+        matchedClients.push({ id, client, matchId });
+      }
+    }
+    if (matchedClients.length > 0) {
+      matchedClients.sort((a, b) => {
+        if (a.matchId !== b.matchId) return a.matchId ? -1 : 1;
+        return (b.client.lastSeen || 0) - (a.client.lastSeen || 0);
+      });
+      for (const entry of matchedClients) {
         try {
-          client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+          entry.client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
           delivered++;
+          break;
         } catch {}
       }
     }
@@ -8533,6 +8963,7 @@ async function persistStripeSubscriptionRecord(record) {
     list.push(merged);
   }
   saveStripeSubscriptions(list);
+  stripeSubscriptionLookupCache.clear();
 
   if (USE_SUPABASE_CLOUDSYNC && supabaseHasStripeTable !== false) {
     try {
@@ -8627,6 +9058,14 @@ async function findActiveStripeSubscription({ query = "", username = "" }) {
     return false;
   };
 
+  const stripeCacheKey = `${qLower}|${userLower}`;
+  if (qLower || userLower) {
+    const cachedSub = stripeSubscriptionLookupCache.get(stripeCacheKey);
+    if (cachedSub !== undefined) {
+      return cachedSub && isStripeRecordActive(cachedSub, now) ? cachedSub : null;
+    }
+  }
+
   if (USE_SUPABASE_CLOUDSYNC && supabaseHasStripeTable !== false && (qLower || userLower)) {
     try {
       const quotePgVal = (v) => `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -8648,13 +9087,17 @@ async function findActiveStripeSubscription({ query = "", username = "" }) {
           `user_name_lower.eq.${encU}`,
         );
       }
+      const stripeCols =
+        "subscription_id,checkout_session_id,invoice_id,customer_id,email_lower,user_name_lower,custom_username_lower,claimed_username_lower,price_id,product_id,tier_name,status,managed_payments,customer_portal_url,amount,verified_at,expires_at,cancelled_at";
       const { ok, status, json } = await supabaseRest(
-        `stripe_subscriptions?or=(${filters.join(",")})&order=expires_at.desc&limit=8`,
+        `stripe_subscriptions?or=(${filters.join(",")})&select=${stripeCols}&order=expires_at.desc&limit=8`,
       );
       if (ok && Array.isArray(json)) {
         supabaseHasStripeTable = true;
         const match = json.find(matchesRecord);
-        if (match) return hydrateStripeRow(match, now);
+        const hydrated = match ? hydrateStripeRow(match, now) : null;
+        stripeSubscriptionLookupCache.set(stripeCacheKey, hydrated);
+        if (hydrated) return hydrated;
       } else if (status === 404 || json?.code === "PGRST205") {
         supabaseHasStripeTable = false;
       }
@@ -8664,7 +9107,11 @@ async function findActiveStripeSubscription({ query = "", username = "" }) {
   const localMatches = loadStripeSubscriptions()
     .filter(matchesRecord)
     .sort((a, b) => (b.expiresAt || 0) - (a.expiresAt || 0));
-  return localMatches[0] || null;
+  const foundLocal = localMatches[0] || null;
+  if (qLower || userLower) {
+    stripeSubscriptionLookupCache.set(stripeCacheKey, foundLocal);
+  }
+  return foundLocal;
 }
 
 async function callStripeApi(apiPath, { method = "GET", params = null, stripeVersion = STRIPE_API_VERSION } = {}) {

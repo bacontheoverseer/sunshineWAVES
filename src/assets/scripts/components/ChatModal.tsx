@@ -183,46 +183,40 @@ interface VoiceParticipant {
   speaking?: boolean;
 }
 
-interface Category {
+interface ChatChannelDef {
   id: string;
-  label: string;
-  channels: { id: string; name: string; icon: string }[];
+  name: string;
+  icon: string;
+  categoryId: string;
+  categoryLabel: string;
+  visibility: "all" | "staff";
+  writeAccess: "all" | "staff";
 }
 
-const TEXT_CATEGORIES: Category[] = [
-  {
-    id: "info",
-    label: "info",
-    channels: [
-      { id: "rules", name: "rules", icon: "fa-book" },
-      { id: "announcements", name: "announcements", icon: "fa-bullhorn" },
-      { id: "updates", name: "updates", icon: "fa-sparkles" },
-    ],
-  },
-  {
-    id: "social",
-    label: "social",
-    channels: [
-      { id: "general", name: "general", icon: "fa-hashtag" },
-      { id: "introductions", name: "introductions", icon: "fa-hashtag" },
-      { id: "off-topic", name: "off-topic", icon: "fa-hashtag" },
-    ],
-  },
-  {
-    id: "interests",
-    label: "interests",
-    channels: [
-      { id: "games", name: "games", icon: "fa-hashtag" },
-      { id: "anime", name: "anime", icon: "fa-hashtag" },
-      { id: "music", name: "music", icon: "fa-hashtag" },
-      { id: "tech", name: "tech", icon: "fa-hashtag" },
-    ],
-  },
-  {
-    id: "support",
-    label: "support",
-    channels: [{ id: "help", name: "help", icon: "fa-hashtag" }],
-  },
+const DEFAULT_CHAT_CHANNELS: ChatChannelDef[] = [
+  { id: "rules", name: "rules", icon: "fa-book", categoryId: "info", categoryLabel: "info", visibility: "all", writeAccess: "staff" },
+  { id: "announcements", name: "announcements", icon: "fa-bullhorn", categoryId: "info", categoryLabel: "info", visibility: "all", writeAccess: "staff" },
+  { id: "updates", name: "updates", icon: "fa-sparkles", categoryId: "info", categoryLabel: "info", visibility: "all", writeAccess: "all" },
+  { id: "staff-chat", name: "staff-chat", icon: "fa-user-shield", categoryId: "staff", categoryLabel: "staff", visibility: "staff", writeAccess: "staff" },
+  { id: "general", name: "general", icon: "fa-hashtag", categoryId: "social", categoryLabel: "social", visibility: "all", writeAccess: "all" },
+  { id: "introductions", name: "introductions", icon: "fa-hashtag", categoryId: "social", categoryLabel: "social", visibility: "all", writeAccess: "all" },
+  { id: "off-topic", name: "off-topic", icon: "fa-hashtag", categoryId: "social", categoryLabel: "social", visibility: "all", writeAccess: "all" },
+  { id: "games", name: "games", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "anime", name: "anime", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "music", name: "music", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "tech", name: "tech", icon: "fa-hashtag", categoryId: "interests", categoryLabel: "interests", visibility: "all", writeAccess: "all" },
+  { id: "help", name: "help", icon: "fa-hashtag", categoryId: "support", categoryLabel: "support", visibility: "all", writeAccess: "all" },
+];
+
+const CHANNEL_ICON_OPTIONS = [
+  { value: "fa-hashtag", label: "# hashtag" },
+  { value: "fa-bullhorn", label: "announcements" },
+  { value: "fa-book", label: "rules / guide" },
+  { value: "fa-user-shield", label: "staff shield" },
+  { value: "fa-lock", label: "lock" },
+  { value: "fa-sparkles", label: "updates" },
+  { value: "fa-gamepad", label: "gaming" },
+  { value: "fa-code", label: "tech / dev" },
 ];
 
 const VOICE_CHANNELS = [
@@ -343,6 +337,13 @@ function extractMsgEpochMs(msg: ChatMessage): number | null {
   if (!m || !m[1]) return null;
   const n = Number(m[1]);
   return Number.isFinite(n) ? n : null;
+}
+
+function getMsgTimestampMs(msg: ChatMessage): number {
+  const fromId = extractMsgEpochMs(msg);
+  if (fromId !== null && fromId > 0) return fromId;
+  const parsed = Number(new Date(msg.timestamp).getTime());
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function shouldGroupMessages(prev: ChatMessage | undefined, curr: ChatMessage): boolean {
@@ -733,14 +734,6 @@ const ChatMessageRow = memo(function ChatMessageRow({
             <i class="fa-regular fa-face-smile"></i>
           </button>
         )}
-        <button
-          type="button"
-          class="chat-entry-action-btn"
-          title={`View @${msg.author}'s profile`}
-          onClick={() => onOpenUserProfile(msg.author)}
-        >
-          <i class="fa-solid fa-id-card"></i>
-        </button>
         {canReplyOrReact && (
           <button
             type="button"
@@ -762,24 +755,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
           </button>
         )}
         {!isSelf && (
-          <>
-            <button
-              type="button"
-              class="chat-entry-action-btn"
-              title={`Direct message @${msg.author}`}
-              onClick={() => onOpenDirectMessage(msg.author)}
-            >
-              <i class="fa-solid fa-paper-plane"></i>
-            </button>
-            <button
-              type="button"
-              class="chat-entry-action-btn danger"
-              title={`Block @${msg.author}`}
-              onClick={() => onToggleBlockUser(msg.author)}
-            >
-              <i class="fa-solid fa-ban"></i>
-            </button>
-          </>
+          <button
+            type="button"
+            class="chat-entry-action-btn"
+            title={`Direct message @${msg.author}`}
+            onClick={() => onOpenDirectMessage(msg.author)}
+          >
+            <i class="fa-solid fa-paper-plane"></i>
+          </button>
         )}
         {canDeleteMsg && (
           <button
@@ -864,11 +847,14 @@ const ChatUserRow = memo(function ChatUserRow({
   const displayName = uCustom?.displayName?.trim() || u.username;
 
   return (
-    <div class={`chat-user-item${offline ? " offline" : ""} ${npClass}`}>
+    <div
+      class={`chat-user-item${offline ? " offline" : ""} ${npClass}`}
+      onClick={() => onOpenUserProfile(u.username)}
+      title={`View @${u.username}'s profile`}
+    >
       <NameplateMediaLayer url={uCustom?.nameplateUrl} />
       <div
         class="chat-user-avatar-wrap"
-        title={`View @${u.username}'s profile`}
         onClick={(e) => {
           e.stopPropagation();
           onOpenUserProfile(u.username);
@@ -914,7 +900,7 @@ const ChatUserRow = memo(function ChatUserRow({
           )}
           {!offline && u.isSelf && <span class="chat-you-pill">you</span>}
         </div>
-        {!offline && playingDurationLabel ? (
+        {!offline && dotStatus !== "idle" && !u.isIdle && playingDurationLabel ? (
           <div class="chat-user-game-sub" title={`Playing ${u.game}`}>
             <i class="fa-solid fa-gamepad"></i>
             <span>
@@ -938,43 +924,34 @@ const ChatUserRow = memo(function ChatUserRow({
         )}
       </div>
 
-      <div class="chat-user-actions">
-        <button
-          type="button"
-          class="chat-user-mini-btn"
-          title={
-            !offline && u.isSelf
-              ? "View your profile"
-              : `View @${u.username}'s profile`
-          }
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpenUserProfile(u.username);
-          }}
-        >
-          <i class="fa-solid fa-id-card"></i>
-        </button>
-        {(offline || !u.isSelf) && (
-          <>
+      {(offline || !u.isSelf) && (
+        <div class="chat-user-actions">
+          <button
+            type="button"
+            class="chat-user-mini-btn"
+            title={`Direct message @${u.username}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenDirectMessage(u.username);
+            }}
+          >
+            <i class="fa-solid fa-comment-dots"></i>
+          </button>
+          {blocked && (
             <button
               type="button"
-              class="chat-user-mini-btn"
-              title={`Direct message ${u.username}`}
-              onClick={() => onOpenDirectMessage(u.username)}
-            >
-              <i class="fa-solid fa-comment-dots"></i>
-            </button>
-            <button
-              type="button"
-              class={`chat-user-mini-btn ${blocked ? "blocked" : ""}`}
-              title={blocked ? `Unblock ${u.username}` : `Block ${u.username}`}
-              onClick={() => onToggleBlockUser(u.username)}
+              class="chat-user-mini-btn blocked"
+              title={`Unblock @${u.username}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleBlockUser(u.username);
+              }}
             >
               <i class="fa-solid fa-ban"></i>
             </button>
-          </>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 });
@@ -1118,6 +1095,16 @@ export default function ChatModal() {
   const [selfIdle, setSelfIdle] = useState<boolean>(() => isClientAutoIdle());
   const hydratedLocalCustomForRef = useRef<string | null>(null);
   const [chatGroups, setChatGroups] = useState<ChatGroupDef[]>([]);
+  const [chatChannels, setChatChannels] = useState<ChatChannelDef[]>(DEFAULT_CHAT_CHANNELS);
+  const [channelEditorOpen, setChannelEditorOpen] = useState(false);
+  const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
+  const [chName, setChName] = useState("");
+  const [chCategory, setChCategory] = useState("social");
+  const [chIcon, setChIcon] = useState("fa-hashtag");
+  const [chVisibility, setChVisibility] = useState<"all" | "staff">("all");
+  const [chWriteAccess, setChWriteAccess] = useState<"all" | "staff">("all");
+  const [savingChannel, setSavingChannel] = useState(false);
+  const fetchChatStateRef = useRef<((force?: boolean) => void) | null>(null);
   const [groupModalMode, setGroupModalMode] = useState<"create" | "members" | null>(null);
   const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
   const [reactPickerMessageId, setReactPickerMessageId] = useState<string | null>(null);
@@ -1723,19 +1710,15 @@ export default function ChatModal() {
           }
           return prev;
         }
-        const incomingTs = Number(new Date(incoming.timestamp).getTime()) || 0;
+        const incomingTs = getMsgTimestampMs(incoming);
         let updated: ChatMessage[];
         if (
           prev.length > 0 &&
           incomingTs > 0 &&
-          incomingTs < (Number(new Date(prev[prev.length - 1]!.timestamp).getTime()) || 0)
+          incomingTs < getMsgTimestampMs(prev[prev.length - 1]!)
         ) {
           updated = [...prev, incoming]
-            .sort(
-              (a, b) =>
-                (Number(new Date(a.timestamp).getTime()) || 0) -
-                (Number(new Date(b.timestamp).getTime()) || 0),
-            )
+            .sort((a, b) => getMsgTimestampMs(a) - getMsgTimestampMs(b))
             .slice(-250);
         } else {
           updated = [...prev, incoming].slice(-250);
@@ -2336,6 +2319,9 @@ export default function ChatModal() {
         .then((data) => {
           if (!data) return;
           initialStateLoadedRef.current = true;
+          if (Array.isArray(data.channels)) {
+            setChatChannels(data.channels);
+          }
           if (typeof data.totalUsersCount === "number" && Number.isFinite(data.totalUsersCount)) {
             setServerTotalUsersCount(data.totalUsersCount);
           }
@@ -2366,7 +2352,7 @@ export default function ChatModal() {
                 }
               }
               serverIds.add(m.id);
-              const ts = Number(new Date(m.timestamp).getTime()) || 0;
+              const ts = getMsgTimestampMs(m);
               if (ts > 0 && ts < minServerTs) minServerTs = ts;
               if (!seenMessageIdsRef.current.has(m.id)) {
                 seenMessageIdsRef.current.add(m.id);
@@ -2415,10 +2401,10 @@ export default function ChatModal() {
                     kept.push(existing);
                   }
                 } else {
-                  const exTs = Number(new Date(existing.timestamp).getTime()) || 0;
+                  const exTs = getMsgTimestampMs(existing);
                   const isPending =
                     pendingMessageIdsRef.current.has(existing.id) ||
-                    (exTs > 0 && nowTs - exTs < 5000);
+                    (exTs > 0 && nowTs - exTs < 30000);
                   const withinServerWindow =
                     !hasMore || (minServerTs < Infinity && exTs > 0 && exTs >= minServerTs);
                   if (!isPending && withinServerWindow) {
@@ -2438,11 +2424,7 @@ export default function ChatModal() {
 
               if (!changed) return prev;
               const sorted = kept
-                .sort(
-                  (a, b) =>
-                    (Number(new Date(a.timestamp).getTime()) || 0) -
-                    (Number(new Date(b.timestamp).getTime()) || 0),
-                )
+                .sort((a, b) => getMsgTimestampMs(a) - getMsgTimestampMs(b))
                 .slice(-250);
               try {
                 batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(sorted));
@@ -2590,6 +2572,7 @@ export default function ChatModal() {
     const onSyncWake = () => fetchChatAndPresenceState();
     document.addEventListener("visibilitychange", onVisWake);
     window.addEventListener("sunshine-sse-open", onSyncWake);
+    fetchChatStateRef.current = fetchChatAndPresenceState;
     window.addEventListener("online", onSyncWake);
     let lastPollAt = Date.now();
     const pollInterval = window.setInterval(() => {
@@ -2731,6 +2714,9 @@ export default function ChatModal() {
             setSelfRole("member");
           }
         }
+        fetchChatStateRef.current?.(true);
+      } else if (evtKind === "CHANNELS_UPDATED") {
+        fetchChatStateRef.current?.(true);
       } else if (evtKind === "GOAT_UPDATED") {
         if (Array.isArray(detail.goatUsers)) setGoatUsers(detail.goatUsers);
       } else if (evtKind === "PROFILE_UPDATED" && detail.username) {
@@ -3208,19 +3194,11 @@ export default function ChatModal() {
     const imageToSend = imageOverride !== undefined ? imageOverride : pendingImage;
     if (!text && !validGif && !imageToSend) return;
 
-    // Prevent sending DM to a user you have blocked or who does not exist in CloudSync
+    // Prevent sending DM to a user you have blocked
     if (activeChannel.startsWith("dm:")) {
       const partner = getDmPartnerName(activeChannel, cloudUser);
       if (isUserBlocked(partner)) {
         notifyToast(`unblock ${partner} before sending a direct message`, "error");
-        return;
-      }
-      if (
-        registeredCloudSyncUsers.length > 0 &&
-        !registeredCloudSyncUsers.some((u) => u.toLowerCase() === partner.toLowerCase())
-      ) {
-        notifyToast(`user "@${partner}" does not exist in cloudsync`, "error");
-        setActiveChannel("general");
         return;
       }
     }
@@ -3327,8 +3305,8 @@ export default function ChatModal() {
         }),
       })
         .then(async (res) => {
-          pendingMessageIdsRef.current.delete(newMsg.id);
           if (!res.ok) {
+            pendingMessageIdsRef.current.delete(newMsg.id);
             filterMessagesLocally((m) => m.id !== newMsg.id);
             const errData = await res.json().catch(() => null);
             if (errData?.timedOut && errData.until !== undefined) {
@@ -3338,6 +3316,9 @@ export default function ChatModal() {
               notifyToast(errData.error, "error");
             }
           } else {
+            window.setTimeout(() => {
+              pendingMessageIdsRef.current.delete(newMsg.id);
+            }, 15000);
             const okData = await res.json().catch(() => null);
             if (okData?.message) {
               ingestIncomingMessage(okData.message);
@@ -3345,7 +3326,9 @@ export default function ChatModal() {
           }
         })
         .catch(() => {
-          pendingMessageIdsRef.current.delete(newMsg.id);
+          window.setTimeout(() => {
+            pendingMessageIdsRef.current.delete(newMsg.id);
+          }, 15000);
         });
     } finally {
       setIsSending(false);
@@ -3885,10 +3868,18 @@ export default function ChatModal() {
 
   const handleSendMessage = async (e?: Event) => {
     if (e) e.preventDefault();
+    if (!canTypeInActiveChannel) {
+      notifyToast("only owners and mods can type in this channel", "error");
+      return;
+    }
     await sendChatMessage(inputText);
   };
 
   const handleSendGif = async (gif: KlipyGifItem) => {
+    if (!canTypeInActiveChannel) {
+      notifyToast("only owners and mods can type in this channel", "error");
+      return;
+    }
     await sendChatMessage("", { url: gif.url, title: gif.title });
   };
 
@@ -3922,15 +3913,16 @@ export default function ChatModal() {
       const myServerRecord = serverOnlineUsers.find(
         (u) => u.username.toLowerCase() === cloudUser.toLowerCase()
       );
+      const selfIsIdle = Boolean(selfIdle) || editingCustom?.presenceStatus === "idle";
       map.set(cloudUser.toLowerCase(), {
         username: cloudUser,
         color: stringToColor(cloudUser),
         status: "online",
         isIdle: Boolean(selfIdle),
         isSelf: true,
-        game: myGameSession.game,
-        isPlayingGame: myGameSession.isPlayingGame,
-        gameStartedAt: myGameSession.gameStartedAt,
+        game: selfIsIdle ? "browsing" : myGameSession.game,
+        isPlayingGame: !selfIsIdle && myGameSession.isPlayingGame,
+        gameStartedAt: selfIsIdle ? 0 : myGameSession.gameStartedAt,
         bio: myServerRecord?.bio ?? editingBio,
         statusText: myServerRecord?.statusText ?? editingStatusText,
         customization: editingCustom || myServerRecord?.customization || null,
@@ -4067,7 +4059,7 @@ export default function ChatModal() {
         );
         const labelStatus =
           effStatus === "dnd" ? "do not disturb" : effStatus === "idle" ? "idle" : "online";
-        if (partnerOnline.isPlayingGame && partnerOnline.game) {
+        if (effStatus !== "idle" && !partnerOnline.isIdle && partnerOnline.isPlayingGame && partnerOnline.game) {
           dmDesc = `@${partner} is ${labelStatus} · playing ${partnerOnline.game} (${formatElapsedDuration(
             partnerOnline.gameStartedAt,
             nowMs
@@ -4098,18 +4090,21 @@ export default function ChatModal() {
         desc: `voice & text lounge · ${voiceFound.name}`,
       };
     }
-    for (const cat of TEXT_CATEGORIES) {
-      const found = cat.channels.find((c) => c.id === activeChannel);
-      if (found) {
-        return {
-          ...found,
-          isDm: false,
-          isGroup: false,
-          isVoice: false,
-          groupDef: null as ChatGroupDef | null,
-          desc: `welcome to the #${found.name} channel`,
-        };
-      }
+    const foundTextChannel = chatChannels.find((c) => c.id === activeChannel);
+    if (foundTextChannel) {
+      return {
+        ...foundTextChannel,
+        isDm: false,
+        isGroup: false,
+        isVoice: false,
+        groupDef: null as ChatGroupDef | null,
+        desc:
+          foundTextChannel.visibility === "staff"
+            ? "staff-only channel · owners & mods"
+            : foundTextChannel.writeAccess === "staff"
+            ? "read-only · owners & mods post here"
+            : "",
+      };
     }
     return {
       id: activeChannel,
@@ -4119,9 +4114,178 @@ export default function ChatModal() {
       isGroup: false,
       isVoice: false,
       groupDef: null as ChatGroupDef | null,
-      desc: `welcome to #${activeChannel}`,
+      desc: "",
     };
-  }, [activeChannel, cloudUser, onlineUsers, chatGroups, nowMs]);
+  }, [activeChannel, cloudUser, onlineUsers, chatGroups, chatChannels, nowMs]);
+
+  const isStaffUser = Boolean(cloudUser && (selfRole === "owner" || selfRole === "mod"));
+  const visibleChannels = useMemo(
+    () => chatChannels.filter((c) => c.visibility !== "staff" || isStaffUser),
+    [chatChannels, isStaffUser]
+  );
+  const visibleCategories = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; channels: ChatChannelDef[] }>();
+    for (const ch of visibleChannels) {
+      const catId = ch.categoryId || "social";
+      const catLabel = ch.categoryLabel || catId;
+      let bucket = map.get(catId);
+      if (!bucket) {
+        bucket = { id: catId, label: catLabel, channels: [] };
+        map.set(catId, bucket);
+      }
+      bucket.channels.push(ch);
+    }
+    return Array.from(map.values());
+  }, [visibleChannels]);
+
+  const activeChannelCfg = useMemo(
+    () => chatChannels.find((c) => c.id === activeChannel) || null,
+    [chatChannels, activeChannel]
+  );
+  const canTypeInActiveChannel = useMemo(() => {
+    if (activeChannelDef.isDm || activeChannelDef.isGroup || activeChannelDef.isVoice) return true;
+    if (!activeChannelCfg) return true;
+    if (activeChannelCfg.visibility === "staff" && !isStaffUser) return false;
+    if (activeChannelCfg.writeAccess === "staff" && !isStaffUser) return false;
+    return true;
+  }, [activeChannelDef, activeChannelCfg, isStaffUser]);
+
+  useEffect(() => {
+    if (
+      !activeChannel.startsWith("dm:") &&
+      !activeChannel.startsWith("group:") &&
+      !activeChannel.startsWith("voice:")
+    ) {
+      const stillVisible = visibleChannels.some((c) => c.id === activeChannel);
+      if (!stillVisible && visibleChannels.length > 0) {
+        setActiveChannel(
+          visibleChannels.find((c) => c.id === "general")?.id ||
+            visibleChannels[0]?.id ||
+            "general"
+        );
+      }
+    }
+  }, [activeChannel, visibleChannels]);
+
+  const openCreateChannelModal = useCallback(() => {
+    setEditingChannelId(null);
+    setChName("");
+    setChCategory("social");
+    setChIcon("fa-hashtag");
+    setChVisibility("all");
+    setChWriteAccess("all");
+    setChannelEditorOpen(true);
+  }, []);
+
+  const openEditChannelModal = useCallback((ch: ChatChannelDef) => {
+    setEditingChannelId(ch.id);
+    setChName(ch.name);
+    setChCategory(ch.categoryLabel || ch.categoryId || "social");
+    setChIcon(ch.icon || "fa-hashtag");
+    setChVisibility(ch.visibility === "staff" ? "staff" : "all");
+    setChWriteAccess(ch.writeAccess === "staff" ? "staff" : "all");
+    setChannelEditorOpen(true);
+  }, []);
+
+  const handleSaveChannel = useCallback(
+    async (e: Event) => {
+      e.preventDefault();
+      if (!cloudUser || !isStaffUser || savingChannel) return;
+      const cleanName = chName.trim().toLowerCase();
+      if (cleanName.length < 2) {
+        notifyToast("channel name must be at least 2 characters", "error");
+        return;
+      }
+      setSavingChannel(true);
+      try {
+        let token = "";
+        try {
+          token = localStorage.getItem("auth_token") || "";
+        } catch {}
+        const endpoint = editingChannelId
+          ? "/api/chat/channels/edit"
+          : "/api/chat/channels/create";
+        const res = await fetch(endpoint, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            ...(editingChannelId ? { id: editingChannelId } : {}),
+            name: cleanName,
+            categoryLabel: chCategory.trim().toLowerCase() || "social",
+            icon: chIcon,
+            visibility: chVisibility,
+            writeAccess: chWriteAccess,
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "could not save channel", "error");
+          return;
+        }
+        setChannelEditorOpen(false);
+        fetchChatStateRef.current?.(true);
+        if (!editingChannelId && data.channel?.id) {
+          setActiveChannel(data.channel.id);
+        }
+        notifyToast(
+          editingChannelId ? `updated #${data.channel?.name || cleanName}` : `created #${cleanName}`,
+          "success"
+        );
+      } catch {
+        notifyToast("failed to save channel", "error");
+      } finally {
+        setSavingChannel(false);
+      }
+    },
+    [
+      cloudUser,
+      isStaffUser,
+      savingChannel,
+      chName,
+      chCategory,
+      chIcon,
+      chVisibility,
+      chWriteAccess,
+      editingChannelId,
+    ]
+  );
+
+  const handleDeleteChannel = useCallback(async () => {
+    if (!editingChannelId || editingChannelId === "general" || savingChannel) return;
+    setSavingChannel(true);
+    try {
+      let token = "";
+      try {
+        token = localStorage.getItem("auth_token") || "";
+      } catch {}
+      const res = await fetch("/api/chat/channels/delete", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ id: editingChannelId }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notifyToast(data?.error || "could not delete channel", "error");
+        return;
+      }
+      setChannelEditorOpen(false);
+      if (activeChannel === editingChannelId) setActiveChannel("general");
+      fetchChatStateRef.current?.(true);
+      notifyToast("channel deleted", "success");
+    } catch {
+      notifyToast("failed to delete channel", "error");
+    } finally {
+      setSavingChannel(false);
+    }
+  }, [editingChannelId, savingChannel, activeChannel]);
 
   const currentDmPartner = activeChannelDef.isDm ? activeChannelDef.name : null;
   const isCurrentDmBlocked = currentDmPartner ? isUserBlocked(currentDmPartner) : false;
@@ -4160,11 +4324,22 @@ export default function ChatModal() {
               <i class="fa-solid fa-comments"></i>
               <span>chatroom</span>
             </div>
+            {isStaffUser && (
+              <button
+                type="button"
+                class="chat-category-add-btn"
+                title="Create new channel"
+                aria-label="Create new channel"
+                onClick={openCreateChannelModal}
+              >
+                <i class="fa-solid fa-plus"></i>
+              </button>
+            )}
           </div>
 
           <div class="chat-sidebar-scroll">
             {/* Text Channel Categories */}
-            {TEXT_CATEGORIES.map((cat) => {
+            {visibleCategories.map((cat) => {
               const isCollapsed = !!collapsedCategories[cat.id];
               return (
                 <div key={cat.id} class="chat-category">
@@ -4198,8 +4373,51 @@ export default function ChatModal() {
                           <div class="chat-channel-item-left">
                             <i class={`fa-solid ${ch.icon} chat-channel-prefix`}></i>
                             <span>{ch.name}</span>
+                            {ch.visibility === "staff" ? (
+                              <i
+                                class="fa-solid fa-eye-slash"
+                                title="Staff-only visibility (owners & mods)"
+                                style={{ fontSize: "10px", opacity: 0.7, marginLeft: "4px" }}
+                              ></i>
+                            ) : ch.writeAccess === "staff" ? (
+                              <i
+                                class="fa-solid fa-lock"
+                                title="Read-only for members (owners & mods can type)"
+                                style={{ fontSize: "10px", opacity: 0.65, marginLeft: "4px" }}
+                              ></i>
+                            ) : null}
                           </div>
-                          {unread > 0 && <span class="chat-unread-badge">{unread}</span>}
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                            {unread > 0 && <span class="chat-unread-badge">{unread}</span>}
+                            {isStaffUser && (
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                title={`Edit #${ch.name}`}
+                                aria-label={`Edit #${ch.name}`}
+                                class="chat-channel-edit-icon"
+                                style={{
+                                  fontSize: "11px",
+                                  opacity: 0.65,
+                                  padding: "2px 4px",
+                                  borderRadius: "4px",
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openEditChannelModal(ch);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    openEditChannelModal(ch);
+                                  }
+                                }}
+                              >
+                                <i class="fa-solid fa-gear"></i>
+                              </span>
+                            )}
+                          </div>
                         </button>
                       );
                     })}
@@ -4575,7 +4793,10 @@ export default function ChatModal() {
                         ? "idle (auto)"
                         : editingCustom.presenceStatus || "online")}
                   </span>
-                  {myGameSession.isPlayingGame && myGameSession.game && (
+                  {!selfIdle &&
+                    editingCustom.presenceStatus !== "idle" &&
+                    myGameSession.isPlayingGame &&
+                    myGameSession.game && (
                     <div class="chat-profile-game-status" title={`Playing ${myGameSession.game}`}>
                       <i class="fa-solid fa-gamepad"></i>
                       <span>
@@ -4587,27 +4808,14 @@ export default function ChatModal() {
                 </div>
                 <button
                   type="button"
-                  class="chat-user-mini-btn is-round"
-                  title="Customize profile & animations"
-                  style={{ opacity: 0.9 }}
+                  class="chat-user-mini-btn"
+                  title="Customize profile"
                   onClick={(e) => {
                     e.stopPropagation();
                     void handleOpenCustomizer();
                   }}
                 >
-                  <i class="fa-solid fa-wand-magic-sparkles"></i>
-                </button>
-                <button
-                  type="button"
-                  class="chat-user-mini-btn"
-                  title="View your profile"
-                  style={{ opacity: 0.85 }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openUserProfile(cloudUser);
-                  }}
-                >
-                  <i class="fa-solid fa-id-card"></i>
+                  <i class="fa-solid fa-sliders"></i>
                 </button>
               </>
             ) : (
@@ -4754,21 +4962,33 @@ export default function ChatModal() {
                 </>
               )}
 
-              {/* Public Channel Clear Chat Action for Owner/Mod */}
+              {/* Public Channel Edit & Clear Chat Actions for Owner/Mod */}
               {!activeChannelDef.isDm &&
                 !activeChannelDef.isGroup &&
                 !activeChannelDef.isVoice &&
-                cloudUser &&
-                (selfRole === "owner" || selfRole === "mod") && (
-                  <button
-                    type="button"
-                    class="chat-header-btn danger"
-                    title={`Clear all messages in #${activeChannelDef.name}`}
-                    onClick={() => setConfirmDeleteChat(activeChannel)}
-                  >
-                    <i class="fa-solid fa-broom"></i>
-                    <span>clear chat</span>
-                  </button>
+                isStaffUser && (
+                  <>
+                    {activeChannelCfg && (
+                      <button
+                        type="button"
+                        class="chat-header-btn"
+                        title={`Edit #${activeChannelDef.name} visibility & permissions`}
+                        onClick={() => openEditChannelModal(activeChannelCfg)}
+                      >
+                        <i class="fa-solid fa-sliders"></i>
+                        <span>edit channel</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      class="chat-header-btn danger"
+                      title={`Clear all messages in #${activeChannelDef.name}`}
+                      onClick={() => setConfirmDeleteChat(activeChannel)}
+                    >
+                      <i class="fa-solid fa-broom"></i>
+                      <span>clear chat</span>
+                    </button>
+                  </>
                 )}
 
               {/* Voice Channel Header Action */}
@@ -5064,14 +5284,11 @@ export default function ChatModal() {
                 <i class={`fa-solid ${activeChannelDef.icon}`}></i>
                 <p>
                   {activeChannelDef.isDm
-                    ? `start a direct conversation with @${activeChannelDef.name}`
+                    ? `no messages with @${activeChannelDef.name} yet`
                     : activeChannelDef.isGroup
-                    ? `start chatting in ${activeChannelDef.name}`
-                    : `welcome to #${activeChannelDef.name}`}
+                    ? `no messages in ${activeChannelDef.name} yet`
+                    : `no messages in #${activeChannelDef.name} yet`}
                 </p>
-                <span style={{ fontSize: "11px" }}>
-                  openai moderation enabled (excluding swear words)
-                </span>
               </div>
             ) : (
               renderedMessages.map((msg, idx) => {
@@ -5208,6 +5425,13 @@ export default function ChatModal() {
                       : `${Math.max(1, Math.ceil((selfTimeout.until - nowMs) / 60000))}m remaining`}
                     ).
                   </span>
+                </div>
+              </div>
+            ) : !canTypeInActiveChannel ? (
+              <div class="chat-auth-locked">
+                <div class="chat-auth-locked-text">
+                  <i class="fa-solid fa-lock"></i>
+                  <span>only owners &amp; mods can type in #{activeChannelDef.name}.</span>
                 </div>
               </div>
             ) : (
@@ -5487,9 +5711,15 @@ export default function ChatModal() {
             ) : (
               onlineUsers.map((u) => {
                 const blocked = isUserBlocked(u.username);
-                const playingActive = Boolean(u.isPlayingGame && u.game && u.game !== "browsing");
                 const uCustom = u.customization || null;
                 const dotStatus = getEffectivePresenceDot(uCustom?.presenceStatus, u.isIdle);
+                const playingActive = Boolean(
+                  dotStatus !== "idle" &&
+                    !u.isIdle &&
+                    u.isPlayingGame &&
+                    u.game &&
+                    u.game !== "browsing"
+                );
                 const playingDurationLabel = playingActive
                   ? formatElapsedDuration(u.gameStartedAt, nowMs)
                   : "";
@@ -5627,18 +5857,6 @@ export default function ChatModal() {
               );
               const isOnlineNow =
                 isViewingSelf || Boolean(onlineMatch || verifiedProfile?.online);
-              const activeGameName = isViewingSelf
-                ? myGameSession.isPlayingGame
-                  ? myGameSession.game
-                  : ""
-                : onlineMatch?.isPlayingGame
-                ? onlineMatch.game || ""
-                : verifiedProfile?.isPlayingGame
-                ? verifiedProfile.game
-                : "";
-              const activeGameStart = isViewingSelf
-                ? myGameSession.gameStartedAt
-                : onlineMatch?.gameStartedAt || verifiedProfile?.gameStartedAt || 0;
               const avatarCol = stringToColor(targetName);
               const blocked = isUserBlocked(targetName);
 
@@ -5648,6 +5866,25 @@ export default function ChatModal() {
                     verifiedProfile?.customization || metaMatch?.customization,
                     targetName
                   );
+              const targetIsIdle = isViewingSelf
+                ? Boolean(selfIdle || custom.presenceStatus === "idle")
+                : Boolean(onlineMatch?.isIdle || custom.presenceStatus === "idle");
+              const activeGameName = targetIsIdle
+                ? ""
+                : isViewingSelf
+                ? myGameSession.isPlayingGame
+                  ? myGameSession.game
+                  : ""
+                : onlineMatch?.isPlayingGame
+                ? onlineMatch.game || ""
+                : verifiedProfile?.isPlayingGame
+                ? verifiedProfile.game
+                : "";
+              const activeGameStart = targetIsIdle
+                ? 0
+                : isViewingSelf
+                ? myGameSession.gameStartedAt
+                : onlineMatch?.gameStartedAt || verifiedProfile?.gameStartedAt || 0;
               const targetRole: ChatRole =
                 (isViewingSelf ? selfRole : verifiedProfile?.role || metaMatch?.role) ||
                 (ownerUsers.some((o) => o.toLowerCase() === targetName.toLowerCase())
@@ -5668,7 +5905,12 @@ export default function ChatModal() {
                   ? `banner-${custom.bannerStyle}`
                   : "";
               const displayLabel = custom.displayName?.trim() || targetName;
-              const dotClass = isOnlineNow ? custom.presenceStatus || "online" : "offline";
+              const dotClass = isOnlineNow
+                ? getEffectivePresenceDot(
+                    custom.presenceStatus,
+                    isViewingSelf ? selfIdle : onlineMatch?.isIdle
+                  )
+                : "offline";
               const canModTarget = Boolean(
                 !isViewingSelf &&
                   (selfRole === "owner" || selfRole === "mod") &&
@@ -5749,35 +5991,18 @@ export default function ChatModal() {
                           <span class={`chat-profile-status-dot ${dotClass}`}></span>
                         </UserAvatar>
 
-                        <div class="chat-profile-badges">
-                          {custom.customTag && (
-                            <span class="chat-role-badge custom-tag">{custom.customTag}</span>
-                          )}
-                          {(verifiedProfile?.cloudSyncVerified ?? true) && (
-                            <span class="chat-profile-badge verified">
-                              <i class="fa-solid fa-cloud"></i> cloudsync
-                            </span>
-                          )}
-                          {targetTimedOut && (
-                            <span class="chat-role-badge muted-pill">
-                              <i class="fa-solid fa-comment-slash"></i> timed out
-                            </span>
-                          )}
-                          {isViewingSelf && (
-                            <span class="chat-profile-badge self">you</span>
-                          )}
-                          <span
-                            class={`chat-profile-badge ${isOnlineNow ? "online" : "offline"}`}
-                          >
-                            {isOnlineNow
-                              ? dotClass === "dnd"
-                                ? "● dnd"
-                                : dotClass === "idle"
-                                ? "● idle"
-                                : "● online"
-                              : "○ offline"}
-                          </span>
-                        </div>
+                        {(custom.customTag || targetTimedOut) && (
+                          <div class="chat-profile-badges">
+                            {custom.customTag && (
+                              <span class="chat-role-badge custom-tag">{custom.customTag}</span>
+                            )}
+                            {targetTimedOut && (
+                              <span class="chat-role-badge muted-pill">
+                                <i class="fa-solid fa-comment-slash"></i> timed out
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       <div class="chat-profile-identity">
@@ -6353,6 +6578,151 @@ export default function ChatModal() {
             onClose={() => setGroupModalMode(null)}
             notify={(msg, type) => notifyToast(msg, type)}
           />
+        )}
+
+        {/* ── CHANNEL CREATE / EDIT MODAL (OWNER & MOD) ── */}
+        {channelEditorOpen && isStaffUser && (
+          <div
+            class="chat-modal-overlay open"
+            style={{ zIndex: 10030, background: "rgba(0,0,0,0.65)" }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !savingChannel) setChannelEditorOpen(false);
+            }}
+          >
+            <div
+              class="studio-panel"
+              style={{
+                width: "min(440px, 92vw)",
+                padding: "20px 22px",
+                gap: "14px",
+                background: "var(--bg-surface-2, #16161d)",
+                border: "1px solid var(--bg-surface-10, rgba(255,255,255,0.12))",
+                borderRadius: "16px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700, color: "var(--text-primary)" }}>
+                  {editingChannelId ? `edit #${chName || editingChannelId}` : "create channel"}
+                </h3>
+                <button
+                  type="button"
+                  class="chat-header-btn"
+                  disabled={savingChannel}
+                  onClick={() => setChannelEditorOpen(false)}
+                >
+                  <i class="fa-solid fa-xmark"></i>
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveChannel} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
+                  <span>channel name</span>
+                  <input
+                    type="text"
+                    class="apps-custom-input"
+                    value={chName}
+                    maxLength={32}
+                    placeholder="e.g. staff-lounge"
+                    onInput={(e) => setChName((e.target as HTMLInputElement).value)}
+                    required
+                  />
+                </label>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
+                    <span>category</span>
+                    <input
+                      type="text"
+                      class="apps-custom-input"
+                      value={chCategory}
+                      maxLength={24}
+                      placeholder="e.g. staff, info, social"
+                      onInput={(e) => setChCategory((e.target as HTMLInputElement).value)}
+                    />
+                  </label>
+
+                  <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
+                    <span>icon</span>
+                    <select
+                      class="apps-custom-input"
+                      value={chIcon}
+                      onChange={(e) => setChIcon((e.target as HTMLSelectElement).value)}
+                    >
+                      {CHANNEL_ICON_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
+                    <span>who can see this channel</span>
+                    <select
+                      class="apps-custom-input"
+                      value={chVisibility}
+                      onChange={(e) =>
+                        setChVisibility((e.target as HTMLSelectElement).value === "staff" ? "staff" : "all")
+                      }
+                    >
+                      <option value="all">everyone</option>
+                      <option value="staff">owners &amp; mods only</option>
+                    </select>
+                  </label>
+
+                  <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
+                    <span>who can type</span>
+                    <select
+                      class="apps-custom-input"
+                      value={chWriteAccess}
+                      onChange={(e) =>
+                        setChWriteAccess((e.target as HTMLSelectElement).value === "staff" ? "staff" : "all")
+                      }
+                    >
+                      <option value="all">everyone</option>
+                      <option value="staff">owners &amp; mods only</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginTop: "6px" }}>
+                  {editingChannelId && editingChannelId !== "general" ? (
+                    <button
+                      type="button"
+                      class="chat-header-btn danger"
+                      disabled={savingChannel}
+                      onClick={() => void handleDeleteChannel()}
+                    >
+                      <i class="fa-solid fa-trash"></i>
+                      <span>delete</span>
+                    </button>
+                  ) : (
+                    <span />
+                  )}
+
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <button
+                      type="button"
+                      class="chat-header-btn"
+                      disabled={savingChannel}
+                      onClick={() => setChannelEditorOpen(false)}
+                    >
+                      cancel
+                    </button>
+                    <button
+                      type="submit"
+                      class="apps-custom-btn"
+                      disabled={savingChannel}
+                    >
+                      {savingChannel ? "saving..." : editingChannelId ? "save changes" : "create channel"}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
         )}
 
         {/* ── IN-SITE CAMERA CAPTURE MODAL ── */}
