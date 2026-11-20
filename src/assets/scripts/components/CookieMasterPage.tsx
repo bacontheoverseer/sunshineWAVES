@@ -101,6 +101,11 @@ export default function CookieMasterPage() {
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoCheckedRef = useRef(false);
   const checkoutPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const buyLockRef = useRef(false);
+  const hourlyLockRef = useRef(false);
+  const streakLockRef = useRef(false);
+  const clickerLockRef = useRef(false);
+  const dailyMasterLockRef = useRef(false);
 
   const refreshState = useCallback(() => {
     syncAdFreeDomClass();
@@ -188,6 +193,7 @@ export default function CookieMasterPage() {
 
     window.addEventListener("cookie-coins-updated", refreshState);
     window.addEventListener("cookie-master-changed", refreshState);
+    window.addEventListener("storage", refreshState);
     document.addEventListener("cloudsync-restored", refreshState);
 
     return () => {
@@ -195,6 +201,7 @@ export default function CookieMasterPage() {
       if (brand) brand.removeEventListener("click", onBrandClick);
       window.removeEventListener("cookie-coins-updated", refreshState);
       window.removeEventListener("cookie-master-changed", refreshState);
+      window.removeEventListener("storage", refreshState);
       document.removeEventListener("cloudsync-restored", refreshState);
     };
   }, [show, hide, toggle, refreshState]);
@@ -466,14 +473,45 @@ export default function CookieMasterPage() {
     }
   };
 
+  const verifyServerRewardClaim = async (rewardType: "hourly_jar" | "daily_streak" | "daily_master" | "clicker_burst") => {
+    try {
+      const token = localStorage.getItem("auth_token") || "";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch("/api/coins/claim-reward", {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify({ rewardType }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.status === 429) {
+        return { allowed: false, remainingMs: Number(data?.remainingMs || 0), error: data?.error };
+      }
+      if (!res.ok || !data?.success) {
+        return { allowed: false, remainingMs: 0, error: data?.error || "cooldown active" };
+      }
+      return { allowed: true, data };
+    } catch {
+      return { allowed: true, data: null };
+    }
+  };
+
   const handleBuyWithCoins = async () => {
-    if (buyingWithCoins) return;
+    if (buyLockRef.current || buyingWithCoins) return;
     if (getCookieCoins() < COOKIE_MASTER_COIN_PRICE) {
       const needed = COOKIE_MASTER_COIN_PRICE - getCookieCoins();
       notifyToast(`need ${needed.toLocaleString()} more cookie coins to unlock cookie master`, "error");
       return;
     }
+    buyLockRef.current = true;
     setBuyingWithCoins(true);
+    if (!spendCookieCoins(COOKIE_MASTER_COIN_PRICE)) {
+      buyLockRef.current = false;
+      setBuyingWithCoins(false);
+      notifyToast("not enough cookie coins", "error");
+      return;
+    }
     try {
       const token = localStorage.getItem("auth_token") || "";
       const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -486,12 +524,11 @@ export default function CookieMasterPage() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.success) {
+        // Refund on server rejection
+        const refund = getCookieCoins() + COOKIE_MASTER_COIN_PRICE;
+        localStorage.setItem("cookie_coins_balance_v1", String(refund));
+        window.dispatchEvent(new CustomEvent("cookie-coins-updated", { detail: { balance: refund } }));
         notifyToast(data?.error || "could not activate cookie master right now", "error");
-        return;
-      }
-
-      if (!spendCookieCoins(COOKIE_MASTER_COIN_PRICE)) {
-        notifyToast("not enough cookie coins", "error");
         return;
       }
 
@@ -510,29 +547,82 @@ export default function CookieMasterPage() {
       refreshState();
       notifyToast("cookie master unlocked for 30 days! enjoy ad-free mode & daily coins", "success");
     } catch {
+      const refund = getCookieCoins() + COOKIE_MASTER_COIN_PRICE;
+      localStorage.setItem("cookie_coins_balance_v1", String(refund));
+      window.dispatchEvent(new CustomEvent("cookie-coins-updated", { detail: { balance: refund } }));
       notifyToast("failed to activate cookie master — try again", "error");
     } finally {
+      buyLockRef.current = false;
       setBuyingWithCoins(false);
     }
   };
 
-  const handleClaimHourly = () => {
-    const res = claimHourlyCookieDrop();
-    if (!res.claimed) {
-      notifyToast(`hourly cookie jar ready in ${formatDurationCompact(res.remainingMs)}`, "info");
+  const handleClaimHourly = async () => {
+    if (hourlyLockRef.current) return;
+    const localRem = getHourlyDropRemainingMs();
+    if (localRem > 0) {
+      notifyToast(`hourly cookie jar ready in ${formatDurationCompact(localRem)}`, "info");
+      refreshState();
+      return;
     }
-    refreshState();
+    hourlyLockRef.current = true;
+    try {
+      const check = await verifyServerRewardClaim("hourly_jar");
+      if (!check.allowed) {
+        if (check.remainingMs > 0) {
+          try {
+            localStorage.setItem("cookie_hourly_drop_at_v1", String(Date.now() - (60 * 60 * 1000 - check.remainingMs)));
+          } catch {}
+          notifyToast(`hourly cookie jar ready in ${formatDurationCompact(check.remainingMs)}`, "info");
+        } else {
+          notifyToast(check.error || "hourly cookie jar is on cooldown", "info");
+        }
+        refreshState();
+        return;
+      }
+      const res = claimHourlyCookieDrop();
+      if (!res.claimed) {
+        notifyToast(`hourly cookie jar ready in ${formatDurationCompact(res.remainingMs)}`, "info");
+      }
+      refreshState();
+    } finally {
+      hourlyLockRef.current = false;
+    }
   };
 
-  const handleClaimStreak = () => {
-    const res = claimDailyStreakBonus();
-    if (!res.claimed) {
-      notifyToast(`next check-in ready in ${formatDurationCompact(res.remainingMs)}`, "info");
+  const handleClaimStreak = async () => {
+    if (streakLockRef.current) return;
+    const localSt = getDailyStreakState();
+    if (localSt.remainingMs > 0) {
+      notifyToast(`next check-in ready in ${formatDurationCompact(localSt.remainingMs)}`, "info");
+      refreshState();
+      return;
     }
-    refreshState();
+    streakLockRef.current = true;
+    try {
+      const check = await verifyServerRewardClaim("daily_streak");
+      if (!check.allowed) {
+        notifyToast(
+          check.remainingMs > 0
+            ? `next check-in ready in ${formatDurationCompact(check.remainingMs)}`
+            : check.error || "daily check-in already claimed",
+          "info",
+        );
+        refreshState();
+        return;
+      }
+      const res = claimDailyStreakBonus();
+      if (!res.claimed) {
+        notifyToast(`next check-in ready in ${formatDurationCompact(res.remainingMs)}`, "info");
+      }
+      refreshState();
+    } finally {
+      streakLockRef.current = false;
+    }
   };
 
-  const handleClickerTap = () => {
+  const handleClickerTap = async () => {
+    if (clickerLockRef.current) return;
     const st = getClickerBonusState();
     if (st.remainingBursts <= 0) {
       notifyToast(`cookie clicker recharges in ${formatDurationCompact(st.resetInMs)}`, "info");
@@ -541,12 +631,28 @@ export default function CookieMasterPage() {
     }
     const nextClicks = clickCount + 1;
     if (nextClicks >= 15) {
+      clickerLockRef.current = true;
       setClickCount(0);
-      const res = claimCookieClickerBurst();
-      if (res.claimed) {
-        notifyToast(`+${res.amount} cookie coins · cookie clicker!`, "success");
+      try {
+        const check = await verifyServerRewardClaim("clicker_burst");
+        if (!check.allowed) {
+          notifyToast(
+            check.remainingMs > 2000
+              ? `cookie clicker recharges in ${formatDurationCompact(check.remainingMs)}`
+              : check.error || "slow down!",
+            "info",
+          );
+          refreshState();
+          return;
+        }
+        const res = claimCookieClickerBurst();
+        if (res.claimed) {
+          notifyToast(`+${res.amount} cookie coins · cookie clicker!`, "success");
+        }
+        refreshState();
+      } finally {
+        clickerLockRef.current = false;
       }
-      refreshState();
     } else {
       setClickCount(nextClicks);
     }
@@ -613,10 +719,28 @@ export default function CookieMasterPage() {
     }
   };
 
-  const handleClaimDaily = () => {
-    if (claiming) return;
+  const handleClaimDaily = async () => {
+    if (dailyMasterLockRef.current || claiming) return;
+    const localRem = getNextDailyClaimRemainingMs();
+    if (localRem > 0) {
+      notifyToast(`daily coins ready in ${formatDurationCompact(localRem)}`, "info");
+      refreshState();
+      return;
+    }
+    dailyMasterLockRef.current = true;
     setClaiming(true);
     try {
+      const check = await verifyServerRewardClaim("daily_master");
+      if (!check.allowed) {
+        notifyToast(
+          check.remainingMs > 0
+            ? `daily coins ready in ${formatDurationCompact(check.remainingMs)}`
+            : check.error || "daily coins already claimed",
+          "info",
+        );
+        refreshState();
+        return;
+      }
       const result = claimDailyMasterCoins();
       if (result.claimed) {
         setCoins(result.nextBalance);
@@ -628,6 +752,7 @@ export default function CookieMasterPage() {
         );
       }
     } finally {
+      dailyMasterLockRef.current = false;
       setClaiming(false);
     }
   };

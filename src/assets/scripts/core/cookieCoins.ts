@@ -45,6 +45,12 @@ const CLICKER_WINDOW_MS = 30 * 60 * 1000;
 const CLICKER_MAX_BURSTS = 8;
 export const CLICKER_BURST_COINS = 10;
 let lastChatCoinAwardAt = 0;
+let memHourlyClaimAt = 0;
+let memStreakClaimAt = 0;
+let memDailyMasterClaimAt = 0;
+let memClickerWindowStart = 0;
+let memClickerUsed = 0;
+let memLastClickerBurstAt = 0;
 
 export interface CookieMasterState {
   active: boolean;
@@ -109,8 +115,9 @@ export function setCookieMasterState(next: CookieMasterState | null): void {
 export function getNextDailyClaimRemainingMs(): number {
   const st = getCookieMasterState();
   if (!st?.active) return DAILY_CLAIM_INTERVAL_MS;
-  if (!st.lastDailyClaimAt) return 0;
-  return Math.max(0, st.lastDailyClaimAt + DAILY_CLAIM_INTERVAL_MS - Date.now());
+  const lastAt = Math.max(Number(st.lastDailyClaimAt || 0), memDailyMasterClaimAt);
+  if (!lastAt) return 0;
+  return Math.max(0, lastAt + DAILY_CLAIM_INTERVAL_MS - Date.now());
 }
 
 export function canClaimDailyMasterCoins(): boolean {
@@ -152,11 +159,13 @@ export function claimDailyMasterCoins(): {
       remainingMs: remaining,
     };
   }
-  const nextBalance = addCookieCoins(COOKIE_MASTER_DAILY_COINS, "cookie master daily coins");
+  const now = Date.now();
+  memDailyMasterClaimAt = now;
   setCookieMasterState({
     ...st,
-    lastDailyClaimAt: Date.now(),
+    lastDailyClaimAt: now,
   });
+  const nextBalance = addCookieCoins(COOKIE_MASTER_DAILY_COINS, "cookie master daily coins");
   return {
     claimed: true,
     amount: COOKIE_MASTER_DAILY_COINS,
@@ -326,20 +335,22 @@ export function awardChatMessageCoins(): number {
 }
 
 export function getHourlyDropRemainingMs(): number {
+  let stored = 0;
   try {
-    const last = Number(localStorage.getItem(HOURLY_DROP_KEY) || "0");
-    if (!last) return 0;
-    return Math.max(0, last + HOURLY_DROP_INTERVAL_MS - Date.now());
-  } catch {
-    return 0;
-  }
+    stored = Number(localStorage.getItem(HOURLY_DROP_KEY) || "0");
+  } catch {}
+  const last = Math.max(stored, memHourlyClaimAt);
+  if (!last) return 0;
+  return Math.max(0, last + HOURLY_DROP_INTERVAL_MS - Date.now());
 }
 
 export function claimHourlyCookieDrop(): { claimed: boolean; amount: number; remainingMs: number } {
   const rem = getHourlyDropRemainingMs();
   if (rem > 0) return { claimed: false, amount: 0, remainingMs: rem };
+  const now = Date.now();
+  memHourlyClaimAt = now;
   try {
-    localStorage.setItem(HOURLY_DROP_KEY, String(Date.now()));
+    localStorage.setItem(HOURLY_DROP_KEY, String(now));
   } catch {}
   addCookieCoins(HOURLY_DROP_COINS, "hourly cookie jar");
   return { claimed: true, amount: HOURLY_DROP_COINS, remainingMs: HOURLY_DROP_INTERVAL_MS };
@@ -349,7 +360,7 @@ export function getDailyStreakState(): { streak: number; remainingMs: number; ne
   const rewards = [100, 150, 225, 325, 500];
   try {
     const raw = JSON.parse(localStorage.getItem(DAILY_STREAK_KEY) || "{}");
-    const lastAt = Number(raw?.lastAt || 0);
+    const lastAt = Math.max(Number(raw?.lastAt || 0), memStreakClaimAt);
     let streak = Math.max(0, Number(raw?.streak || 0));
     const now = Date.now();
     if (lastAt > 0 && now - lastAt > 48 * 60 * 60 * 1000) {
@@ -359,7 +370,8 @@ export function getDailyStreakState(): { streak: number; remainingMs: number; ne
     const nextIdx = Math.min(rewards.length - 1, streak);
     return { streak, remainingMs, nextReward: rewards[nextIdx] };
   } catch {
-    return { streak: 0, remainingMs: 0, nextReward: 100 };
+    const rem = memStreakClaimAt > 0 ? Math.max(0, memStreakClaimAt + DAILY_CLAIM_INTERVAL_MS - Date.now()) : 0;
+    return { streak: 0, remainingMs: rem, nextReward: 100 };
   }
 }
 
@@ -368,42 +380,61 @@ export function claimDailyStreakBonus(): { claimed: boolean; amount: number; str
   if (st.remainingMs > 0) {
     return { claimed: false, amount: 0, streak: st.streak, remainingMs: st.remainingMs };
   }
+  const now = Date.now();
+  memStreakClaimAt = now;
   const nextStreak = st.streak + 1;
   const amount = st.nextReward;
   try {
-    localStorage.setItem(DAILY_STREAK_KEY, JSON.stringify({ streak: nextStreak, lastAt: Date.now() }));
+    localStorage.setItem(DAILY_STREAK_KEY, JSON.stringify({ streak: nextStreak, lastAt: now }));
   } catch {}
   addCookieCoins(amount, `day ${nextStreak} check-in streak`);
   return { claimed: true, amount, streak: nextStreak, remainingMs: DAILY_CLAIM_INTERVAL_MS };
 }
 
 export function getClickerBonusState(): { remainingBursts: number; resetInMs: number } {
+  const now = Date.now();
+  let windowStart = memClickerWindowStart;
+  let used = memClickerUsed;
   try {
     const raw = JSON.parse(localStorage.getItem(CLICKER_BONUS_KEY) || "{}");
-    const windowStart = Number(raw?.windowStart || 0);
-    const used = Math.max(0, Number(raw?.used || 0));
-    const now = Date.now();
-    if (!windowStart || now - windowStart >= CLICKER_WINDOW_MS) {
-      return { remainingBursts: CLICKER_MAX_BURSTS, resetInMs: 0 };
+    const lsStart = Number(raw?.windowStart || 0);
+    const lsUsed = Math.max(0, Number(raw?.used || 0));
+    if (lsStart && now - lsStart < CLICKER_WINDOW_MS) {
+      if (!windowStart || now - windowStart >= CLICKER_WINDOW_MS || lsUsed > used) {
+        windowStart = lsStart;
+        used = lsUsed;
+      }
     }
-    return {
-      remainingBursts: Math.max(0, CLICKER_MAX_BURSTS - used),
-      resetInMs: Math.max(0, windowStart + CLICKER_WINDOW_MS - now),
-    };
-  } catch {
+  } catch {}
+  if (!windowStart || now - windowStart >= CLICKER_WINDOW_MS) {
     return { remainingBursts: CLICKER_MAX_BURSTS, resetInMs: 0 };
   }
+  return {
+    remainingBursts: Math.max(0, CLICKER_MAX_BURSTS - used),
+    resetInMs: Math.max(0, windowStart + CLICKER_WINDOW_MS - now),
+  };
 }
 
 export function claimCookieClickerBurst(): { claimed: boolean; amount: number; remainingBursts: number; resetInMs: number } {
   const now = Date.now();
+  if (memLastClickerBurstAt > 0 && now - memLastClickerBurstAt < 1200) {
+    const cur = getClickerBonusState();
+    return { claimed: false, amount: 0, remainingBursts: cur.remainingBursts, resetInMs: cur.resetInMs };
+  }
   let windowStart = now;
   let used = 0;
+  if (memClickerWindowStart > 0 && now - memClickerWindowStart < CLICKER_WINDOW_MS) {
+    windowStart = memClickerWindowStart;
+    used = memClickerUsed;
+  }
   try {
     const raw = JSON.parse(localStorage.getItem(CLICKER_BONUS_KEY) || "{}");
     if (raw?.windowStart && now - Number(raw.windowStart) < CLICKER_WINDOW_MS) {
-      windowStart = Number(raw.windowStart);
-      used = Math.max(0, Number(raw.used || 0));
+      const lsUsed = Math.max(0, Number(raw.used || 0));
+      if (lsUsed > used) {
+        windowStart = Number(raw.windowStart);
+        used = lsUsed;
+      }
     }
   } catch {}
   if (used >= CLICKER_MAX_BURSTS) {
@@ -415,6 +446,9 @@ export function claimCookieClickerBurst(): { claimed: boolean; amount: number; r
     };
   }
   used += 1;
+  memClickerWindowStart = windowStart;
+  memClickerUsed = used;
+  memLastClickerBurstAt = now;
   try {
     localStorage.setItem(CLICKER_BONUS_KEY, JSON.stringify({ windowStart, used }));
   } catch {}

@@ -1043,6 +1043,7 @@ export default function ChatModal() {
   const gifPickerRef = useRef<HTMLDivElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const giftPickerRef = useRef<HTMLDivElement>(null);
+  const giftSendLockRef = useRef(false);
   const gifAbortRef = useRef<AbortController | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -3263,7 +3264,7 @@ export default function ChatModal() {
   const handleSendGift = useCallback(
     async (e?: Event) => {
       if (e) e.preventDefault();
-      if (!cloudUser || isSendingGift) return;
+      if (!cloudUser || giftSendLockRef.current || isSendingGift) return;
       const recipient = giftRecipient.trim().replace(/^@/, "");
       if (!recipient) {
         notifyToast("enter a @username to send a gift to", "error");
@@ -3288,12 +3289,14 @@ export default function ChatModal() {
         cost = isOwner ? 0 : GIFT_COOKIE_MASTER_COST;
       }
 
-      if (cost > 0 && getCookieCoins() < cost) {
+      if (cost > 0 && !spendCookieCoins(cost)) {
         notifyToast(`not enough cookie coins (need ${cost.toLocaleString()})`, "error");
         return;
       }
 
+      giftSendLockRef.current = true;
       setIsSendingGift(true);
+      setMyCoinBalance(getCookieCoins());
       try {
         const token = localStorage.getItem("auth_token") || "";
         const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -3313,12 +3316,14 @@ export default function ChatModal() {
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data?.success) {
+          if (cost > 0) {
+            const refund = getCookieCoins() + cost;
+            localStorage.setItem("cookie_coins_balance_v1", String(refund));
+            window.dispatchEvent(new CustomEvent("cookie-coins-updated", { detail: { balance: refund } }));
+            setMyCoinBalance(getCookieCoins());
+          }
           notifyToast(data?.error || "failed to send gift", "error");
           return;
-        }
-        if (cost > 0) {
-          spendCookieCoins(cost);
-          setMyCoinBalance(getCookieCoins());
         }
         notifyToast(
           giftTab === "cookie_master"
@@ -3329,8 +3334,15 @@ export default function ChatModal() {
         setGiftNote("");
         setShowGiftPicker(false);
       } catch {
+        if (cost > 0) {
+          const refund = getCookieCoins() + cost;
+          localStorage.setItem("cookie_coins_balance_v1", String(refund));
+          window.dispatchEvent(new CustomEvent("cookie-coins-updated", { detail: { balance: refund } }));
+          setMyCoinBalance(getCookieCoins());
+        }
         notifyToast("network error sending gift", "error");
       } finally {
+        giftSendLockRef.current = false;
         setIsSendingGift(false);
       }
     },

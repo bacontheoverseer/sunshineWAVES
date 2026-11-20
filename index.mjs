@@ -1482,6 +1482,7 @@ const CHAT_META_KV_KEYS = [
   "user_device_map_v1",
   "user_created_at_v1",
   "pending_coin_grants_v1",
+  "coin_claim_cooldowns_v1",
   STUDIO_GAMES_KV_KEY,
   STUDIO_PROFILES_KV_KEY,
   OXIUM_PARTNERS_KV_KEY,
@@ -5799,6 +5800,127 @@ app.post("/api/coins/claim-pending", async (req, res) => {
   }
 });
 
+const chatGiftLastSentAt = new Map(); // senderKey -> timestampMs
+const buyMasterLastAt = new Map(); // userKey -> timestampMs
+
+function getCoinClaimCooldownsObj() {
+  const raw = kvGetJson("coin_claim_cooldowns_v1", {});
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function saveCoinClaimCooldownsObj(obj) {
+  kvSetJson("coin_claim_cooldowns_v1", obj);
+}
+
+app.post("/api/coins/claim-reward", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const rewardType = String(req.body?.rewardType || "").trim().toLowerCase();
+    const fp = String(req.body?.fingerprint_id || req.body?.storage_token || "").trim().slice(0, 80);
+    const clientIp = String(req.headers["cf-connecting-ip"] || req.ip || "anon").trim().slice(0, 64);
+    const actorKey = authUser?.username
+      ? `u:${authUser.username.toLowerCase()}`
+      : fp
+        ? `d:${fp}`
+        : `ip:${clientIp}`;
+
+    const now = Date.now();
+    const map = getCoinClaimCooldownsObj();
+    const rec = map[actorKey] && typeof map[actorKey] === "object" ? { ...map[actorKey] } : {};
+
+    if (rewardType === "hourly_jar") {
+      const INTERVAL = 60 * 60 * 1000;
+      const last = Number(rec.hourlyAt || 0);
+      if (last > 0 && now - last < INTERVAL) {
+        return res.status(429).json({
+          success: false,
+          remainingMs: INTERVAL - (now - last),
+          error: "Hourly cookie jar is still on cooldown",
+        });
+      }
+      rec.hourlyAt = now;
+      map[actorKey] = rec;
+      saveCoinClaimCooldownsObj(map);
+      return res.json({ success: true, amount: 75, nextAt: now + INTERVAL });
+    }
+
+    if (rewardType === "daily_streak") {
+      const INTERVAL = 24 * 60 * 60 * 1000;
+      const last = Number(rec.streakAt || 0);
+      if (last > 0 && now - last < INTERVAL) {
+        return res.status(429).json({
+          success: false,
+          remainingMs: INTERVAL - (now - last),
+          error: "Daily check-in already claimed",
+        });
+      }
+      let streak = Math.max(0, Number(rec.streakCount || 0));
+      if (last > 0 && now - last > 48 * 60 * 60 * 1000) streak = 0;
+      const rewards = [100, 150, 225, 325, 500];
+      const amount = rewards[Math.min(rewards.length - 1, streak)];
+      rec.streakAt = now;
+      rec.streakCount = streak + 1;
+      map[actorKey] = rec;
+      saveCoinClaimCooldownsObj(map);
+      return res.json({ success: true, amount, streak: rec.streakCount, nextAt: now + INTERVAL });
+    }
+
+    if (rewardType === "daily_master") {
+      const INTERVAL = 24 * 60 * 60 * 1000;
+      const last = Number(rec.masterDailyAt || 0);
+      if (last > 0 && now - last < INTERVAL) {
+        return res.status(429).json({
+          success: false,
+          remainingMs: INTERVAL - (now - last),
+          error: "Daily Cookie Master coins already claimed",
+        });
+      }
+      rec.masterDailyAt = now;
+      map[actorKey] = rec;
+      saveCoinClaimCooldownsObj(map);
+      return res.json({ success: true, amount: 1000, nextAt: now + INTERVAL });
+    }
+
+    if (rewardType === "clicker_burst") {
+      const WINDOW_MS = 30 * 60 * 1000;
+      const MAX_BURSTS = 8;
+      let winStart = Number(rec.clickerWinStart || 0);
+      let used = Math.max(0, Number(rec.clickerUsed || 0));
+      const lastBurst = Number(rec.clickerLastAt || 0);
+      if (lastBurst > 0 && now - lastBurst < 1200) {
+        return res.status(429).json({ success: false, remainingMs: 1200, error: "Slow down!" });
+      }
+      if (!winStart || now - winStart >= WINDOW_MS) {
+        winStart = now;
+        used = 0;
+      }
+      if (used >= MAX_BURSTS) {
+        return res.status(429).json({
+          success: false,
+          remainingMs: Math.max(1000, winStart + WINDOW_MS - now),
+          error: "Cookie clicker is recharging",
+        });
+      }
+      rec.clickerWinStart = winStart;
+      rec.clickerUsed = used + 1;
+      rec.clickerLastAt = now;
+      map[actorKey] = rec;
+      saveCoinClaimCooldownsObj(map);
+      return res.json({
+        success: true,
+        amount: 10,
+        remainingBursts: Math.max(0, MAX_BURSTS - rec.clickerUsed),
+        resetInMs: Math.max(0, winStart + WINDOW_MS - now),
+      });
+    }
+
+    return res.status(400).json({ success: false, error: "Invalid rewardType" });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to claim reward" });
+  }
+});
+
 app.post("/api/chat/gift", async (req, res) => {
   await ensureChatMetaReadyAsync();
   try {
@@ -5813,6 +5935,12 @@ app.post("/api/chat/gift", async (req, res) => {
     if (!isOwnerSender && isAccountShadowbanned(senderKey)) {
       return res.status(403).json({ success: false, error: "Unable to send gifts right now" });
     }
+
+    const lastGiftAt = chatGiftLastSentAt.get(senderKey) || 0;
+    if (Date.now() - lastGiftAt < 3000) {
+      return res.status(429).json({ success: false, error: "Please wait a moment before sending another gift" });
+    }
+    chatGiftLastSentAt.set(senderKey, Date.now());
 
     const recipientRaw = String(req.body?.recipient || "").trim().replace(/^@/, "");
     const recipientKey = recipientRaw.toLowerCase();
@@ -11142,6 +11270,12 @@ app.post("/api/cookie-master/buy-with-coins", async (req, res) => {
   await ensureChatMetaReadyAsync();
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
+    const rateKey = authUser?.username ? authUser.username.toLowerCase() : String(req.ip || "anon");
+    const prevBuyAt = buyMasterLastAt.get(rateKey) || 0;
+    if (Date.now() - prevBuyAt < 5000) {
+      return res.status(429).json({ success: false, error: "Please wait a moment before purchasing again" });
+    }
+    buyMasterLastAt.set(rateKey, Date.now());
     const now = Date.now();
     const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
     const subId = `coins_cm_${now}_${Math.random().toString(36).slice(2, 8)}`;
