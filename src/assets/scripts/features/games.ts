@@ -84,35 +84,51 @@ const SOURCE_CONFIG: SourceConfig = {
   },
 };
 
+const ALL_SOURCE_KEYS: SourceKey[] = ["selenite", "gn-math", "edurocks", "velara", "truffled"];
+
+export function isCombineGameSourcesEnabled(): boolean {
+  try {
+    return localStorage.getItem("combineGameSources") !== "false";
+  } catch {
+    return true;
+  }
+}
+
 let allGames: GameEntry[] = [];
 let gameDataPromise: Promise<GameEntry[]> | null = null;
 
 function getSourceKey(): SourceKey {
   const source = localStorage.getItem("gameSource") || "selenite";
-  if (!["selenite", "gn-math", "edurocks", "velara", "truffled"].includes(source)) {
+  if (!ALL_SOURCE_KEYS.includes(source as SourceKey)) {
     return "selenite";
   }
   return source as SourceKey;
 }
 
+type CacheScopeKey = SourceKey | "all";
+
+function getActiveCacheScope(): CacheScopeKey {
+  return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
+}
+
 const GAMES_DISK_CACHE = "sunshine-games-v1";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
-function getCacheKey(sourceKey: SourceKey = getSourceKey()): string {
-  return `sunshine-game-cache${sourceKey}`;
+function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
+  return `sunshine-game-cache${scope}`;
 }
 
-function getPersistentCacheRequestUrl(source: SourceKey): string {
-  return `/__cache/games/${source}.json`;
+function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
+  return `/__cache/games/${scope}.json`;
 }
 
 async function readPersistentGamesCache(
-  source: SourceKey,
+  scope: CacheScopeKey,
 ): Promise<{ games: GameEntry[]; fresh: boolean } | null> {
   if (typeof caches === "undefined") return null;
   try {
     const cache = await caches.open(GAMES_DISK_CACHE);
-    const match = await cache.match(getPersistentCacheRequestUrl(source));
+    const match = await cache.match(getPersistentCacheRequestUrl(scope));
     if (!match) return null;
     const savedAt = Number(match.headers.get("X-Cached-At") || "0");
     const games = (await match.json()) as GameEntry[];
@@ -126,13 +142,13 @@ async function readPersistentGamesCache(
   }
 }
 
-function writePersistentGamesCache(source: SourceKey, games: GameEntry[]): void {
+function writePersistentGamesCache(scope: CacheScopeKey, games: GameEntry[]): void {
   if (typeof caches === "undefined") return;
   void caches
     .open(GAMES_DISK_CACHE)
     .then((cache) =>
       cache.put(
-        getPersistentCacheRequestUrl(source),
+        getPersistentCacheRequestUrl(scope),
         new Response(JSON.stringify(games), {
           headers: {
             "Content-Type": "application/json",
@@ -152,13 +168,13 @@ function applySearchCacheFields(games: GameEntry[]): GameEntry[] {
   return games;
 }
 
-function saveToCache(source: SourceKey, games: GameEntry[]): GameEntry[] {
+function saveToCache(scope: CacheScopeKey, games: GameEntry[]): GameEntry[] {
   try {
-    sessionStorage.setItem(getCacheKey(source), JSON.stringify(games));
+    sessionStorage.setItem(getCacheKey(scope), JSON.stringify(games));
   } catch (e) {
     console.warn("unable to cache games", e);
   }
-  writePersistentGamesCache(source, games);
+  writePersistentGamesCache(scope, games);
   return games;
 }
 
@@ -303,13 +319,14 @@ function mapTruffledGames(data: unknown): GameEntry[] {
 export function fetchGameData(): Promise<GameEntry[]> {
   if (gameDataPromise) return gameDataPromise;
 
-  const source = getSourceKey();
-  const cacheKey = getCacheKey(source);
+  const combineAll = isCombineGameSourcesEnabled();
+  const scope: CacheScopeKey = combineAll ? "all" : getSourceKey();
+  const cacheKey = getCacheKey(scope);
 
   try {
     const cached = sessionStorage.getItem(cacheKey);
     if (cached) {
-      allGames = JSON.parse(cached) as GameEntry[];
+      allGames = applySearchCacheFields(JSON.parse(cached) as GameEntry[]);
       return Promise.resolve(allGames);
     }
   } catch {
@@ -318,36 +335,50 @@ export function fetchGameData(): Promise<GameEntry[]> {
 
   const ok = (res: Response) => (res.ok ? res.json() : Promise.reject(res.statusText));
 
-  const mappers: Record<SourceKey, () => Promise<GameEntry[]>> = {
-    velara: () =>
-      fetch(SOURCE_CONFIG.velara.games)
-        .then(ok)
-        .then((d) => saveToCache(source, applySearchCacheFields(mapVelaraGames(d)))),
-    selenite: () =>
-      fetch(SOURCE_CONFIG.selenite.games)
-        .then(ok)
-        .then((d) => saveToCache(source, applySearchCacheFields(mapSeleniteGames(d)))),
-    edurocks: () =>
-      fetch(SOURCE_CONFIG.edurocks.games)
-        .then(ok)
-        .then((d) => saveToCache(source, applySearchCacheFields(mapEdurocksGames(d)))),
-    "gn-math": () =>
-      fetch(SOURCE_CONFIG["gn-math"].zones)
-        .then(ok)
-        .then((d) => saveToCache(source, applySearchCacheFields(mapGnMathGames(d)))),
-    truffled: () =>
-      fetch(SOURCE_CONFIG.truffled.games)
-        .then(ok)
-        .then((d) => saveToCache(source, applySearchCacheFields(mapTruffledGames(d)))),
+  const fetchSourceGames: Record<SourceKey, () => Promise<GameEntry[]>> = {
+    velara: () => fetch(SOURCE_CONFIG.velara.games).then(ok).then(mapVelaraGames),
+    selenite: () => fetch(SOURCE_CONFIG.selenite.games).then(ok).then(mapSeleniteGames),
+    edurocks: () => fetch(SOURCE_CONFIG.edurocks.games).then(ok).then(mapEdurocksGames),
+    "gn-math": () => fetch(SOURCE_CONFIG["gn-math"].zones).then(ok).then(mapGnMathGames),
+    truffled: () => fetch(SOURCE_CONFIG.truffled.games).then(ok).then(mapTruffledGames),
   };
 
-  const fetchFresh = () =>
-    (mappers[source] ?? mappers.selenite)().then((games) => {
-      allGames = games;
-      return games;
-    });
+  const fetchFresh = async (): Promise<GameEntry[]> => {
+    if (combineAll) {
+      const results = await Promise.allSettled(
+        ALL_SOURCE_KEYS.map((key) => fetchSourceGames[key]()),
+      );
+      const merged: GameEntry[] = [];
+      const seenKeys = new Set<string>();
+      for (const res of results) {
+        if (res.status !== "fulfilled" || !Array.isArray(res.value)) continue;
+        for (const g of res.value) {
+          const normName = String(g.name || "").trim().toLowerCase();
+          const dedupKey = normName || `${g.sourceKey}:${g.gameUrl}`;
+          if (seenKeys.has(dedupKey)) continue;
+          seenKeys.add(dedupKey);
+          merged.push(g);
+        }
+      }
+      if (merged.length === 0) {
+        throw new Error("All game sources failed to load");
+      }
+      merged.sort((a, b) =>
+        a.featured === b.featured ? a.name.localeCompare(b.name) : a.featured ? -1 : 1,
+      );
+      const ready = saveToCache("all", applySearchCacheFields(merged));
+      allGames = ready;
+      return ready;
+    }
 
-  gameDataPromise = readPersistentGamesCache(source)
+    const source = scope as SourceKey;
+    const list = await (fetchSourceGames[source] ?? fetchSourceGames.selenite)();
+    const ready = saveToCache(source, applySearchCacheFields(list));
+    allGames = ready;
+    return ready;
+  };
+
+  gameDataPromise = readPersistentGamesCache(scope)
     .then((diskHit) => {
       if (diskHit) {
         allGames = diskHit.games;
@@ -369,17 +400,19 @@ export function fetchGameData(): Promise<GameEntry[]> {
 }
 
 export function resetGameCache(): void {
-  const source = getSourceKey();
+  const scopes: CacheScopeKey[] = ["all", getSourceKey()];
   allGames = [];
   gameDataPromise = null;
-  try {
-    sessionStorage.removeItem(getCacheKey(source));
-  } catch {}
-  if (typeof caches !== "undefined") {
-    void caches
-      .open(GAMES_DISK_CACHE)
-      .then((cache) => cache.delete(getPersistentCacheRequestUrl(source)))
-      .catch(() => {});
+  for (const sc of scopes) {
+    try {
+      sessionStorage.removeItem(getCacheKey(sc));
+    } catch {}
+    if (typeof caches !== "undefined") {
+      void caches
+        .open(GAMES_DISK_CACHE)
+        .then((cache) => cache.delete(getPersistentCacheRequestUrl(sc)))
+        .catch(() => {});
+    }
   }
 }
 

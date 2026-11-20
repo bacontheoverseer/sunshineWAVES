@@ -65,10 +65,16 @@ export default function AdminPanel() {
   const [adminUsername, setAdminUsername] = useState("bacon");
   const [keyInput, setKeyInput] = useState("");
   const [authError, setAuthError] = useState("");
-  const [activeTab, setActiveTab] = useState<"soundboard" | "tts" | "pranks" | "users" | "staff" | "oxium">("soundboard");
+  const [activeTab, setActiveTab] = useState<"soundboard" | "tts" | "pranks" | "coins" | "users" | "staff" | "oxium">("soundboard");
   const [target, setTarget] = useState<string>("all");
   const [targetDropdownOpen, setTargetDropdownOpen] = useState(false);
   const [clients, setClients] = useState<ClientRecord[]>([]);
+
+  // Admin Treasury (Unlimited Cookie Coins) State
+  const [coinAmount, setCoinAmount] = useState("1000");
+  const [coinUsernameOverride, setCoinUsernameOverride] = useState("");
+  const [coinReason, setCoinReason] = useState("admin treasury gift");
+  const [grantingCoins, setGrantingCoins] = useState(false);
 
   // Soundboard State (v3 uses local /assets/sounds/*.mp3 paths)
   const [sounds, setSounds] = useState<SoundItem[]>(() => {
@@ -518,6 +524,49 @@ export default function AdminPanel() {
     setResolvingUrl(false);
   };
 
+  const handleGiveCoins = async (e?: Event) => {
+    if (e) e.preventDefault();
+    if (!adminKey || grantingCoins) return;
+    const parsedAmount = Math.floor(Number(coinAmount) || 0);
+    if (parsedAmount < 1 || parsedAmount > 10000000) {
+      toast("error", "enter an amount between 1 and 10,000,000");
+      return;
+    }
+    setGrantingCoins(true);
+    try {
+      const res = await fetch("/api/admin/give-coins", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-key": adminKey,
+        },
+        body: JSON.stringify({
+          target,
+          username: coinUsernameOverride.trim().replace(/^@/, ""),
+          amount: parsedAmount,
+          reason: coinReason.trim() || "admin treasury gift",
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        toast("error", data?.error || "failed to grant cookie coins");
+        return;
+      }
+      const deliveryNote = data.queued
+        ? "queued for next login"
+        : `delivered to ${data.delivered} session(s)`;
+      toast(
+        "success",
+        `granted +${parsedAmount.toLocaleString()} coins to ${data.targetLabel} (${deliveryNote})`,
+      );
+      setCoinUsernameOverride("");
+    } catch {
+      toast("error", "network error granting coins");
+    } finally {
+      setGrantingCoins(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const filteredSounds = sounds.filter((s) =>
@@ -536,6 +585,7 @@ export default function AdminPanel() {
     { id: "soundboard" as const, icon: "fa-volume-high", label: "soundboard" },
     { id: "tts" as const, icon: "fa-microphone-lines", label: "voice of god" },
     { id: "pranks" as const, icon: "fa-wand-magic-sparkles", label: "visual trolls" },
+    { id: "coins" as const, icon: "fa-coins", label: "cookie coins" },
     { id: "users" as const, icon: "fa-users", label: `users (${clients.length})` },
     { id: "staff" as const, icon: "fa-shield-halved", label: "staff & mods" },
     { id: "oxium" as const, icon: "fa-cubes", label: "oxium network" },
@@ -1114,6 +1164,109 @@ export default function AdminPanel() {
                       </div>
                     ))
                   )}
+                </div>
+              )}
+
+              {/* TAB 4: COOKIE COINS TREASURY */}
+              {activeTab === "coins" && (
+                <div class="admin-section">
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap", marginBottom: "8px" }}>
+                    <div>
+                      <label>server cookie coins</label>
+                      <p style={{ marginBottom: "0" }}>
+                        grant cookie coins directly from the server treasury (unlimited balance).
+                      </p>
+                    </div>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        padding: "5px 12px",
+                        borderRadius: "999px",
+                        background: "rgba(250, 204, 21, 0.14)",
+                        border: "1px solid rgba(250, 204, 21, 0.35)",
+                        color: "#facc15",
+                        fontSize: "11.5px",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <i class="fa-solid fa-infinity" /> unlimited server balance
+                    </span>
+                  </div>
+
+                  <form onSubmit={handleGiveCoins} style={{ display: "flex", flexDirection: "column", gap: "12px", marginTop: "10px" }}>
+                    <div>
+                      <label style={{ fontSize: "12px", display: "block", marginBottom: "5px" }}>
+                        specific @username (optional — leave blank to use target dropdown above)
+                      </label>
+                      <input
+                        type="text"
+                        class="admin-input"
+                        placeholder={`using: ${selectedTargetLabel} (or type any @username, works offline too)`}
+                        value={coinUsernameOverride}
+                        onInput={(e) => setCoinUsernameOverride((e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ fontSize: "12px", display: "block", marginBottom: "5px" }}>
+                        coin amount
+                      </label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px" }}>
+                        {[100, 500, 1000, 5000, 25000, 100000].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            class={Number(coinAmount) === preset ? "admin-btn-primary" : "admin-btn-secondary"}
+                            style={{ padding: "5px 11px", fontSize: "11.5px", borderRadius: "999px" }}
+                            onClick={() => setCoinAmount(String(preset))}
+                          >
+                            +{preset.toLocaleString()}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10000000}
+                        class="admin-input"
+                        placeholder="custom coin amount..."
+                        value={coinAmount}
+                        onInput={(e) => setCoinAmount((e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ fontSize: "12px", display: "block", marginBottom: "5px" }}>
+                        note / reason (shown in recipient toast)
+                      </label>
+                      <input
+                        type="text"
+                        class="admin-input"
+                        maxLength={120}
+                        placeholder="admin treasury gift"
+                        value={coinReason}
+                        onInput={(e) => setCoinReason((e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      class="admin-btn-primary"
+                      disabled={grantingCoins}
+                      style={{ alignSelf: "flex-start", padding: "9px 18px", borderRadius: "999px" }}
+                    >
+                      <i class={`fa-solid ${grantingCoins ? "fa-spinner fa-spin" : "fa-coins"}`} />{" "}
+                      {grantingCoins
+                        ? "granting..."
+                        : `give ${(Math.max(0, Math.floor(Number(coinAmount) || 0))).toLocaleString()} coins to ${
+                            coinUsernameOverride.trim()
+                              ? `@${coinUsernameOverride.trim().replace(/^@/, "")}`
+                              : selectedTargetLabel
+                          }`}
+                    </button>
+                  </form>
                 </div>
               )}
 

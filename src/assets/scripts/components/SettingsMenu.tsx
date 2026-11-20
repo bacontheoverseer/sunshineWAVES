@@ -110,6 +110,9 @@ export default function SettingsMenu() {
   const [searchEngine, setSearchEngine] = useState(
     () => localStorage.getItem("searchEngine") || "duckduckgo",
   );
+  const [combineGameSources, setCombineGameSources] = useState(
+    () => localStorage.getItem("combineGameSources") !== "false",
+  );
   const [gameSource, setGameSource] = useState(
     () => localStorage.getItem("gameSource") || "selenite",
   );
@@ -327,6 +330,10 @@ export default function SettingsMenu() {
       document.dispatchEvent(
         new CustomEvent("focusCloakingUpdated", { detail: value }),
       );
+    } else if (key === "combineGameSources") {
+      document.dispatchEvent(
+        new CustomEvent("gameSourceUpdated", { detail: value ? "all" : gameSource }),
+      );
     } else if (key === "betaHomepageDecorations") {
       window.dispatchEvent(
         new CustomEvent("betaHomepageDecorationsUpdated", { detail: value }),
@@ -493,18 +500,31 @@ export default function SettingsMenu() {
               />
             </div>
             <div class="settings-item">
-              <label>game source</label>
-              <p>where all the games are fetched from.</p>
-              <Selector
-                label="game-source"
-                value={gameSource}
-                options={allGameSources}
-                isOpen={openSelector}
-                onOpen={setOpenSelector}
-                onClose={() => setOpenSelector(null)}
-                onChange={(v) => handleSetting("gameSource", v, setGameSource)}
+              <label>combine game sources</label>
+              <p>show games from all sources together in one library. turn off to pick a single source.</p>
+              <Toggle
+                id="combine-game-sources-toggle"
+                checked={combineGameSources}
+                onChange={(v) =>
+                  handleToggle("combineGameSources", v, setCombineGameSources)
+                }
               />
             </div>
+            {!combineGameSources && (
+              <div class="settings-item">
+                <label>game source</label>
+                <p>where all the games are fetched from.</p>
+                <Selector
+                  label="game-source"
+                  value={gameSource}
+                  options={allGameSources}
+                  isOpen={openSelector}
+                  onOpen={setOpenSelector}
+                  onClose={() => setOpenSelector(null)}
+                  onChange={(v) => handleSetting("gameSource", v, setGameSource)}
+                />
+              </div>
+            )}
             <div class="settings-item">
               <label>prevent closing</label>
               <p>prevent the tab from being closed.</p>

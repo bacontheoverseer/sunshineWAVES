@@ -1481,6 +1481,7 @@ const CHAT_META_KV_KEYS = [
   "shadowbanned_users_v1",
   "user_device_map_v1",
   "user_created_at_v1",
+  "pending_coin_grants_v1",
   STUDIO_GAMES_KV_KEY,
   STUDIO_PROFILES_KV_KEY,
   OXIUM_PARTNERS_KV_KEY,
@@ -5641,6 +5642,294 @@ app.post("/api/admin/trigger", verifyAdmin, (req, res) => {
     }
   }
   res.json({ success: true, count, target, action });
+});
+
+function getPendingCoinGrantsObj() {
+  const raw = kvGetJson("pending_coin_grants_v1", {});
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+
+function savePendingCoinGrantsObj(obj) {
+  kvSetJson("pending_coin_grants_v1", obj);
+}
+
+function deliverCoinGrant({
+  username = "",
+  targetClientId = "",
+  amount = 0,
+  from = "admin",
+  reason = "",
+}) {
+  const cleanAmount = Math.max(1, Math.min(10000000, Math.floor(Number(amount) || 0)));
+  const grantId = `grant_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const cleanFrom = String(from || "admin").trim().slice(0, 40);
+  const cleanReason = String(reason || "").trim().slice(0, 120);
+  const cleanUser = String(username || "").trim().replace(/^@/, "");
+  const userKey = cleanUser.toLowerCase();
+
+  const payload = {
+    type: "cookie-coins:grant",
+    grantId,
+    amount: cleanAmount,
+    from: cleanFrom,
+    reason: cleanReason || `gift from @${cleanFrom}`,
+    targetUsername: cleanUser || undefined,
+    timestamp: Date.now(),
+  };
+
+  if (!userKey && targetClientId === "all") {
+    const delivered = broadcastToClients(payload, "all");
+    return { grantId, amount: cleanAmount, delivered, queued: false };
+  }
+
+  let delivered = 0;
+  if (targetClientId && targetClientId !== "all") {
+    delivered += broadcastToClients(payload, targetClientId);
+  }
+  if (userKey) {
+    for (const [cid, c] of liveClients.entries()) {
+      if (cid === targetClientId) continue;
+      const cu = String(c?.verifiedUsername || c?.username || "").trim().toLowerCase();
+      if (cu === userKey) {
+        delivered += broadcastToClients(payload, cid);
+      }
+    }
+    if (delivered === 0) {
+      const map = getPendingCoinGrantsObj();
+      const existing = Array.isArray(map[userKey]) ? map[userKey] : [];
+      existing.push({
+        grantId,
+        amount: cleanAmount,
+        from: cleanFrom,
+        reason: payload.reason,
+        createdAt: Date.now(),
+      });
+      map[userKey] = existing.slice(-40);
+      savePendingCoinGrantsObj(map);
+      return { grantId, amount: cleanAmount, delivered: 0, queued: true };
+    }
+  }
+  return { grantId, amount: cleanAmount, delivered, queued: false };
+}
+
+app.post("/api/admin/give-coins", verifyAdmin, async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const rawTarget = String(req.body?.target || "all").trim();
+    const rawUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const amount = Math.floor(Number(req.body?.amount) || 0);
+    const reason = String(req.body?.reason || "admin treasury gift").trim().slice(0, 120);
+
+    if (!Number.isFinite(amount) || amount < 1 || amount > 10000000) {
+      return res.status(400).json({ success: false, error: "Amount must be between 1 and 10,000,000" });
+    }
+
+    let resolvedUsername = rawUsername;
+    let targetClientId = rawTarget;
+    if (!resolvedUsername && rawTarget !== "all") {
+      const clientMatch = liveClients.get(rawTarget) || httpHeartbeats.get(rawTarget);
+      if (clientMatch?.username && String(clientMatch.username).toLowerCase() !== "anonymous") {
+        resolvedUsername = String(clientMatch.username).trim();
+      }
+    }
+
+    const result = deliverCoinGrant({
+      username: resolvedUsername,
+      targetClientId: resolvedUsername ? (rawTarget !== "all" ? rawTarget : "") : targetClientId,
+      amount,
+      from: ADMIN_USERNAME,
+      reason,
+    });
+
+    const targetLabel = resolvedUsername ? `@${resolvedUsername}` : rawTarget === "all" ? "everyone online" : rawTarget;
+    recordStaffAction({
+      action: "admin_give_coins",
+      actor: { username: ADMIN_USERNAME, role: "owner" },
+      targetUsername: resolvedUsername || "all",
+      details: `granted ${amount.toLocaleString()} coins to ${targetLabel}${reason ? ` (${reason})` : ""}`,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+      targetLabel,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Failed to grant coins" });
+  }
+});
+
+app.post("/api/coins/claim-pending", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser?.username) {
+      return res.json({ success: true, grants: [] });
+    }
+    const userKey = authUser.username.toLowerCase();
+    const claimedSet = new Set(
+      Array.isArray(req.body?.claimedIds) ? req.body.claimedIds.map((x) => String(x)) : []
+    );
+    const map = getPendingCoinGrantsObj();
+    const list = Array.isArray(map[userKey]) ? map[userKey] : [];
+    if (list.length === 0) {
+      return res.json({ success: true, grants: [] });
+    }
+    delete map[userKey];
+    savePendingCoinGrantsObj(map);
+    const fresh = list.filter((g) => g && g.grantId && !claimedSet.has(String(g.grantId)));
+    return res.json({ success: true, grants: fresh });
+  } catch (err) {
+    return res.status(500).json({ success: false, grants: [], error: err?.message });
+  }
+});
+
+app.post("/api/chat/gift", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser?.username) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to send gifts" });
+    }
+    const senderName = authUser.username;
+    const senderKey = senderName.toLowerCase();
+    const isOwnerSender = OWNER_USERNAMES.has(senderKey);
+
+    if (!isOwnerSender && isAccountShadowbanned(senderKey)) {
+      return res.status(403).json({ success: false, error: "Unable to send gifts right now" });
+    }
+
+    const recipientRaw = String(req.body?.recipient || "").trim().replace(/^@/, "");
+    const recipientKey = recipientRaw.toLowerCase();
+    if (!recipientKey) {
+      return res.status(400).json({ success: false, error: "Please choose a recipient username" });
+    }
+    if (recipientKey === senderKey) {
+      return res.status(400).json({ success: false, error: "You cannot send a gift to yourself" });
+    }
+
+    const giftType = String(req.body?.giftType || "coins").trim().toLowerCase();
+    const channel = String(req.body?.channel || "general").trim();
+    const note = String(req.body?.note || "").trim().slice(0, 120);
+
+    const csMap = await getCloudSyncUsersMapAsync().catch(() => new Map());
+    const recipientRec = csMap.get(recipientKey) || (await dbFindUserByUsername(recipientRaw).catch(() => null));
+    const canonicalRecipient = recipientRec?.username || recipientRaw;
+
+    if (giftType === "cookie_master") {
+      const now = Date.now();
+      const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+      const existingSub = await findActiveStripeSubscription({ username: canonicalRecipient }).catch(() => null);
+      const baseExpiry = existingSub && existingSub.expiresAt > now ? existingSub.expiresAt : now;
+      const nextExpiresAt = baseExpiry + THIRTY_DAYS_MS;
+      const giftSubId = `gift_cm_${now}_${Math.random().toString(36).slice(2, 8)}`;
+
+      await upsertStripeSubscription({
+        subscriptionId: giftSubId,
+        checkoutSessionId: giftSubId,
+        invoiceId: giftSubId,
+        customerId: `gift_from_${senderKey}`,
+        emailLower: "",
+        userNameLower: canonicalRecipient.toLowerCase(),
+        customUsernameLower: canonicalRecipient.toLowerCase(),
+        claimedUsernameLower: canonicalRecipient.toLowerCase(),
+        priceId: "gift_1_month",
+        productId: "cookie_master_gift",
+        tierName: "Cookie Master (Gifted)",
+        status: "active",
+        managedPayments: false,
+        customerPortalUrl: "",
+        amount: 2,
+        verifiedAt: now,
+        expiresAt: nextExpiresAt,
+        cancelledAt: null,
+      });
+
+      const grantPayload = {
+        type: "cookie-master:grant",
+        subscriptionId: giftSubId,
+        expiresAt: nextExpiresAt,
+        from: senderName,
+        note,
+        targetUsername: canonicalRecipient,
+        timestamp: now,
+      };
+      for (const [cid, c] of liveClients.entries()) {
+        const cu = String(c?.verifiedUsername || c?.username || "").trim().toLowerCase();
+        if (cu === canonicalRecipient.toLowerCase()) {
+          broadcastToClients(grantPayload, cid);
+        }
+      }
+
+      if (canAccessChatChannel(channel, senderKey)) {
+        const authorProf = userProfiles.get(senderKey);
+        const giftMsg = {
+          id: `msg_${now}_${Math.random().toString(36).slice(2, 8)}`,
+          channel,
+          author: senderName,
+          role: getUserChatRole(senderName),
+          text: `🎁 gifted 1 month of Cookie Master to @${canonicalRecipient}!${note ? ` — "${note}"` : ""}`,
+          timestamp: now,
+          customization: authorProf?.customization || null,
+          isGoat: goatUsers.has(senderKey),
+        };
+        chatHistory.push(giftMsg);
+        if (chatHistory.length > 500) chatHistory.shift();
+        persistChatHistory();
+        broadcastChatPayload(channel, { type: "chat-event", event: "NEW_MESSAGE", message: giftMsg });
+      }
+
+      return res.json({
+        success: true,
+        giftType: "cookie_master",
+        recipient: canonicalRecipient,
+        expiresAt: nextExpiresAt,
+      });
+    }
+
+    // Default: Cookie Coins gift
+    const amount = Math.floor(Number(req.body?.amount) || 0);
+    if (!Number.isFinite(amount) || amount < 10 || amount > 1000000) {
+      return res.status(400).json({ success: false, error: "Gift amount must be between 10 and 1,000,000 coins" });
+    }
+
+    const delivery = deliverCoinGrant({
+      username: canonicalRecipient,
+      amount,
+      from: senderName,
+      reason: note || `gift from @${senderName}`,
+    });
+
+    if (canAccessChatChannel(channel, senderKey)) {
+      const now = Date.now();
+      const authorProf = userProfiles.get(senderKey);
+      const giftMsg = {
+        id: `msg_${now}_${Math.random().toString(36).slice(2, 8)}`,
+        channel,
+        author: senderName,
+        role: getUserChatRole(senderName),
+        text: `🎁 gifted ${amount.toLocaleString()} Cookie Coins to @${canonicalRecipient}!${note ? ` — "${note}"` : ""}`,
+        timestamp: now,
+        customization: authorProf?.customization || null,
+        isGoat: goatUsers.has(senderKey),
+      };
+      chatHistory.push(giftMsg);
+      if (chatHistory.length > 500) chatHistory.shift();
+      persistChatHistory();
+      broadcastChatPayload(channel, { type: "chat-event", event: "NEW_MESSAGE", message: giftMsg });
+    }
+
+    return res.json({
+      success: true,
+      giftType: "coins",
+      recipient: canonicalRecipient,
+      amount,
+      delivered: delivery.delivered,
+      queued: delivery.queued,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to send gift" });
+  }
 });
 
 function isSafeExternalHttpUrl(rawUrl) {

@@ -3,6 +3,57 @@
  * Connects to Sunshine SSE channel for live status and remote administration / sound effects / trolls.
  */
 import { applyExtendedChaosEffect, clearExtendedChaosEffects } from "./visualTrolls";
+import { addCookieCoins, getCookieMasterState, setCookieMasterState } from "./cookieCoins";
+
+const CLAIMED_COIN_GRANTS_KEY = "cookie_claimed_grant_ids_v1";
+const claimedCoinGrantIds = new Set<string>();
+try {
+  const saved = JSON.parse(sessionStorage.getItem(CLAIMED_COIN_GRANTS_KEY) || "[]");
+  if (Array.isArray(saved)) {
+    for (const id of saved) {
+      if (typeof id === "string" && id) claimedCoinGrantIds.add(id);
+    }
+  }
+} catch {}
+
+function recordClaimedGrantId(grantId: string): boolean {
+  if (!grantId) return true;
+  if (claimedCoinGrantIds.has(grantId)) return false;
+  claimedCoinGrantIds.add(grantId);
+  try {
+    sessionStorage.setItem(
+      CLAIMED_COIN_GRANTS_KEY,
+      JSON.stringify(Array.from(claimedCoinGrantIds).slice(-80)),
+    );
+  } catch {}
+  return true;
+}
+
+function claimPendingCoinGrants(): void {
+  try {
+    const token = localStorage.getItem("auth_token") || "";
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    void fetch("/api/coins/claim-pending", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify({ claimedIds: Array.from(claimedCoinGrantIds) }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data?.success || !Array.isArray(data.grants)) return;
+        for (const g of data.grants) {
+          const id = String(g?.grantId || "");
+          const amount = Number(g?.amount || 0);
+          if (amount > 0 && recordClaimedGrantId(id)) {
+            addCookieCoins(amount, g?.reason || (g?.from ? `gift from @${g.from}` : "server gift"));
+          }
+        }
+      })
+      .catch(() => {});
+  } catch {}
+}
 
 // Global AudioContext for synthesized effects
 let audioCtx: AudioContext | null = null;
@@ -1564,6 +1615,7 @@ function connectLiveEventSource(): void {
     const isReconnect = hasOpenedStreamOnce;
     hasOpenedStreamOnce = true;
     sendHeartbeat();
+    claimPendingCoinGrants();
     try {
       window.dispatchEvent(new CustomEvent("sunshine-sse-open", { detail: { isReconnect } }));
     } catch {}
@@ -1576,6 +1628,31 @@ function connectLiveEventSource(): void {
 
       if (msg.type === "admin-chaos") {
         executeTrollAction(msg.action, msg.data, msg.data?.trollEventId || msg.trollEventId);
+      } else if (msg.type === "cookie-coins:grant") {
+        const grantId = String(msg.grantId || "");
+        const amount = Math.floor(Number(msg.amount || 0));
+        if (amount > 0 && recordClaimedGrantId(grantId)) {
+          addCookieCoins(amount, msg.reason || (msg.from ? `gift from @${msg.from}` : "server gift"));
+        }
+      } else if (msg.type === "cookie-master:grant") {
+        const prev = getCookieMasterState();
+        setCookieMasterState({
+          active: true,
+          licenseKey: String(msg.subscriptionId || prev?.licenseKey || "gifted"),
+          subscriptionId: String(msg.subscriptionId || prev?.subscriptionId || ""),
+          status: "active",
+          verifiedAt: Date.now(),
+          expiresAt: Number(msg.expiresAt) || Date.now() + 30 * 24 * 60 * 60 * 1000,
+          cancelledAt: null,
+          lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
+        });
+        const w = window as unknown as { showToast?: (m: string, t?: string) => void };
+        if (typeof w.showToast === "function") {
+          w.showToast(
+            `🎁 @${msg.from || "someone"} gifted you 1 month of cookie master!`,
+            "success",
+          );
+        }
       } else if (msg.type === "chat-event") {
         window.dispatchEvent(new CustomEvent("sunshine-chat-event", { detail: msg }));
       } else if (msg.type === "voice-event") {

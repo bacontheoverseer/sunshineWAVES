@@ -13,7 +13,7 @@ import {
   isClientAutoIdle,
   isLiveStreamConnected,
 } from "../core/liveClient.ts";
-import { formatPlayTime } from "../core/cookieCoins.ts";
+import { formatPlayTime, getCookieCoins, spendCookieCoins } from "../core/cookieCoins.ts";
 import { getDeviceSignature } from "../core/deviceSignature.ts";
 import {
   ChatRole,
@@ -969,6 +969,13 @@ export default function ChatModal() {
   const [isSending, setIsSending] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showGiftPicker, setShowGiftPicker] = useState(false);
+  const [giftTab, setGiftTab] = useState<"coins" | "cookie_master">("coins");
+  const [giftRecipient, setGiftRecipient] = useState("");
+  const [giftAmount, setGiftAmount] = useState("100");
+  const [giftNote, setGiftNote] = useState("");
+  const [isSendingGift, setIsSendingGift] = useState(false);
+  const [myCoinBalance, setMyCoinBalance] = useState(() => getCookieCoins());
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pendingImage, setPendingImage] = useState<CompressedImageResult | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{
@@ -992,6 +999,7 @@ export default function ChatModal() {
   const [gifHasNext, setGifHasNext] = useState(false);
   const gifPickerRef = useRef<HTMLDivElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const giftPickerRef = useRef<HTMLDivElement>(null);
   const gifAbortRef = useRef<AbortController | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -3132,9 +3140,17 @@ export default function ChatModal() {
     return () => window.clearTimeout(timer);
   }, [isOpen, showGifPicker, gifSearch, fetchKlipyGifs]);
 
-  // Close GIF, Emoji, or Reaction picker when clicking outside
+  // Sync local Cookie Coins balance for the Gift Picker
   useEffect(() => {
-    if (!showGifPicker && !showEmojiPicker && !reactingMessageId && !reactPickerMessageId) return;
+    const syncCoins = () => setMyCoinBalance(getCookieCoins());
+    syncCoins();
+    window.addEventListener("cookie-coins-updated", syncCoins);
+    return () => window.removeEventListener("cookie-coins-updated", syncCoins);
+  }, []);
+
+  // Close GIF, Emoji, Gift, or Reaction picker when clicking outside
+  useEffect(() => {
+    if (!showGifPicker && !showEmojiPicker && !showGiftPicker && !reactingMessageId && !reactPickerMessageId) return;
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as Element | null;
       if (!target) return;
@@ -3153,6 +3169,13 @@ export default function ChatModal() {
         setShowEmojiPicker(false);
       }
       if (
+        showGiftPicker &&
+        !giftPickerRef.current?.contains(target) &&
+        !target.closest(".chat-gift-toggle-btn")
+      ) {
+        setShowGiftPicker(false);
+      }
+      if (
         reactingMessageId &&
         !target.closest(".chat-quick-react-bar") &&
         !target.closest(".chat-react-toggle-btn")
@@ -3169,7 +3192,85 @@ export default function ChatModal() {
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [showGifPicker, showEmojiPicker, reactingMessageId, reactPickerMessageId]);
+  }, [showGifPicker, showEmojiPicker, showGiftPicker, reactingMessageId, reactPickerMessageId]);
+
+  const GIFT_COOKIE_MASTER_COST = 5000;
+  const handleSendGift = useCallback(
+    async (e?: Event) => {
+      if (e) e.preventDefault();
+      if (!cloudUser || isSendingGift) return;
+      const recipient = giftRecipient.trim().replace(/^@/, "");
+      if (!recipient) {
+        notifyToast("enter a @username to send a gift to", "error");
+        return;
+      }
+      if (recipient.toLowerCase() === cloudUser.toLowerCase()) {
+        notifyToast("you cannot send a gift to yourself", "error");
+        return;
+      }
+
+      const isOwner = selfRole === "owner";
+      let cost = 0;
+      let parsedAmount = 0;
+      if (giftTab === "coins") {
+        parsedAmount = Math.floor(Number(giftAmount) || 0);
+        if (parsedAmount < 10 || parsedAmount > 1000000) {
+          notifyToast("gift amount must be between 10 and 1,000,000 coins", "error");
+          return;
+        }
+        cost = isOwner ? 0 : parsedAmount;
+      } else {
+        cost = isOwner ? 0 : GIFT_COOKIE_MASTER_COST;
+      }
+
+      if (cost > 0 && getCookieCoins() < cost) {
+        notifyToast(`not enough cookie coins (need ${cost.toLocaleString()})`, "error");
+        return;
+      }
+
+      setIsSendingGift(true);
+      try {
+        const token = localStorage.getItem("auth_token") || "";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers.Authorization = `Bearer ${token}`;
+
+        const res = await fetch("/api/chat/gift", {
+          method: "POST",
+          credentials: "include",
+          headers,
+          body: JSON.stringify({
+            recipient,
+            giftType: giftTab,
+            amount: giftTab === "coins" ? parsedAmount : undefined,
+            channel: activeChannel,
+            note: giftNote.trim().slice(0, 120),
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "failed to send gift", "error");
+          return;
+        }
+        if (cost > 0) {
+          spendCookieCoins(cost);
+          setMyCoinBalance(getCookieCoins());
+        }
+        notifyToast(
+          giftTab === "cookie_master"
+            ? `gifted 1 month of cookie master to @${data.recipient || recipient}!`
+            : `gifted ${parsedAmount.toLocaleString()} cookie coins to @${data.recipient || recipient}!`,
+          "success",
+        );
+        setGiftNote("");
+        setShowGiftPicker(false);
+      } catch {
+        notifyToast("network error sending gift", "error");
+      } finally {
+        setIsSendingGift(false);
+      }
+    },
+    [cloudUser, isSendingGift, giftRecipient, selfRole, giftTab, giftAmount, activeChannel, giftNote],
+  );
 
   const handleInsertEmoji = useCallback((emoji: string) => {
     const input = chatInputRef.current;
@@ -5683,6 +5784,7 @@ export default function ChatModal() {
                     onClick={() => {
                       setShowGifPicker(false);
                       setShowEmojiPicker(false);
+                      setShowGiftPicker(false);
                       setShowCameraModal(true);
                     }}
                   >
@@ -5695,6 +5797,7 @@ export default function ChatModal() {
                     aria-label="Open emoji picker"
                     onClick={() => {
                       setShowGifPicker(false);
+                      setShowGiftPicker(false);
                       setShowEmojiPicker((v) => !v);
                     }}
                   >
@@ -5702,10 +5805,30 @@ export default function ChatModal() {
                   </button>
                   <button
                     type="button"
+                    class={`chat-gift-toggle-btn${showGiftPicker ? " active" : ""}`}
+                    title="Send a gift (Cookie Coins or 1 Month Cookie Master)"
+                    aria-label="Send a gift"
+                    onClick={() => {
+                      setShowGifPicker(false);
+                      setShowEmojiPicker(false);
+                      setShowGiftPicker((prev) => {
+                        const next = !prev;
+                        if (next && activeChannelDef.isDm && activeChannelDef.name) {
+                          setGiftRecipient(activeChannelDef.name);
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    <i class="fa-solid fa-gift"></i>
+                  </button>
+                  <button
+                    type="button"
                     class={`chat-gif-toggle-btn${showGifPicker ? " active" : ""}`}
                     title="Send a GIF via KLIPY"
                     onClick={() => {
                       setShowEmojiPicker(false);
+                      setShowGiftPicker(false);
                       setShowGifPicker((v) => !v);
                     }}
                   >
@@ -5729,6 +5852,113 @@ export default function ChatModal() {
                 onSelect={handleInsertEmoji}
                 onClose={() => setShowEmojiPicker(false)}
               />
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showGiftPicker && (
+              <form class="chat-gift-picker" ref={giftPickerRef as any} onSubmit={handleSendGift}>
+                <div class="chat-gift-picker-header">
+                  <span class="chat-gift-picker-title">
+                    <i class="fa-solid fa-gift" style={{ color: "#facc15" }}></i>
+                    send a gift
+                  </span>
+                  <span class="chat-gift-balance-pill">
+                    <i class={`fa-solid ${selfRole === "owner" ? "fa-infinity" : "fa-coins"}`}></i>
+                    {selfRole === "owner" ? "unlimited" : `${myCoinBalance.toLocaleString()} coins`}
+                  </span>
+                </div>
+
+                <div class="chat-gift-tabs">
+                  <button
+                    type="button"
+                    class={`chat-gift-tab-btn${giftTab === "coins" ? " active" : ""}`}
+                    onClick={() => setGiftTab("coins")}
+                  >
+                    <i class="fa-solid fa-coins"></i> cookie coins
+                  </button>
+                  <button
+                    type="button"
+                    class={`chat-gift-tab-btn${giftTab === "cookie_master" ? " active" : ""}`}
+                    onClick={() => setGiftTab("cookie_master")}
+                  >
+                    <i class="fa-solid fa-crown"></i> 1 mo master
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  class="chat-gift-input"
+                  placeholder="recipient @username..."
+                  list="chat-gift-users-datalist"
+                  value={giftRecipient}
+                  onInput={(e) => setGiftRecipient((e.target as HTMLInputElement).value)}
+                />
+                <datalist id="chat-gift-users-datalist">
+                  {[...onlineUsers, ...offlineUsers]
+                    .filter((u) => u.username.toLowerCase() !== cloudUser.toLowerCase())
+                    .slice(0, 60)
+                    .map((u) => (
+                      <option key={u.username} value={u.username} />
+                    ))}
+                </datalist>
+
+                {giftTab === "coins" ? (
+                  <>
+                    <div class="chat-gift-presets">
+                      {[50, 100, 250, 500, 1000].map((amt) => (
+                        <button
+                          key={amt}
+                          type="button"
+                          class={`chat-gift-preset-btn${Number(giftAmount) === amt ? " active" : ""}`}
+                          onClick={() => setGiftAmount(String(amt))}
+                        >
+                          {amt.toLocaleString()}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="number"
+                      min={10}
+                      max={1000000}
+                      class="chat-gift-input"
+                      placeholder="custom coin amount..."
+                      value={giftAmount}
+                      onInput={(e) => setGiftAmount((e.target as HTMLInputElement).value)}
+                    />
+                  </>
+                ) : (
+                  <div class="chat-gift-cm-card">
+                    <span class="chat-gift-cm-title">
+                      <i class="fa-solid fa-crown"></i> 1 month of cookie master
+                    </span>
+                    <span class="chat-gift-cm-desc">
+                      unlocks ad-free browsing, +1,000 daily cookie coins, and the exclusive crown badge for 30 days.{" "}
+                      {selfRole === "owner" ? "(free for owner)" : `(${GIFT_COOKIE_MASTER_COST.toLocaleString()} coins)`}
+                    </span>
+                  </div>
+                )}
+
+                <input
+                  type="text"
+                  class="chat-gift-input"
+                  maxLength={120}
+                  placeholder="optional gift message..."
+                  value={giftNote}
+                  onInput={(e) => setGiftNote((e.target as HTMLInputElement).value)}
+                />
+
+                <button
+                  type="submit"
+                  class="chat-gift-send-btn"
+                  disabled={isSendingGift || !giftRecipient.trim()}
+                >
+                  <i class={`fa-solid ${isSendingGift ? "fa-spinner fa-spin" : "fa-gift"}`}></i>
+                  {isSendingGift
+                    ? "sending gift..."
+                    : giftTab === "cookie_master"
+                    ? `gift 1 mo cookie master${selfRole === "owner" ? "" : ` (${GIFT_COOKIE_MASTER_COST.toLocaleString()} coins)`}`
+                    : `send ${(Math.max(0, Math.floor(Number(giftAmount) || 0))).toLocaleString()} coins`}
+                </button>
+              </form>
             )}
 
             {cloudUser && !isCurrentDmBlocked && showGifPicker && (
