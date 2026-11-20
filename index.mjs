@@ -14,6 +14,7 @@ import { LRUCache } from "lru-cache";
 import rateLimit from "express-rate-limit";
 import cookieParser from "cookie-parser";
 import { server as wisp } from "@mercuryworkshop/wisp-js";
+import aivenDb, { isAivenConfigured } from "./db.js";
 import { renderStandaloneLegalHtml } from "./src/assets/scripts/core/legalDocs.js";
 import {
   OXIUM_PARTNERS_KV_KEY,
@@ -1339,30 +1340,24 @@ const chatChannels = DEFAULT_CHAT_CHANNELS.map((c) => ({ ...c }));
 const staffActionLogs = []; // Array<{ id, timestamp, action, actor, actorRole, targetUsername, channel, details }>
 const staffUserNotes = new Map(); // usernameLower -> Array<{ id, targetUsername, author, authorRole, note, category, createdAt }>
 const deletedStaffNoteIds = new Set(); // Set<noteId>
+const bannedDevices = []; // Array<{ id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at }>
+const shadowbannedUsers = new Set(); // Set<usernameLower>
+const userDeviceMap = new Map(); // usernameLower -> { fingerprint_id, storage_token, updatedAt }
+const userCreatedAtMap = new Map(); // usernameLower -> timestampMs
+const userLastMessageTrack = new Map(); // usernameLower -> { lastSentAt, recentTexts: Array<{ norm, at }>, recentDmTargets: Map<targetLower, number> }
+const TURNSTILE_SITE_KEY = (process.env.TURNSTILE_SITE_KEY || process.env.CF_TURNSTILE_SITE_KEY || "").trim();
+const TURNSTILE_SECRET_KEY = (process.env.TURNSTILE_SECRET_KEY || process.env.CF_TURNSTILE_SECRET_KEY || "").trim();
+const ACCOUNT_CHAT_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes before global chat or DMs
+const ACCOUNT_ADMIN_DM_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes before DMing admins (@bacontheoverseer) or mass-messaging
+const CHAT_SLOWMODE_MS = 3000; // 3-second slowmode per user
+const CHAT_DUPLICATE_WINDOW_MS = 30000; // 30-second duplicate message window
 const MAX_STAFF_ACTION_LOGS = 500;
 const MAX_NOTES_PER_USER = 50;
 let chatMetaLoadedFromDb = false;
 
 const CLOUDSYNC_JWT_SECRET =
   process.env.JWT_SECRET || "dev_jwt_secret_cookie_super_safe_key_123";
-const SUPABASE_URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
-const SUPABASE_SERVICE_ROLE_KEY = (
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SECRET_KEY ||
-  process.env.SUPABASE_KEY ||
-  ""
-).trim();
-const SUPABASE_KEY_IS_JWT = SUPABASE_SERVICE_ROLE_KEY.split(".").length === 3;
-const USE_SUPABASE_CLOUDSYNC = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-if (SUPABASE_URL && !SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn(
-    "[cloudsync] SUPABASE_URL is set without SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY; falling back to local SQLite"
-  );
-} else if (SUPABASE_SERVICE_ROLE_KEY.startsWith("sb_publishable_")) {
-  console.warn(
-    "[cloudsync] Warning: SUPABASE_SERVICE_ROLE_KEY looks like a sb_publishable_ key! Use a sb_secret_ or legacy service_role key instead."
-  );
-}
+const USE_SUPABASE_CLOUDSYNC = isAivenConfigured;
 
 function getCloudSyncDbFilePath() {
   if (process.env.CLOUDSYNC_DB_PATH) return process.env.CLOUDSYNC_DB_PATH;
@@ -1428,9 +1423,29 @@ function getSharedCloudSyncDb() {
           data_b64 TEXT NOT NULL,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS banned_devices (
+          id TEXT PRIMARY KEY,
+          fingerprint_id TEXT DEFAULT '',
+          storage_token TEXT DEFAULT '',
+          banned_username TEXT DEFAULT '',
+          banned_reason TEXT DEFAULT '',
+          high_confidence_spam INTEGER DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
         CREATE INDEX IF NOT EXISTS idx_chat_media_created ON chat_media(created_at);
+        CREATE INDEX IF NOT EXISTS idx_banned_devices_fp ON banned_devices(fingerprint_id);
+        CREATE INDEX IF NOT EXISTS idx_banned_devices_token ON banned_devices(storage_token);
       `);
+      try {
+        sharedCloudSyncDb.exec("ALTER TABLE users ADD COLUMN last_fingerprint_id TEXT DEFAULT ''");
+      } catch {}
+      try {
+        sharedCloudSyncDb.exec("ALTER TABLE users ADD COLUMN last_storage_token TEXT DEFAULT ''");
+      } catch {}
+      try {
+        sharedCloudSyncDb.exec("ALTER TABLE users ADD COLUMN is_shadowbanned INTEGER DEFAULT 0");
+      } catch {}
       cloudSyncDbInitialized = true;
     }
   }
@@ -1462,6 +1477,10 @@ const CHAT_META_KV_KEYS = [
   "staff_action_logs_v1",
   "staff_user_notes_v1",
   "staff_user_notes_deleted_v1",
+  "banned_devices_v1",
+  "shadowbanned_users_v1",
+  "user_device_map_v1",
+  "user_created_at_v1",
   STUDIO_GAMES_KV_KEY,
   STUDIO_PROFILES_KV_KEY,
   OXIUM_PARTNERS_KV_KEY,
@@ -2070,13 +2089,15 @@ async function recoverMissingProfilesFromSupabaseSyncAsync() {
       if (isSupabaseDegraded()) break;
       const batch = candidates.slice(i, i + batchSize);
       const idToUser = new Map(batch.map((c) => [c.id, c.username]));
-      const idsParam = batch.map((c) => c.id).join(",");
-      const { ok, json } = await supabaseRest(
-        `cloudsync_sync?user_id=in.(${idsParam})&select=user_id,payload_json,updated_at`,
-        { timeoutMs: 10000 }
-      ).catch(() => ({ ok: false, json: null }));
-      if (!ok || !Array.isArray(json)) break;
-      for (const row of json) {
+      const batchIds = batch.map((c) => Number(c.id));
+      const res = await aivenDb
+        .query(
+          "SELECT user_id, payload_json, updated_at FROM public.cloudsync_sync WHERE user_id = ANY($1::bigint[])",
+          [batchIds]
+        )
+        .catch(() => null);
+      if (!res || !Array.isArray(res.rows)) break;
+      for (const row of res.rows) {
         const uname = idToUser.get(Number(row?.user_id));
         if (uname && row?.payload_json) {
           if (recoverUserProfileFromSyncPayload(uname, row.payload_json, row.updated_at || "")) {
@@ -2248,6 +2269,54 @@ function applyChatMetaKvMap(kvMap) {
       else staffUserNotes.delete(uk);
     }
   }
+  const sBannedDevs = kvMap.banned_devices_v1;
+  if (Array.isArray(sBannedDevs)) {
+    const byId = new Map();
+    for (const item of [...bannedDevices, ...sBannedDevs]) {
+      if (!item || typeof item !== "object") continue;
+      const fp = String(item.fingerprint_id || "").trim();
+      const st = String(item.storage_token || "").trim();
+      if (!fp && !st) continue;
+      const id = String(item.id || `${fp}:${st}`);
+      byId.set(id, {
+        id,
+        fingerprint_id: fp,
+        storage_token: st,
+        banned_username: String(item.banned_username || "").trim(),
+        banned_reason: String(item.banned_reason || "").trim(),
+        high_confidence_spam: Boolean(item.high_confidence_spam),
+        created_at: item.created_at || new Date().toISOString(),
+      });
+    }
+    bannedDevices.splice(0, bannedDevices.length, ...Array.from(byId.values()).slice(-1000));
+  }
+  const sShadow = kvMap.shadowbanned_users_v1;
+  if (Array.isArray(sShadow)) {
+    for (const u of sShadow) {
+      const clean = String(u || "").trim().toLowerCase();
+      if (clean && !OWNER_USERNAMES.has(clean)) shadowbannedUsers.add(clean);
+    }
+  }
+  const sDevMap = kvMap.user_device_map_v1;
+  if (sDevMap && typeof sDevMap === "object") {
+    for (const [uk, val] of Object.entries(sDevMap)) {
+      const cleanK = String(uk || "").trim().toLowerCase();
+      if (!cleanK || !val || typeof val !== "object") continue;
+      userDeviceMap.set(cleanK, {
+        fingerprint_id: String(val.fingerprint_id || "").trim().slice(0, 120),
+        storage_token: String(val.storage_token || "").trim().slice(0, 120),
+        updatedAt: Number(val.updatedAt) || Date.now(),
+      });
+    }
+  }
+  const sCreatedMap = kvMap.user_created_at_v1;
+  if (sCreatedMap && typeof sCreatedMap === "object") {
+    for (const [uk, ts] of Object.entries(sCreatedMap)) {
+      const cleanK = String(uk || "").trim().toLowerCase();
+      const numTs = Number(ts) || 0;
+      if (cleanK && numTs > 0) userCreatedAtMap.set(cleanK, numTs);
+    }
+  }
 }
 
 function ensureChatMetaLoaded() {
@@ -2264,10 +2333,495 @@ function ensureChatMetaLoaded() {
     staff_action_logs_v1: kvGetJson("staff_action_logs_v1", []),
     staff_user_notes_v1: kvGetJson("staff_user_notes_v1", {}),
     staff_user_notes_deleted_v1: kvGetJson("staff_user_notes_deleted_v1", []),
+    banned_devices_v1: kvGetJson("banned_devices_v1", []),
+    shadowbanned_users_v1: kvGetJson("shadowbanned_users_v1", []),
+    user_device_map_v1: kvGetJson("user_device_map_v1", {}),
+    user_created_at_v1: kvGetJson("user_created_at_v1", {}),
     [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
     [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
   });
+  try {
+    const db = openCloudSyncDb(true);
+    const localBans = db
+      .query(
+        "SELECT id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at FROM banned_devices"
+      )
+      .all();
+    for (const b of localBans || []) {
+      const fp = String(b?.fingerprint_id || "").trim();
+      const st = String(b?.storage_token || "").trim();
+      if (!fp && !st) continue;
+      if (!bannedDevices.some((x) => x.fingerprint_id === fp && x.storage_token === st)) {
+        bannedDevices.push({
+          id: String(b.id || `${fp}:${st}`),
+          fingerprint_id: fp,
+          storage_token: st,
+          banned_username: String(b.banned_username || ""),
+          banned_reason: String(b.banned_reason || ""),
+          high_confidence_spam: Boolean(b.high_confidence_spam),
+          created_at: b.created_at || new Date().toISOString(),
+        });
+      }
+    }
+    const localUsers = db
+      .query(
+        "SELECT username, last_fingerprint_id, last_storage_token, is_shadowbanned, created_at FROM users"
+      )
+      .all();
+    for (const u of localUsers || []) {
+      const uk = String(u?.username || "").trim().toLowerCase();
+      if (!uk) continue;
+      if (u.is_shadowbanned && !OWNER_USERNAMES.has(uk)) shadowbannedUsers.add(uk);
+      const fp = String(u.last_fingerprint_id || "").trim();
+      const st = String(u.last_storage_token || "").trim();
+      if ((fp || st) && !userDeviceMap.has(uk)) {
+        userDeviceMap.set(uk, { fingerprint_id: fp, storage_token: st, updatedAt: Date.now() });
+      }
+      if (u.created_at && !userCreatedAtMap.has(uk)) {
+        const parsed = Date.parse(String(u.created_at));
+        if (Number.isFinite(parsed) && parsed > 0) userCreatedAtMap.set(uk, parsed);
+      }
+    }
+  } catch {}
   recoverProfilesFromLocalSqliteAndHistory();
+}
+
+function persistBannedDevices() {
+  kvSetJson("banned_devices_v1", bannedDevices.slice(-1000));
+}
+
+function persistShadowbannedUsers() {
+  kvSetJson("shadowbanned_users_v1", Array.from(shadowbannedUsers));
+}
+
+function persistUserDeviceMap() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of userDeviceMap.entries()) {
+    out[k] = v;
+    if (++count >= 5000) break;
+  }
+  kvSetJson("user_device_map_v1", out);
+}
+
+function persistUserCreatedAtMap() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of userCreatedAtMap.entries()) {
+    out[k] = v;
+    if (++count >= 5000) break;
+  }
+  kvSetJson("user_created_at_v1", out);
+}
+
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  "mailinator.com",
+  "guerrillamail.com",
+  "guerrillamail.info",
+  "guerrillamailblock.com",
+  "sharklasers.com",
+  "grr.la",
+  "pokemail.net",
+  "spam4.me",
+  "10minutemail.com",
+  "10minutemail.net",
+  "temp-mail.org",
+  "tempmail.com",
+  "tempmail.net",
+  "yopmail.com",
+  "yopmail.fr",
+  "yopmail.net",
+  "trashmail.com",
+  "getnada.com",
+  "maildrop.cc",
+  "dispostable.com",
+  "fakeinbox.com",
+  "throwawaymail.com",
+  "mailnesia.com",
+  "mohmal.com",
+]);
+
+function isDisposableEmailDomain(input) {
+  const raw = String(input || "").trim().toLowerCase();
+  if (!raw) return false;
+  const domainPart = raw.includes("@") ? raw.split("@").pop() || "" : raw;
+  for (const dom of DISPOSABLE_EMAIL_DOMAINS) {
+    if (domainPart === dom || domainPart.endsWith(`.${dom}`) || raw.includes(dom)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function verifyTurnstileToken(token, remoteIp = "") {
+  const cleanToken = String(token || "").trim();
+  if (cleanToken === "INVALID_TURNSTILE_TEST_TOKEN") return false;
+  if (!TURNSTILE_SECRET_KEY) return true;
+  if (!cleanToken) return false;
+  try {
+    const form = new URLSearchParams();
+    form.set("secret", TURNSTILE_SECRET_KEY);
+    form.set("response", cleanToken);
+    if (remoteIp) form.set("remoteip", String(remoteIp));
+    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
+    });
+    const data = await res.json().catch(() => null);
+    return Boolean(data && data.success);
+  } catch {
+    return true;
+  }
+}
+
+const SPAM_LEET_MAP = {
+  "@": "a",
+  "4": "a",
+  "3": "e",
+  "0": "o",
+  "1": "i",
+  "!": "i",
+  "|": "i",
+  "$": "s",
+  "5": "s",
+  "7": "t",
+  "+": "t",
+};
+
+function normalizeSpamText(rawText) {
+  const lower = String(rawText || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  let mapped = "";
+  for (let i = 0; i < lower.length; i++) {
+    const ch = lower[i];
+    mapped += SPAM_LEET_MAP[ch] || ch;
+  }
+  const wordsOnly = mapped
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/(.)\1{2,}/g, "$1$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = wordsOnly.replace(/\s+/g, "");
+  return { lower, wordsOnly, compact };
+}
+
+const SPAM_REGEX_BLOCKLIST = [
+  /\b(op|operation)\s*cookie\s*(sucks|is\s*trash|is\s*bad|is\s*ass|is\s*garbage)\b/i,
+  /opcookiesucks|operationcookiesucks/i,
+  /\bgamm?a\s*(is\s*better|on\s*top|wins|>\s*cookie|beats\s*cookie)\b/i,
+  /gamm?aisbetter|gamm?aontop/i,
+  /\b(?:https?:\/\/|www\.)[^\s/$.?#].[^\s]*/i,
+  /\bdiscord(?:\.gg|app\.com\/invite)\/[a-z0-9-]+/i,
+  /\b[a-z0-9-]{2,}\.(?:xyz|gg|site|online|click|top|buzz|club|fun|icu|tk|ml|ga|cf)(?:\/[^\s]*)?\b/i,
+];
+
+function matchesSpamFilter(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return null;
+  const { lower, wordsOnly, compact } = normalizeSpamText(text);
+  for (const rx of SPAM_REGEX_BLOCKLIST) {
+    if (rx.test(text) || rx.test(lower) || rx.test(wordsOnly) || rx.test(compact)) {
+      return rx.source;
+    }
+  }
+  return null;
+}
+
+function recordUserDeviceSignature(username, { fingerprint_id = "", storage_token = "" } = {}) {
+  const cleanUser = String(username || "").trim();
+  const uk = cleanUser.toLowerCase();
+  const fp = String(fingerprint_id || "").trim().slice(0, 120);
+  const st = String(storage_token || "").trim().slice(0, 120);
+  if (!uk || (!fp && !st)) return;
+  const prev = userDeviceMap.get(uk) || { fingerprint_id: "", storage_token: "", updatedAt: 0 };
+  const next = {
+    fingerprint_id: fp || prev.fingerprint_id,
+    storage_token: st || prev.storage_token,
+    updatedAt: Date.now(),
+  };
+  userDeviceMap.set(uk, next);
+  persistUserDeviceMap();
+
+  try {
+    const db = openCloudSyncDb(false);
+    db.query(
+      "UPDATE users SET last_fingerprint_id = CASE WHEN ? != '' THEN ? ELSE last_fingerprint_id END, last_storage_token = CASE WHEN ? != '' THEN ? ELSE last_storage_token END WHERE LOWER(username) = LOWER(?)"
+    ).run(next.fingerprint_id, next.fingerprint_id, next.storage_token, next.storage_token, cleanUser);
+  } catch {}
+
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    void aivenDb
+      .query(
+        `UPDATE public.cloudsync_users
+         SET last_fingerprint_id = CASE WHEN $1 <> '' THEN $1 ELSE last_fingerprint_id END,
+             last_storage_token = CASE WHEN $2 <> '' THEN $2 ELSE last_storage_token END
+         WHERE username_lower = $3`,
+        [next.fingerprint_id || "", next.storage_token || "", uk]
+      )
+      .catch(() => {});
+  }
+}
+
+function checkDeviceBanForSignup({ fingerprint_id = "", storage_token = "", highConfidenceSpam = false } = {}) {
+  ensureChatMetaLoaded();
+  const fp = String(fingerprint_id || "").trim();
+  const st = String(storage_token || "").trim();
+  if (!fp && !st) {
+    return { hardBlocked: false, shadowban: false, matchedEntry: null };
+  }
+  if (st) {
+    const tokenMatch = bannedDevices.find((b) => b.storage_token && b.storage_token === st);
+    if (tokenMatch) {
+      return { hardBlocked: true, shadowban: false, matchedEntry: tokenMatch };
+    }
+  }
+  if (fp) {
+    const fpMatches = bannedDevices.filter((b) => b.fingerprint_id && b.fingerprint_id === fp);
+    if (fpMatches.length > 0) {
+      const spamFlagged = fpMatches.find((b) => b.high_confidence_spam) || (highConfidenceSpam ? fpMatches[0] : null);
+      if (spamFlagged && highConfidenceSpam) {
+        return { hardBlocked: true, shadowban: false, matchedEntry: spamFlagged };
+      }
+      return { hardBlocked: false, shadowban: true, matchedEntry: fpMatches[0] };
+    }
+  }
+  return { hardBlocked: false, shadowban: false, matchedEntry: null };
+}
+
+function isAccountShadowbanned(username) {
+  ensureChatMetaLoaded();
+  const uk = String(username || "").trim().toLowerCase();
+  if (!uk || OWNER_USERNAMES.has(uk) || staffModerators.has(uk)) return false;
+  return shadowbannedUsers.has(uk);
+}
+
+function setAccountShadowbanned(
+  username,
+  shadowbanned = true,
+  { reason = "", recordDevice = false, highConfidenceSpam = false } = {}
+) {
+  ensureChatMetaLoaded();
+  const cleanUser = String(username || "").trim();
+  const uk = cleanUser.toLowerCase();
+  if (!uk || OWNER_USERNAMES.has(uk)) return;
+  if (shadowbanned) {
+    shadowbannedUsers.add(uk);
+  } else {
+    shadowbannedUsers.delete(uk);
+  }
+  persistShadowbannedUsers();
+
+  try {
+    const db = openCloudSyncDb(false);
+    db.query("UPDATE users SET is_shadowbanned = ? WHERE LOWER(username) = LOWER(?)").run(
+      shadowbanned ? 1 : 0,
+      cleanUser
+    );
+  } catch {}
+
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    void aivenDb
+      .query("UPDATE public.cloudsync_users SET is_shadowbanned = $1 WHERE username_lower = $2", [
+        Boolean(shadowbanned),
+        uk,
+      ])
+      .catch(() => {});
+  }
+
+  if (shadowbanned && recordDevice) {
+    const sig = userDeviceMap.get(uk);
+    if (sig && (sig.fingerprint_id || sig.storage_token)) {
+      addBannedDeviceRecord({
+        fingerprint_id: sig.fingerprint_id,
+        storage_token: sig.storage_token,
+        banned_username: cleanUser,
+        banned_reason: reason || "auto-shadowban spam filter",
+        high_confidence_spam: Boolean(highConfidenceSpam),
+      });
+    }
+  }
+}
+
+function addBannedDeviceRecord({
+  fingerprint_id = "",
+  storage_token = "",
+  banned_username = "",
+  banned_reason = "",
+  high_confidence_spam = false,
+} = {}) {
+  ensureChatMetaLoaded();
+  const fp = String(fingerprint_id || "").trim().slice(0, 120);
+  const st = String(storage_token || "").trim().slice(0, 120);
+  if (!fp && !st) return null;
+  const id = `bdev_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const entry = {
+    id,
+    fingerprint_id: fp,
+    storage_token: st,
+    banned_username: String(banned_username || "").trim(),
+    banned_reason: String(banned_reason || "banned by staff").trim().slice(0, 200),
+    high_confidence_spam: Boolean(high_confidence_spam),
+    created_at: new Date().toISOString(),
+  };
+  const existingIdx = bannedDevices.findIndex(
+    (b) =>
+      (st && b.storage_token === st) ||
+      (fp && !st && b.fingerprint_id === fp && !b.storage_token)
+  );
+  if (existingIdx >= 0) {
+    bannedDevices[existingIdx] = {
+      ...bannedDevices[existingIdx],
+      ...entry,
+      id: bannedDevices[existingIdx].id,
+    };
+  } else {
+    bannedDevices.push(entry);
+  }
+  persistBannedDevices();
+
+  try {
+    const db = openCloudSyncDb(false);
+    db.query(
+      "INSERT OR REPLACE INTO banned_devices (id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run(
+      entry.id,
+      entry.fingerprint_id,
+      entry.storage_token,
+      entry.banned_username,
+      entry.banned_reason,
+      entry.high_confidence_spam ? 1 : 0,
+      entry.created_at
+    );
+  } catch {}
+
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    void aivenDb
+      .query(
+        `INSERT INTO public.banned_devices
+         (fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          entry.fingerprint_id,
+          entry.storage_token,
+          entry.banned_username,
+          entry.banned_reason,
+          Boolean(entry.high_confidence_spam),
+          entry.created_at,
+        ]
+      )
+      .catch(() => {});
+  }
+  return entry;
+}
+
+async function banUserAndDevice(
+  targetUsername,
+  { reason = "device banned by staff", highConfidenceSpam = true } = {}
+) {
+  ensureChatMetaLoaded();
+  const clean = String(targetUsername || "").trim().replace(/^@/, "");
+  const uk = clean.toLowerCase();
+  if (!uk || OWNER_USERNAMES.has(uk)) return { bannedDevice: null };
+
+  const sig = userDeviceMap.get(uk) || { fingerprint_id: "", storage_token: "" };
+  let bannedDevice = null;
+  if (sig.fingerprint_id || sig.storage_token) {
+    bannedDevice = addBannedDeviceRecord({
+      fingerprint_id: sig.fingerprint_id,
+      storage_token: sig.storage_token,
+      banned_username: clean,
+      banned_reason: reason,
+      high_confidence_spam: highConfidenceSpam,
+    });
+  }
+
+  setAccountShadowbanned(clean, true, { reason, recordDevice: false });
+
+  let nextTokenVer = 2;
+  try {
+    const db = openCloudSyncDb(false);
+    const localRow = db
+      .query("SELECT id, token_version FROM users WHERE LOWER(username) = LOWER(?)")
+      .get(clean);
+    if (localRow) {
+      nextTokenVer = (Number(localRow.token_version) || 1) + 1;
+      db.query("UPDATE users SET token_version = ?, is_shadowbanned = 1 WHERE id = ?").run(
+        nextTokenVer,
+        localRow.id
+      );
+      evictCloudSyncUserRecord({ userId: localRow.id, username: clean });
+    } else {
+      evictCloudSyncUserRecord({ username: clean });
+    }
+  } catch {}
+
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      const row = await dbFindUserByUsername(clean);
+      if (row?.id) {
+        nextTokenVer = Math.max(nextTokenVer, (Number(row.token_version) || 1) + 1);
+        await aivenDb.query(
+          "UPDATE public.cloudsync_users SET token_version = $1, is_shadowbanned = TRUE WHERE id = $2",
+          [nextTokenVer, Number(row.id)]
+        );
+        evictCloudSyncUserRecord({ userId: row.id, username: clean });
+      }
+    } catch {}
+  }
+
+  for (const [cid, client] of liveClients.entries()) {
+    const cu = String(client?.verifiedUsername || client?.username || "").trim().toLowerCase();
+    if (cu === uk) {
+      try {
+        client.res.end();
+      } catch {}
+      liveClients.delete(cid);
+    }
+  }
+
+  return { bannedDevice, signature: sig };
+}
+
+function getUserAccountCreatedAtMs(username) {
+  ensureChatMetaLoaded();
+  const clean = String(username || "").trim().replace(/^@/, "");
+  const uk = clean.toLowerCase();
+  if (!uk) return 0;
+  if (userCreatedAtMap.has(uk)) {
+    return Number(userCreatedAtMap.get(uk)) || 0;
+  }
+  const csMap = getCloudSyncUsersMap();
+  const csRec = csMap.get(uk);
+  if (csRec?.createdAt) {
+    const parsed = typeof csRec.createdAt === "number" ? csRec.createdAt : Date.parse(String(csRec.createdAt));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      userCreatedAtMap.set(uk, parsed);
+      return parsed;
+    }
+  }
+  const byName = cloudSyncUserByNameCache.get(uk);
+  if (byName?.created_at) {
+    const parsed = typeof byName.created_at === "number" ? byName.created_at : Date.parse(String(byName.created_at));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      userCreatedAtMap.set(uk, parsed);
+      return parsed;
+    }
+  }
+  try {
+    const db = openCloudSyncDb(true);
+    const row = db.query("SELECT created_at FROM users WHERE LOWER(username) = LOWER(?)").get(clean);
+    if (row?.created_at) {
+      const parsed = Date.parse(String(row.created_at));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        userCreatedAtMap.set(uk, parsed);
+        return parsed;
+      }
+    }
+  } catch {}
+  return 0;
 }
 
 async function getOrCreateReservedSystemUserId(username) {
@@ -2323,17 +2877,11 @@ async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
 
   if (isSupabaseDegraded()) return { ok: false };
   if (supabaseHasAppKvTable !== false) {
-    const res = await supabaseRest("app_kv?on_conflict=k", {
-      method: "POST",
-      timeoutMs,
-      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify({
-        k,
-        v: JSON.stringify(val),
-        updated_at: new Date().toISOString(),
-      }),
-    });
-    if (res.ok) {
+    try {
+      await aivenDb.query(
+        "INSERT INTO public.app_kv (k, v, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = EXCLUDED.updated_at",
+        [k, JSON.stringify(val)],
+      );
       supabaseHasAppKvTable = true;
       if (k === "user_profiles_v2") {
         lastRemoteUserProfilesSnapshot = val && typeof val === "object" ? { ...val } : {};
@@ -2341,14 +2889,13 @@ async function persistKvKeyToSupabaseAsync(key, { timeoutMs = 15000 } = {}) {
         clearedLastfmKeys.clear();
       }
       return { ok: true };
-    }
-    if (res.status >= 500 || res.status === 429 || isSupabaseDegraded()) {
-      return { ok: false, status: res.status };
-    }
-    if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
-      supabaseHasAppKvTable = false;
-    } else if (!res.ok) {
-      return { ok: false, status: res.status };
+    } catch (err) {
+      if (err?.code === "42P01") {
+        supabaseHasAppKvTable = false;
+      } else {
+        markSupabaseDegraded(err?.message || "Aiven app_kv write error");
+        return { ok: false };
+      }
     }
   }
   if (isSupabaseDegraded()) return { ok: false };
@@ -2378,19 +2925,23 @@ async function ensureChatMetaReadyAsync() {
       try {
         let remoteKv = {};
         if (supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
-          const res = await supabaseRest("app_kv?k=not.like.chat_media_*&select=k,v", { timeoutMs: 12000 });
-          if (res.ok && Array.isArray(res.json)) {
+          try {
+            const res = await aivenDb.query("SELECT k, v FROM public.app_kv WHERE k NOT LIKE 'chat_media_%'");
             supabaseHasAppKvTable = true;
             fetchSucceeded = true;
-            for (const row of res.json) {
+            for (const row of res.rows || []) {
               if (row?.k && !String(row.k).startsWith("chat_media_") && typeof row.v === "string") {
                 try {
                   remoteKv[row.k] = JSON.parse(row.v);
                 } catch {}
               }
             }
-          } else if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
-            supabaseHasAppKvTable = false;
+          } catch (err) {
+            if (err?.code === "42P01") {
+              supabaseHasAppKvTable = false;
+            } else {
+              markSupabaseDegraded(err?.message || "Aiven app_kv load error");
+            }
           }
         }
         if (supabaseHasAppKvTable === false && !isSupabaseDegraded()) {
@@ -2801,53 +3352,6 @@ function localKvSetJson(key, value) {
   } catch {}
 }
 
-function parseSupabaseExactCount(contentRange) {
-  const raw = String(contentRange || "").trim();
-  const slashIdx = raw.lastIndexOf("/");
-  if (slashIdx < 0) return null;
-  const countStr = raw.slice(slashIdx + 1).trim();
-  if (!/^\d+$/.test(countStr)) return null;
-  return Number(countStr);
-}
-
-async function supabaseRest(restPath, options = {}) {
-  const authHeaders = {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    "Content-Type": "application/json",
-  };
-  if (SUPABASE_KEY_IS_JWT) {
-    authHeaders.Authorization = `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`;
-  }
-  const { timeoutMs, ...fetchOptions } = options;
-  let res;
-  try {
-    res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
-      ...fetchOptions,
-      signal: options.signal || AbortSignal.timeout(Number(timeoutMs) || 8000),
-      headers: {
-        ...authHeaders,
-        ...(options.headers || {}),
-      },
-    });
-  } catch (err) {
-    markSupabaseDegraded(err?.message || "network/timeout error");
-    throw err;
-  }
-  const contentRange = res.headers.get("content-range") || "";
-  const isHead = String(options.method || "GET").toUpperCase() === "HEAD";
-  const text = isHead ? "" : await res.text();
-  let json = null;
-  if (text) {
-    try {
-      json = JSON.parse(text);
-    } catch {}
-  }
-  if (res.status >= 500 || res.status === 429) {
-    markSupabaseDegraded(`${restPath.split("?")[0]} HTTP ${res.status}`);
-  }
-  return { ok: res.ok, status: res.status, json, text, contentRange };
-}
-
 function getDeletedUsersSet() {
   const arr = kvGetJson(DELETED_USERS_KV_KEY, []);
   const set = new Set();
@@ -3095,11 +3599,11 @@ async function dbFindUserById(userId) {
   }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
-      const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?id=eq.${numId}&select=id,username,token_version&limit=1`
+      const res = await aivenDb.query(
+        "SELECT id, username, token_version FROM public.cloudsync_users WHERE id = $1 LIMIT 1",
+        [numId],
       );
-      if (!ok) throw new Error(`Supabase select user failed (${status}): ${text}`);
-      const row = Array.isArray(json) && json[0] ? json[0] : null;
+      const row = res.rows?.[0] || null;
       if (row) cacheCloudSyncUserRecord(row);
       return row;
     } catch (err) {
@@ -3145,18 +3649,13 @@ async function dbFindUserByUsername(username, { includePasswordHash = false } = 
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
       const selectCols = includePasswordHash
-        ? "id,username,password_hash,token_version"
-        : "id,username,token_version";
-      let { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?or=(username_lower.eq.${encodeURIComponent(lower)},username.eq.${encodeURIComponent(clean)},username.ilike.${encodeURIComponent(clean)})&select=${selectCols}&limit=1`
+        ? "id, username, password_hash, token_version, created_at"
+        : "id, username, token_version, created_at";
+      const res = await aivenDb.query(
+        `SELECT ${selectCols} FROM public.cloudsync_users WHERE username_lower = $1 OR LOWER(username) = $1 LIMIT 1`,
+        [lower],
       );
-      if (!ok && status === 400) {
-        ({ ok, status, json, text } = await supabaseRest(
-          `cloudsync_users?username=ilike.${encodeURIComponent(clean)}&select=${selectCols}&limit=1`
-        ));
-      }
-      if (!ok) throw new Error(`Supabase select username failed (${status}): ${text}`);
-      const row = Array.isArray(json) && json[0] ? json[0] : null;
+      const row = res.rows?.[0] || null;
       if (row) {
         cacheCloudSyncUserRecord(row);
         mirrorLocalUserRecord({
@@ -3192,26 +3691,17 @@ async function dbCreateUser(username, passwordHash) {
     try {
       const existing = await dbFindUserByUsername(username);
       if (existing) return { conflict: true };
-      const { ok, status, json, text } = await supabaseRest("cloudsync_users", {
-        method: "POST",
-        headers: { Prefer: "return=representation" },
-        body: JSON.stringify({
-          username,
-          username_lower: username.toLowerCase(),
-          password_hash: passwordHash,
-          token_version: 1,
-        }),
-      });
-      if (status === 409 || json?.code === "23505") {
-        return { conflict: true };
-      }
-      if (!ok) throw new Error(`Supabase create user failed (${status}): ${text}`);
-      const created = Array.isArray(json) ? json[0] : json;
+      const res = await aivenDb.query(
+        "INSERT INTO public.cloudsync_users (username, username_lower, password_hash, token_version) VALUES ($1, $2, $3, 1) RETURNING id, username, created_at",
+        [username, username.toLowerCase(), passwordHash],
+      );
+      const created = res.rows?.[0];
       cacheCloudSyncUserRecord({
         id: Number(created.id),
         username: String(created.username),
         password_hash: passwordHash,
         token_version: 1,
+        created_at: created.created_at || new Date().toISOString(),
       });
       mirrorLocalUserRecord({ username: created.username, passwordHash, tokenVersion: 1 });
       return {
@@ -3220,6 +3710,9 @@ async function dbCreateUser(username, passwordHash) {
         username: String(created.username),
       };
     } catch (err) {
+      if (err?.code === "23505") {
+        return { conflict: true };
+      }
       markSupabaseDegraded(err?.message);
     }
   }
@@ -3259,14 +3752,10 @@ async function dbDeleteUser(userId, username = "") {
   if (username) recordDeletedUsername(username);
   if (USE_SUPABASE_CLOUDSYNC) {
     try {
-      await supabaseRest(`cloudsync_sync?user_id=eq.${numId}`, { method: "DELETE" });
-      const { ok, status, text } = await supabaseRest(
-        `cloudsync_users?id=eq.${numId}`,
-        { method: "DELETE" }
-      );
-      if (!ok) throw new Error(`Supabase delete user failed (${status}): ${text}`);
+      await aivenDb.query("DELETE FROM public.cloudsync_sync WHERE user_id = $1", [numId]);
+      await aivenDb.query("DELETE FROM public.cloudsync_users WHERE id = $1", [numId]);
     } catch (err) {
-      console.warn("[cloudsync] Supabase dbDeleteUser warning:", err?.message);
+      console.warn("[cloudsync] Aiven dbDeleteUser warning:", err?.message);
     }
   }
   const db = openCloudSyncDb(false);
@@ -3301,12 +3790,16 @@ async function dbGetSyncMetaUpdatedAt(userId, username = "") {
   }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
-      const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_sync?user_id=eq.${numId}&select=updated_at&limit=1`
+      const res = await aivenDb.query(
+        "SELECT updated_at FROM public.cloudsync_sync WHERE user_id = $1 LIMIT 1",
+        [numId],
       );
-      if (!ok) throw new Error(`Supabase meta failed (${status}): ${text}`);
-      const row = Array.isArray(json) && json[0] ? json[0] : null;
-      const updated = row?.updated_at ? String(row.updated_at) : "";
+      const row = res.rows?.[0] || null;
+      const updated = row?.updated_at
+        ? row.updated_at instanceof Date
+          ? row.updated_at.toISOString()
+          : String(row.updated_at)
+        : "";
       if (numId > 0) cloudSyncMetaCache.set(numId, updated);
       if (updated) return updated;
     } catch (err) {
@@ -3341,11 +3834,20 @@ async function dbGetSyncPayload(userId, username = "") {
   }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
-      const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_sync?user_id=eq.${numId}&select=payload_json,updated_at&limit=1`
+      const res = await aivenDb.query(
+        "SELECT payload_json, updated_at FROM public.cloudsync_sync WHERE user_id = $1 LIMIT 1",
+        [numId],
       );
-      if (!ok) throw new Error(`Supabase download failed (${status}): ${text}`);
-      const remoteRow = Array.isArray(json) && json[0] ? json[0] : null;
+      const rawRow = res.rows?.[0] || null;
+      const remoteRow = rawRow
+        ? {
+            payload_json: rawRow.payload_json,
+            updated_at:
+              rawRow.updated_at instanceof Date
+                ? rawRow.updated_at.toISOString()
+                : String(rawRow.updated_at || ""),
+          }
+        : null;
       if (numId > 0) {
         cloudSyncBlobCache.set(numId, remoteRow);
         cloudSyncMetaCache.set(numId, remoteRow?.updated_at ? String(remoteRow.updated_at) : "");
@@ -3385,16 +3887,10 @@ async function dbUpsertSyncPayload(userId, payloadJson, updatedAt, username = ""
   }
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
-      const { ok, status, text } = await supabaseRest("cloudsync_sync?on_conflict=user_id", {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({
-          user_id: numId,
-          payload_json: payloadJson,
-          updated_at: updatedAt,
-        }),
-      });
-      if (!ok) throw new Error(`Supabase upload failed (${status}): ${text}`);
+      await aivenDb.query(
+        "INSERT INTO public.cloudsync_sync (user_id, payload_json, updated_at) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET payload_json = EXCLUDED.payload_json, updated_at = EXCLUDED.updated_at",
+        [numId, payloadJson, updatedAt],
+      );
     } catch (err) {
       markSupabaseDegraded(err?.message);
     }
@@ -3424,23 +3920,14 @@ function getFallbackUsersCount(fallbackRows = null) {
   return Math.max(0, kvCount, rowsCount);
 }
 
-// Exact head-only Postgres count query (zero row payload, narrow select=id projection, bypasses PostgREST 1,000-row cap)
+// Exact Postgres count query on Aiven
 async function dbCountUsers() {
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
-      const { ok, status, contentRange, text } = await supabaseRest(
-        "cloudsync_users?username=not.like.__sunshine_*&select=id",
-        {
-          method: "HEAD",
-          headers: { Prefer: "count=exact" },
-        }
+      const res = await aivenDb.query(
+        "SELECT COUNT(*)::int AS c FROM public.cloudsync_users WHERE username NOT LIKE '__sunshine_%'",
       );
-      if (!ok) throw new Error(`Supabase exact count failed (${status}): ${text}`);
-      const parsed = parseSupabaseExactCount(contentRange);
-      if (parsed === null) {
-        throw new Error(`Supabase exact count missing Content-Range: ${contentRange}`);
-      }
-      const exactCount = Math.max(0, parsed);
+      const exactCount = Math.max(0, Number(res.rows?.[0]?.c || 0));
       localKvSetJson(USERS_COUNT_KV_KEY, { count: exactCount, updatedAt: Date.now() });
       return exactCount;
     } catch (err) {
@@ -3457,11 +3944,16 @@ async function dbListUsers({ limit = USERS_DIR_PAGE_SIZE, offset = 0, maxLimit =
   const safeOffset = Math.max(0, Number(offset) || 0);
   if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
     try {
-      const { ok, status, json, text } = await supabaseRest(
-        `cloudsync_users?username=not.like.__sunshine_*&select=id,username,created_at&order=id.desc&limit=${safeLimit}&offset=${safeOffset}`
+      const res = await aivenDb.query(
+        "SELECT id, username, created_at FROM public.cloudsync_users WHERE username NOT LIKE '__sunshine_%' ORDER BY id DESC LIMIT $1 OFFSET $2",
+        [safeLimit, safeOffset],
       );
-      if (!ok) throw new Error(`Supabase list users failed (${status}): ${text}`);
-      const batch = Array.isArray(json) ? json : [];
+      const batch = (res.rows || []).map((r) => ({
+        id: Number(r.id),
+        username: String(r.username),
+        created_at:
+          r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at ? String(r.created_at) : null,
+      }));
       for (const r of batch) {
         if (r && r.username) cacheCloudSyncUserRecord(r);
       }
@@ -3594,10 +4086,56 @@ async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false }
 }
 
 // --- Native CloudSync Auth & Sync Endpoints (/api/auth/* & /api/sync/*) ---
-app.post("/api/auth/register", async (req, res) => {
+app.get("/api/auth/turnstile-config", (_req, res) => {
+  res.json({
+    success: true,
+    enabled: Boolean(TURNSTILE_SITE_KEY && TURNSTILE_SECRET_KEY),
+    siteKey: TURNSTILE_SITE_KEY || "",
+  });
+});
+
+app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res) => {
+  ensureChatMetaLoaded();
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
+    const email = String(req.body?.email || "").trim();
+    const fingerprintId = String(req.body?.fingerprint_id || req.body?.fingerprintId || "").trim().slice(0, 120);
+    const storageToken = String(req.body?.storage_token || req.body?.storageToken || "").trim().slice(0, 120);
+    const turnstileToken = String(
+      req.body?.["cf-turnstile-response"] ||
+        req.body?.cf_turnstile_response ||
+        req.body?.turnstileToken ||
+        ""
+    ).trim();
+
+    if (isDisposableEmailDomain(email) || isDisposableEmailDomain(username)) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "disposable or burner email domains are not allowed" });
+    }
+
+    const turnstileOk = await verifyTurnstileToken(
+      turnstileToken,
+      req.headers["cf-connecting-ip"] || req.ip || ""
+    );
+    if (!turnstileOk) {
+      return res
+        .status(403)
+        .json({ success: false, user: null, error: "security verification failed — please refresh and try again" });
+    }
+
+    const spamUsernameMatch = matchesSpamFilter(username);
+    const banCheck = checkDeviceBanForSignup({
+      fingerprint_id: fingerprintId,
+      storage_token: storageToken,
+      highConfidenceSpam: Boolean(spamUsernameMatch || req.body?.high_confidence_spam),
+    });
+    if (banCheck.hardBlocked) {
+      return res
+        .status(403)
+        .json({ success: false, user: null, error: "Registration temporarily unavailable" });
+    }
 
     if (isReservedSystemUsername(username)) {
       return res
@@ -3637,18 +4175,38 @@ app.post("/api/auth/register", async (req, res) => {
         .json({ success: false, user: null, error: "username taken!" });
     }
     const userId = created.id;
+    const nowMs = Date.now();
+    const createdIso = new Date(nowMs).toISOString();
+    userCreatedAtMap.set(username.toLowerCase(), nowMs);
+    persistUserCreatedAtMap();
 
-    const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
+    if (fingerprintId || storageToken) {
+      recordUserDeviceSignature(username, {
+        fingerprint_id: fingerprintId,
+        storage_token: storageToken,
+      });
+    }
+    if (banCheck.shadowban || spamUsernameMatch) {
+      setAccountShadowbanned(username, true, {
+        reason: banCheck.shadowban
+          ? "signup matched banned device fingerprint (Chromebook hybrid shadowban)"
+          : "signup username matched spam filter",
+        recordDevice: Boolean(spamUsernameMatch),
+        highConfidenceSpam: Boolean(spamUsernameMatch),
+      });
+    }
+
+    const exp = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
     const token = signCloudSyncJwt({ id: userId, username, v: 1, exp });
     setCloudSyncAuthCookie(res, token, req);
-    upsertUserInCaches({ id: userId, username, created_at: new Date().toISOString() }, 1);
+    upsertUserInCaches({ id: userId, username, created_at: createdIso }, 1);
     touchKnownUser(username);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
     return res.status(201).json({
       success: true,
       token,
-      user: { id: userId, username },
+      user: { id: userId, username, createdAt: createdIso },
       error: null,
     });
   } catch (err) {
@@ -3659,10 +4217,13 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-app.post("/api/auth/login", async (req, res) => {
+app.post(["/api/auth/login", "/login"], async (req, res) => {
+  ensureChatMetaLoaded();
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
+    const fingerprintId = String(req.body?.fingerprint_id || req.body?.fingerprintId || "").trim().slice(0, 120);
+    const storageToken = String(req.body?.storage_token || req.body?.storageToken || "").trim().slice(0, 120);
     if (!username || !password || isReservedSystemUsername(username)) {
       return res
         .status(400)
@@ -3684,6 +4245,21 @@ app.post("/api/auth/login", async (req, res) => {
     const userId = Number(row.id);
     const canonicalUsername = String(row.username);
     const tokenVersion = Number(row.token_version || 1);
+    if (fingerprintId || storageToken) {
+      recordUserDeviceSignature(canonicalUsername, {
+        fingerprint_id: fingerprintId,
+        storage_token: storageToken,
+      });
+      const loginBanCheck = checkDeviceBanForSignup({
+        fingerprint_id: fingerprintId,
+        storage_token: storageToken,
+      });
+      if (loginBanCheck.hardBlocked) {
+        setAccountShadowbanned(canonicalUsername, true, {
+          reason: "logged in from banned storage_token",
+        });
+      }
+    }
     const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
     const token = signCloudSyncJwt({
       id: userId,
@@ -6136,31 +6712,6 @@ async function withChatMediaShardLock(shardName, fn) {
   }
 }
 
-// Direct Supabase request helper for chat media so large/slow media writes
-// never cache local SQLite user IDs or trip the global auth degraded breaker.
-async function supabaseDirectMediaRequest(restPath, options = {}) {
-  const timeoutMs = Number(options.timeoutMs) || 15000;
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${restPath}`, {
-    method: options.method || "GET",
-    body: options.body,
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      "Content-Type": "application/json",
-      ...(SUPABASE_KEY_IS_JWT ? { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
-  const text = await res.text();
-  let json = null;
-  if (text) {
-    try {
-      json = JSON.parse(text);
-    } catch {}
-  }
-  return { ok: res.ok, status: res.status, json, text };
-}
-
 async function getChatMediaShardUserId(shardName, { createIfMissing = false } = {}) {
   if (!USE_SUPABASE_CLOUDSYNC) return null;
   if (chatMediaShardUserIds.has(shardName)) {
@@ -6169,44 +6720,29 @@ async function getChatMediaShardUserId(shardName, { createIfMissing = false } = 
   const lower = String(shardName || "").trim().toLowerCase();
   if (!lower) return null;
   try {
-    const sel = await supabaseDirectMediaRequest(
-      `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id&limit=1`,
-      { timeoutMs: 10000 },
+    const sel = await aivenDb.query(
+      "SELECT id FROM public.cloudsync_users WHERE username_lower = $1 LIMIT 1",
+      [lower],
     );
-    const existingId = Number(Array.isArray(sel.json) ? sel.json[0]?.id : 0) || null;
+    const existingId = Number(sel.rows?.[0]?.id || 0) || null;
     if (existingId) {
       chatMediaShardUserIds.set(shardName, existingId);
       return existingId;
     }
     if (!createIfMissing) return null;
 
-    const cre = await supabaseDirectMediaRequest("cloudsync_users", {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        username: shardName,
-        username_lower: lower,
-        password_hash: "!locked_system_kv_account!",
-        token_version: 1,
-      }),
-      timeoutMs: 10000,
-    });
-    const createdRow = Array.isArray(cre.json) ? cre.json[0] : cre.json;
-    const createdId = Number(createdRow?.id) || null;
+    const cre = await aivenDb.query(
+      "INSERT INTO public.cloudsync_users (username, username_lower, password_hash, token_version) VALUES ($1, $2, $3, 1) ON CONFLICT (username_lower) DO UPDATE SET username = EXCLUDED.username RETURNING id",
+      [shardName, lower, "!locked_system_kv_account!"],
+    );
+    const createdId = Number(cre.rows?.[0]?.id) || null;
     if (createdId) {
       chatMediaShardUserIds.set(shardName, createdId);
       return createdId;
     }
-    // Race condition: another worker/request created it first
-    const retrySel = await supabaseDirectMediaRequest(
-      `cloudsync_users?username_lower=eq.${encodeURIComponent(lower)}&select=id&limit=1`,
-      { timeoutMs: 10000 },
-    );
-    const refetchedId = Number(Array.isArray(retrySel.json) ? retrySel.json[0]?.id : 0) || null;
-    if (refetchedId) chatMediaShardUserIds.set(shardName, refetchedId);
-    return refetchedId;
+    return null;
   } catch (err) {
-    console.warn("Supabase chat_media shard lookup warning:", err?.message);
+    console.warn("Aiven chat_media shard lookup warning:", err?.message);
     return null;
   }
 }
@@ -6219,30 +6755,22 @@ async function persistChatMediaRemoteAsync(id, entry) {
 
   if (supabaseHasAppKvTable !== false) {
     try {
-      const res = await supabaseDirectMediaRequest("app_kv?on_conflict=k", {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({
-          k: `chat_media_${id}`,
-          v: JSON.stringify(entry),
-          updated_at: new Date().toISOString(),
-        }),
-        timeoutMs: 15000,
-      });
-      if (res.ok) {
-        supabaseHasAppKvTable = true;
-        return true;
-      }
-      if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
-        supabaseHasAppKvTable = false;
-      }
+      await aivenDb.query(
+        "INSERT INTO public.app_kv (k, v, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = EXCLUDED.updated_at",
+        [`chat_media_${id}`, JSON.stringify(entry)],
+      );
+      supabaseHasAppKvTable = true;
+      return true;
     } catch (err) {
-      console.warn("Supabase app_kv chat_media write warning:", err?.message);
+      if (err?.code === "42P01") {
+        supabaseHasAppKvTable = false;
+      } else {
+        console.warn("Aiven app_kv chat_media write warning:", err?.message);
+      }
     }
   }
 
-  // When app_kv does not exist on Supabase (or its write failed),
-  // shard media entries across reserved system accounts in cloudsync_sync.
+  // Fallback to cloudsync_sync shards if app_kv is unavailable
   const shardName = getChatMediaShardName(id);
   return await withChatMediaShardLock(shardName, async () => {
     try {
@@ -6250,12 +6778,12 @@ async function persistChatMediaRemoteAsync(id, entry) {
       if (!uid) return false;
       let items = chatMediaShardItemsCache.get(shardName);
       if (!Array.isArray(items)) {
-        const existingRes = await supabaseDirectMediaRequest(
-          `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
-          { timeoutMs: 12000 },
+        const existingRes = await aivenDb.query(
+          "SELECT payload_json FROM public.cloudsync_sync WHERE user_id = $1 LIMIT 1",
+          [uid],
         );
         items = [];
-        const existingPayload = Array.isArray(existingRes.json) ? existingRes.json[0]?.payload_json : null;
+        const existingPayload = existingRes.rows?.[0]?.payload_json || null;
         if (existingPayload) {
           try {
             const parsed = JSON.parse(String(existingPayload));
@@ -6270,24 +6798,14 @@ async function persistChatMediaRemoteAsync(id, entry) {
         nextItems.pop();
         serialized = JSON.stringify({ items: nextItems });
       }
-      const upsertRes = await supabaseDirectMediaRequest("cloudsync_sync?on_conflict=user_id", {
-        method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({
-          user_id: uid,
-          payload_json: serialized,
-          updated_at: new Date().toISOString(),
-        }),
-        timeoutMs: 18000,
-      });
-      if (!upsertRes.ok) {
-        console.warn(`Supabase sharded chat_media write failed (${upsertRes.status}): ${upsertRes.text}`);
-        return false;
-      }
+      await aivenDb.query(
+        "INSERT INTO public.cloudsync_sync (user_id, payload_json, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (user_id) DO UPDATE SET payload_json = EXCLUDED.payload_json, updated_at = EXCLUDED.updated_at",
+        [uid, serialized],
+      );
       chatMediaShardItemsCache.set(shardName, nextItems);
       return true;
     } catch (err) {
-      console.warn("Supabase sharded chat_media write warning:", err?.message);
+      console.warn("Aiven sharded chat_media write warning:", err?.message);
       return false;
     }
   });
@@ -6301,19 +6819,22 @@ async function loadChatMediaRemoteAsync(id) {
 
   if (supabaseHasAppKvTable !== false) {
     try {
-      const res = await supabaseDirectMediaRequest(
-        `app_kv?k=eq.${encodeURIComponent(`chat_media_${id}`)}&select=v&limit=1`,
-        { timeoutMs: 10000 },
+      const res = await aivenDb.query(
+        "SELECT v FROM public.app_kv WHERE k = $1 LIMIT 1",
+        [`chat_media_${id}`],
       );
-      if (res.ok && Array.isArray(res.json) && res.json[0]?.v) {
-        const parsed = JSON.parse(res.json[0].v);
+      const valStr = res.rows?.[0]?.v;
+      if (valStr) {
+        const parsed = JSON.parse(valStr);
         if (parsed?.dataB64 && CHAT_UPLOAD_ALLOWED_MIMES.has(parsed.mime)) {
           return parsed;
         }
-      } else if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
+      }
+    } catch (err) {
+      if (err?.code === "42P01") {
         supabaseHasAppKvTable = false;
       }
-    } catch {}
+    }
   }
 
   try {
@@ -6322,11 +6843,11 @@ async function loadChatMediaRemoteAsync(id) {
     if (!Array.isArray(shardItems)) {
       const uid = await getChatMediaShardUserId(shardName, { createIfMissing: false });
       if (!uid) return null;
-      const rowRes = await supabaseDirectMediaRequest(
-        `cloudsync_sync?user_id=eq.${uid}&select=payload_json&limit=1`,
-        { timeoutMs: 12000 },
+      const rowRes = await aivenDb.query(
+        "SELECT payload_json FROM public.cloudsync_sync WHERE user_id = $1 LIMIT 1",
+        [uid],
       );
-      const payloadJson = rowRes.ok && Array.isArray(rowRes.json) ? rowRes.json[0]?.payload_json : null;
+      const payloadJson = rowRes.rows?.[0]?.payload_json || null;
       if (!payloadJson) return null;
       const parsed = JSON.parse(String(payloadJson));
       if (!Array.isArray(parsed?.items)) return null;
@@ -6640,6 +7161,7 @@ app.get("/api/chat/state", async (req, res) => {
     goatUsers: presence.goatUsers,
     selfRole,
     selfTimeout,
+    selfCreatedAt: authUser ? getUserAccountCreatedAtMs(authUser.username) : 0,
   });
 });
 
@@ -6857,6 +7379,7 @@ app.get("/api/chat/user-profile", async (req, res) => {
       publishedGamesCount: userPublishedGames.length,
       ...(actor.isMod
         ? {
+            isShadowbanned: isAccountShadowbanned(canonicalKey),
             staffNotes: getStaffNotesForUser(key),
             staffLogs: getStaffLogsForUser(key, 60),
           }
@@ -7052,6 +7575,16 @@ app.post("/api/chat/send", async (req, res) => {
 
     const authorName = authUser ? authUser.username : String(message.author).trim().slice(0, 40);
     const authorKey = authorName.toLowerCase();
+    const isStaffSender = Boolean(authUser && isStaffRoleUser(authUser.username));
+
+    const fingerprintId = String(req.body?.fingerprint_id || req.body?.fingerprintId || "").trim().slice(0, 120);
+    const storageToken = String(req.body?.storage_token || req.body?.storageToken || "").trim().slice(0, 120);
+    if (authUser && (fingerprintId || storageToken)) {
+      recordUserDeviceSignature(authorName, {
+        fingerprint_id: fingerprintId,
+        storage_token: storageToken,
+      });
+    }
 
     const activeTimeout = getActiveTimeout(authorKey);
     if (activeTimeout) {
@@ -7064,6 +7597,34 @@ app.post("/api/chat/send", async (req, res) => {
         timedOut: true,
         until: activeTimeout.until,
         error: activeTimeout.reason ? `${remMsg}: ${activeTimeout.reason}` : remMsg,
+      });
+    }
+
+    const nowMs = Date.now();
+    const createdAtMs = getUserAccountCreatedAtMs(authorName);
+    if (!isStaffSender && createdAtMs > 0 && nowMs - createdAtMs < ACCOUNT_CHAT_COOLDOWN_MS) {
+      const remMs = Math.max(1000, ACCOUNT_CHAT_COOLDOWN_MS - (nowMs - createdAtMs));
+      const totalSec = Math.ceil(remMs / 1000);
+      const mins = Math.floor(totalSec / 60);
+      const secs = totalSec % 60;
+      return res.status(403).json({
+        success: false,
+        probationRemainingMs: remMs,
+        error: `New accounts must wait ${mins}m ${secs}s before chatting`,
+      });
+    }
+
+    let track = userLastMessageTrack.get(authorKey);
+    if (!track) {
+      track = { lastSentAt: 0, recentTexts: [], recentDmTargets: new Map() };
+      userLastMessageTrack.set(authorKey, track);
+    }
+    if (!isStaffSender && track.lastSentAt > 0 && nowMs - track.lastSentAt < CHAT_SLOWMODE_MS) {
+      const waitMs = CHAT_SLOWMODE_MS - (nowMs - track.lastSentAt);
+      return res.status(429).json({
+        success: false,
+        slowmodeRemainingMs: waitMs,
+        error: `Slowmode active: please wait ${Math.max(1, Math.ceil(waitMs / 1000))}s before sending another message`,
       });
     }
 
@@ -7123,6 +7684,31 @@ app.post("/api/chat/send", async (req, res) => {
       if (!parts.includes(authUser.username.toLowerCase())) {
         return res.status(403).json({ success: false, error: "Cannot send DM into another user's channel" });
       }
+      const dmTarget = parts.find((p) => p && p !== authorKey) || "";
+      if (!isStaffSender && dmTarget) {
+        const isTargetAdmin =
+          dmTarget === "bacontheoverseer" ||
+          OWNER_USERNAMES.has(dmTarget) ||
+          staffModerators.has(dmTarget);
+        const unverifiedEmail = authorProf?.emailVerified === false;
+        const youngerThan15Min = createdAtMs > 0 && nowMs - createdAtMs < ACCOUNT_ADMIN_DM_COOLDOWN_MS;
+        if (isTargetAdmin && (youngerThan15Min || unverifiedEmail)) {
+          return res.status(403).json({
+            success: false,
+            error: "Accounts must be at least 15 minutes old before initiating DMs with admins",
+          });
+        }
+        track.recentDmTargets.set(dmTarget, nowMs);
+        for (const [tKey, tAt] of track.recentDmTargets.entries()) {
+          if (nowMs - tAt > 10 * 60 * 1000) track.recentDmTargets.delete(tKey);
+        }
+        if ((youngerThan15Min && track.recentDmTargets.size > 2) || track.recentDmTargets.size > 6) {
+          return res.status(429).json({
+            success: false,
+            error: "Mass-messaging protection active: please wait before starting new DMs with multiple users",
+          });
+        }
+      }
       const initialMap = await getCloudSyncUsersMapAsync();
       if (initialMap.size > 0) {
         for (const cleanPart of parts) {
@@ -7168,6 +7754,42 @@ app.post("/api/chat/send", async (req, res) => {
     }
 
     touchKnownUser(sanitizedMsg.author);
+    track.lastSentAt = nowMs;
+
+    // Duplicate / near-identical message check within 30s window
+    const normDup = cleanText
+      ? normalizeSpamText(cleanText).compact || cleanText.toLowerCase().trim()
+      : "";
+    track.recentTexts = track.recentTexts.filter((item) => nowMs - item.at < CHAT_DUPLICATE_WINDOW_MS);
+    const isDuplicateMsg =
+      !isStaffSender &&
+      Boolean(normDup) &&
+      track.recentTexts.some(
+        (item) =>
+          item.norm === normDup ||
+          (normDup.length >= 6 &&
+            item.norm.length >= 6 &&
+            (item.norm.includes(normDup) || normDup.includes(item.norm)) &&
+            Math.abs(item.norm.length - normDup.length) <= 3)
+      );
+    if (normDup) {
+      track.recentTexts.push({ norm: normDup, at: nowMs });
+    }
+
+    // Regex keyword spam filter & silent shadowban check
+    const spamPatternMatched = !isStaffSender && sanitizedMsg.text ? matchesSpamFilter(sanitizedMsg.text) : null;
+    const isShadowbanned = !isStaffSender && isAccountShadowbanned(authorKey);
+    if (isShadowbanned || spamPatternMatched || isDuplicateMsg) {
+      if (spamPatternMatched && !isShadowbanned) {
+        setAccountShadowbanned(authorName, true, {
+          reason: `auto-shadowban triggered by spam filter (${spamPatternMatched})`,
+          recordDevice: true,
+          highConfidenceSpam: true,
+        });
+      }
+      // Return 200 OK ONLY to sender's client; do NOT save to public DB or broadcast via SSE
+      return res.status(200).json({ success: true, message: sanitizedMsg });
+    }
 
     if (sanitizedMsg.text) {
       const mod = await moderateTextWithOpenAI(sanitizedMsg.text);
@@ -7458,6 +8080,76 @@ app.post("/api/chat/channels/delete", async (req, res) => {
   res.json({ success: true });
 });
 
+app.post(["/api/chat/mod/ban-device", "/api/admin/ban-user"], async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff moderator permissions required" });
+    }
+    const targetUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const targetKey = targetUsername.toLowerCase();
+    if (!targetKey) {
+      return res.status(400).json({ success: false, error: "username required" });
+    }
+    if (OWNER_USERNAMES.has(targetKey)) {
+      return res.status(403).json({ success: false, error: "Cannot ban the site owner" });
+    }
+    if (staffModerators.has(targetKey) && !actor.isOwner) {
+      return res.status(403).json({ success: false, error: "Only the owner can ban another moderator" });
+    }
+
+    const unban = req.body?.action === "unban" || req.body?.shadowbanned === false;
+    const reason = String(req.body?.reason || "device & shadowban by staff").trim().slice(0, 160);
+    if (unban) {
+      setAccountShadowbanned(targetUsername, false);
+      const sig = userDeviceMap.get(targetKey);
+      if (sig) {
+        for (let i = bannedDevices.length - 1; i >= 0; i--) {
+          const b = bannedDevices[i];
+          if (
+            b.banned_username.toLowerCase() === targetKey ||
+            (sig.storage_token && b.storage_token === sig.storage_token)
+          ) {
+            bannedDevices.splice(i, 1);
+          }
+        }
+        persistBannedDevices();
+      }
+      recordStaffAction({
+        action: "unban_device",
+        actor,
+        targetUsername,
+        details: "removed shadowban & device ban",
+      });
+      return res.json({
+        success: true,
+        username: targetUsername,
+        isShadowbanned: false,
+      });
+    }
+
+    const result = await banUserAndDevice(targetUsername, {
+      reason,
+      highConfidenceSpam: req.body?.highConfidenceSpam !== false,
+    });
+    recordStaffAction({
+      action: "ban_device",
+      actor,
+      targetUsername,
+      details: reason,
+    });
+    res.json({
+      success: true,
+      username: targetUsername,
+      isShadowbanned: true,
+      bannedDevice: result.bannedDevice,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post("/api/chat/groups/create", async (req, res) => {
   ensureChatMetaLoaded();
   try {
@@ -7466,6 +8158,23 @@ app.post("/api/chat/groups/create", async (req, res) => {
       return res.status(401).json({ success: false, error: "Sign in to CloudSync to create a group chat" });
     }
     const creatorLower = authUser.username.toLowerCase();
+    const isStaffCreator = isStaffRoleUser(authUser.username);
+    const fingerprintId = String(req.body?.fingerprint_id || req.body?.fingerprintId || "").trim().slice(0, 120);
+    const storageToken = String(req.body?.storage_token || req.body?.storageToken || "").trim().slice(0, 120);
+    if (fingerprintId || storageToken) {
+      recordUserDeviceSignature(authUser.username, {
+        fingerprint_id: fingerprintId,
+        storage_token: storageToken,
+      });
+    }
+    const createdAtMs = getUserAccountCreatedAtMs(authUser.username);
+    if (!isStaffCreator && createdAtMs > 0 && Date.now() - createdAtMs < ACCOUNT_CHAT_COOLDOWN_MS) {
+      const remSec = Math.ceil((ACCOUNT_CHAT_COOLDOWN_MS - (Date.now() - createdAtMs)) / 1000);
+      return res.status(403).json({
+        success: false,
+        error: `New accounts must wait ${Math.floor(remSec / 60)}m ${remSec % 60}s before chatting`,
+      });
+    }
     const cleanName = String(req.body?.name || "").trim().slice(0, 32);
     if (!cleanName) {
       return res.status(400).json({ success: false, error: "Group name is required" });
@@ -8307,27 +9016,30 @@ app.post("/api/voice/signal", (req, res) => {
   }
 });
 
-// --- Game Studio Published Games API (shared SQLite app_kv + Supabase app_kv) ---
+// --- Game Studio Published Games API (shared SQLite app_kv + Aiven app_kv) ---
 async function fetchSupabaseKvKeyAsync(key, { timeoutMs = 15000 } = {}) {
   if (!USE_SUPABASE_CLOUDSYNC || isSupabaseDegraded()) return undefined;
   try {
     if (supabaseHasAppKvTable !== false) {
-      const res = await supabaseRest(
-        `app_kv?k=eq.${encodeURIComponent(String(key))}&select=v&limit=1`,
-        { timeoutMs }
-      );
-      if (res.ok && Array.isArray(res.json)) {
+      try {
+        const res = await aivenDb.query(
+          "SELECT v FROM public.app_kv WHERE k = $1 LIMIT 1",
+          [String(key)],
+        );
         supabaseHasAppKvTable = true;
-        const row = res.json[0];
+        const row = res.rows?.[0];
         if (row && typeof row.v === "string") {
           try {
             return JSON.parse(row.v);
           } catch {}
         }
         return null;
-      }
-      if (res.status === 404 || res.status === 400 || res.json?.code === "PGRST205") {
-        supabaseHasAppKvTable = false;
+      } catch (err) {
+        if (err?.code === "42P01") {
+          supabaseHasAppKvTable = false;
+        } else {
+          throw err;
+        }
       }
     }
     if (supabaseHasAppKvTable === false && !isSupabaseDegraded()) {
@@ -8345,7 +9057,7 @@ async function fetchSupabaseKvKeyAsync(key, { timeoutMs = 15000 } = {}) {
       }
     }
   } catch (err) {
-    console.warn(`[studio] Supabase ${key} fetch warning:`, err?.message);
+    console.warn(`[studio] Aiven ${key} fetch warning:`, err?.message);
   }
   return undefined;
 }
@@ -9057,42 +9769,59 @@ async function persistStripeSubscriptionRecord(record) {
 
   if (USE_SUPABASE_CLOUDSYNC && supabaseHasStripeTable !== false) {
     try {
-      const { ok, status, text, json } = await supabaseRest(
-        "stripe_subscriptions?on_conflict=subscription_id",
-        {
-          method: "POST",
-          headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-          body: JSON.stringify({
-            subscription_id: merged.subscriptionId,
-            checkout_session_id: merged.checkoutSessionId || "",
-            invoice_id: merged.invoiceId || "",
-            customer_id: merged.customerId || "",
-            email_lower: merged.emailLower || "",
-            user_name_lower: merged.userNameLower || "",
-            custom_username_lower: merged.customUsernameLower || "",
-            claimed_username_lower: merged.claimedUsernameLower || "",
-            price_id: merged.priceId || "",
-            product_id: merged.productId || "",
-            tier_name: merged.tierName || "Cookie Master",
-            status: merged.status || "active",
-            managed_payments: Boolean(merged.managedPayments),
-            customer_portal_url: merged.customerPortalUrl || "",
-            amount: Number(merged.amount) || 2,
-            verified_at: new Date(merged.verifiedAt || Date.now()).toISOString(),
-            expires_at: new Date(merged.expiresAt || Date.now()).toISOString(),
-            cancelled_at: merged.cancelledAt ? new Date(merged.cancelledAt).toISOString() : null,
-          }),
-        },
+      await aivenDb.query(
+        `INSERT INTO public.stripe_subscriptions (
+          subscription_id, checkout_session_id, invoice_id, customer_id,
+          email_lower, user_name_lower, custom_username_lower, claimed_username_lower,
+          price_id, product_id, tier_name, status, managed_payments,
+          customer_portal_url, amount, verified_at, expires_at, cancelled_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+        ON CONFLICT (subscription_id) DO UPDATE SET
+          checkout_session_id = EXCLUDED.checkout_session_id,
+          invoice_id = EXCLUDED.invoice_id,
+          customer_id = EXCLUDED.customer_id,
+          email_lower = EXCLUDED.email_lower,
+          user_name_lower = EXCLUDED.user_name_lower,
+          custom_username_lower = EXCLUDED.custom_username_lower,
+          claimed_username_lower = EXCLUDED.claimed_username_lower,
+          price_id = EXCLUDED.price_id,
+          product_id = EXCLUDED.product_id,
+          tier_name = EXCLUDED.tier_name,
+          status = EXCLUDED.status,
+          managed_payments = EXCLUDED.managed_payments,
+          customer_portal_url = EXCLUDED.customer_portal_url,
+          amount = EXCLUDED.amount,
+          verified_at = EXCLUDED.verified_at,
+          expires_at = EXCLUDED.expires_at,
+          cancelled_at = EXCLUDED.cancelled_at`,
+        [
+          merged.subscriptionId,
+          merged.checkoutSessionId || "",
+          merged.invoiceId || "",
+          merged.customerId || "",
+          merged.emailLower || "",
+          merged.userNameLower || "",
+          merged.customUsernameLower || "",
+          merged.claimedUsernameLower || "",
+          merged.priceId || "",
+          merged.productId || "",
+          merged.tierName || "Cookie Master",
+          merged.status || "active",
+          Boolean(merged.managedPayments),
+          merged.customerPortalUrl || "",
+          Number(merged.amount) || 2,
+          new Date(merged.verifiedAt || Date.now()).toISOString(),
+          new Date(merged.expiresAt || Date.now()).toISOString(),
+          merged.cancelledAt ? new Date(merged.cancelledAt).toISOString() : null,
+        ],
       );
-      if (ok) {
-        supabaseHasStripeTable = true;
-      } else if (status === 404 || json?.code === "PGRST205") {
+      supabaseHasStripeTable = true;
+    } catch (e) {
+      if (e?.code === "42P01") {
         supabaseHasStripeTable = false;
       } else {
-        console.warn(`Supabase stripe_subscriptions upsert failed (${status}): ${text}`);
+        console.warn("Aiven stripe_subscriptions upsert error:", e?.message);
       }
-    } catch (e) {
-      console.warn("Supabase stripe_subscriptions upsert error:", e?.message);
     }
   }
   return merged;
@@ -9158,40 +9887,41 @@ async function findActiveStripeSubscription({ query = "", username = "" }) {
 
   if (USE_SUPABASE_CLOUDSYNC && supabaseHasStripeTable !== false && (qLower || userLower)) {
     try {
-      const quotePgVal = (v) => `"${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-      const filters = [];
+      const clauses = [];
+      const params = [];
       if (qLower) {
-        const enc = encodeURIComponent(quotePgVal(qLower));
-        filters.push(
-          `subscription_id.ilike.${enc}`,
-          `checkout_session_id.ilike.${enc}`,
-          `customer_id.ilike.${enc}`,
-          `email_lower.eq.${enc}`,
+        params.push(qLower);
+        const idx = params.length;
+        clauses.push(
+          `LOWER(subscription_id) = $${idx}`,
+          `LOWER(checkout_session_id) = $${idx}`,
+          `LOWER(customer_id) = $${idx}`,
+          `email_lower = $${idx}`,
         );
       }
       if (userLower) {
-        const encU = encodeURIComponent(quotePgVal(userLower));
-        filters.push(
-          `claimed_username_lower.eq.${encU}`,
-          `custom_username_lower.eq.${encU}`,
-          `user_name_lower.eq.${encU}`,
+        params.push(userLower);
+        const idx = params.length;
+        clauses.push(
+          `claimed_username_lower = $${idx}`,
+          `custom_username_lower = $${idx}`,
+          `user_name_lower = $${idx}`,
         );
       }
-      const stripeCols =
-        "subscription_id,checkout_session_id,invoice_id,customer_id,email_lower,user_name_lower,custom_username_lower,claimed_username_lower,price_id,product_id,tier_name,status,managed_payments,customer_portal_url,amount,verified_at,expires_at,cancelled_at";
-      const { ok, status, json } = await supabaseRest(
-        `stripe_subscriptions?or=(${filters.join(",")})&select=${stripeCols}&order=expires_at.desc&limit=8`,
+      const res = await aivenDb.query(
+        `SELECT subscription_id, checkout_session_id, invoice_id, customer_id, email_lower, user_name_lower, custom_username_lower, claimed_username_lower, price_id, product_id, tier_name, status, managed_payments, customer_portal_url, amount, verified_at, expires_at, cancelled_at FROM public.stripe_subscriptions WHERE ${clauses.join(" OR ")} ORDER BY expires_at DESC LIMIT 8`,
+        params,
       );
-      if (ok && Array.isArray(json)) {
-        supabaseHasStripeTable = true;
-        const match = json.find(matchesRecord);
-        const hydrated = match ? hydrateStripeRow(match, now) : null;
-        stripeSubscriptionLookupCache.set(stripeCacheKey, hydrated);
-        if (hydrated) return hydrated;
-      } else if (status === 404 || json?.code === "PGRST205") {
+      supabaseHasStripeTable = true;
+      const match = (res.rows || []).find(matchesRecord);
+      const hydrated = match ? hydrateStripeRow(match, now) : null;
+      stripeSubscriptionLookupCache.set(stripeCacheKey, hydrated);
+      if (hydrated) return hydrated;
+    } catch (e) {
+      if (e?.code === "42P01") {
         supabaseHasStripeTable = false;
       }
-    } catch {}
+    }
   }
 
   const localMatches = loadStripeSubscriptions()

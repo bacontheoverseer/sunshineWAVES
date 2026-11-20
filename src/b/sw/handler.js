@@ -198,8 +198,10 @@ function upstreamOriginFromUrl(locUrl) {
     if (u.pathname.startsWith(MOCHI_PREFIX)) {
       let encoded = u.pathname.slice(MOCHI_PREFIX.length).replace(/\/+$/, "");
       if (!encoded.startsWith("http")) {
+        const slashIdx = encoded.indexOf("/");
+        const tokenPart = slashIdx !== -1 ? encoded.slice(0, slashIdx) : encoded;
         try {
-          let p = encoded.replace(/-/g, "+").replace(/_/g, "/");
+          let p = tokenPart.replace(/-/g, "+").replace(/_/g, "/");
           while (p.length % 4) p += "=";
           const raw = atob(p);
           const dec = _adXorDec(raw);
@@ -426,16 +428,37 @@ self.addEventListener("fetch", (event) => {
 
   if (url.pathname.startsWith(MOCHI_PREFIX)) {
     let afterPrefix = url.pathname.slice(MOCHI_PREFIX.length);
-    if (afterPrefix.endsWith("/")) afterPrefix = afterPrefix.slice(0, -1);
     if (afterPrefix.startsWith("http")) return;
     let decodedUrl = null;
     try {
-      let p = afterPrefix.replace(/-/g, "+").replace(/_/g, "/");
+      const slashIdx = afterPrefix.indexOf("/");
+      const tokenPart = slashIdx !== -1 ? afterPrefix.slice(0, slashIdx) : afterPrefix;
+      const subPath = slashIdx !== -1 ? afterPrefix.slice(slashIdx + 1) : "";
+      let p = tokenPart.replace(/-/g, "+").replace(/_/g, "/");
       while (p.length % 4) p += "=";
       const raw = atob(p);
       const dec = _adXorDec(raw);
       const result = decodeURIComponent(dec);
-      if (result.startsWith("http")) decodedUrl = result;
+      if (result.startsWith("http")) {
+        let resolved = result;
+        if (subPath) {
+          try {
+            resolved = new URL(subPath, result).href;
+          } catch (e) {}
+        }
+        if (url.search) {
+          const targetObj = new URL(resolved);
+          const incoming = new URLSearchParams(url.search.slice(1));
+          for (const key of new Set(incoming.keys())) {
+            targetObj.searchParams.delete(key);
+            for (const val of incoming.getAll(key)) {
+              targetObj.searchParams.append(key, val);
+            }
+          }
+          resolved = targetObj.href;
+        }
+        decodedUrl = resolved;
+      }
     } catch (e) {}
     if (decodedUrl) {
       return event.respondWith(

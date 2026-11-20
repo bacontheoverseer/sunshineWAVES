@@ -14,6 +14,7 @@ import {
   isLiveStreamConnected,
 } from "../core/liveClient.ts";
 import { formatPlayTime } from "../core/cookieCoins.ts";
+import { getDeviceSignature } from "../core/deviceSignature.ts";
 import {
   ChatRole,
   LastfmProfileState,
@@ -170,6 +171,7 @@ interface UserProfileDetails {
     icon: string;
   } | null;
   publishedGamesCount: number;
+  isShadowbanned?: boolean;
   staffNotes?: StaffNoteRecord[];
   staffLogs?: StaffActionLogRecord[];
 }
@@ -1605,6 +1607,28 @@ export default function ChatModal() {
         }
       }
 
+      const targetKeyLower = canonicalTarget.toLowerCase();
+      const isTargetAdminOrStaff =
+        targetKeyLower === "bacontheoverseer" ||
+        ownerUsersRef.current.some((u) => u.toLowerCase() === targetKeyLower) ||
+        staffMods.some((m) => m.toLowerCase() === targetKeyLower);
+      const isSelfStaff = selfRole === "owner" || selfRole === "mod";
+      const parsedSelfCreated = selfCreatedAt
+        ? Number(selfCreatedAt) || Date.parse(String(selfCreatedAt)) || 0
+        : 0;
+      if (
+        !isSelfStaff &&
+        isTargetAdminOrStaff &&
+        parsedSelfCreated > 0 &&
+        Date.now() - parsedSelfCreated < 15 * 60 * 1000
+      ) {
+        notifyToast(
+          "Accounts must be at least 15 minutes old before initiating DMs with admins",
+          "error"
+        );
+        return;
+      }
+
       setDmPeers((prev) => {
         if (prev.some((p) => p.toLowerCase() === canonicalTarget.toLowerCase())) return prev;
         const next = [canonicalTarget, ...prev];
@@ -2492,6 +2516,9 @@ export default function ChatModal() {
             setSelfRole("member");
           }
           setSelfTimeout(data.selfTimeout || null);
+          if (data.selfCreatedAt) {
+            setSelfCreatedAt(String(data.selfCreatedAt));
+          }
 
           if (cloudUser && hydratedLocalCustomForRef.current !== cloudUser.toLowerCase()) {
             const myRecord =
@@ -3291,6 +3318,7 @@ export default function ChatModal() {
       // Also broadcast via server SSE endpoint if available
       let sendToken = "";
       try { sendToken = localStorage.getItem("auth_token") || ""; } catch {}
+      const deviceSig = await getDeviceSignature();
       fetch("/api/chat/send", {
         method: "POST",
         credentials: "same-origin",
@@ -3300,6 +3328,8 @@ export default function ChatModal() {
         },
         body: JSON.stringify({
           message: newMsg,
+          fingerprint_id: deviceSig.fingerprint_id,
+          storage_token: deviceSig.storage_token,
         }),
       })
         .then(async (res) => {
@@ -3309,6 +3339,9 @@ export default function ChatModal() {
             const errData = await res.json().catch(() => null);
             if (errData?.timedOut && errData.until !== undefined) {
               setSelfTimeout({ until: Number(errData.until) });
+            }
+            if (typeof errData?.probationRemainingMs === "number" && errData.probationRemainingMs > 0) {
+              setSelfCreatedAt(String(Date.now() - (10 * 60 * 1000 - errData.probationRemainingMs)));
             }
             if (errData?.error) {
               notifyToast(errData.error, "error");
@@ -4117,6 +4150,60 @@ export default function ChatModal() {
   }, [activeChannel, cloudUser, onlineUsers, chatGroups, chatChannels, nowMs]);
 
   const isStaffUser = Boolean(cloudUser && (selfRole === "owner" || selfRole === "mod"));
+  const selfCreatedAtMs = useMemo(() => {
+    if (!selfCreatedAt) return 0;
+    const num = Number(selfCreatedAt);
+    if (Number.isFinite(num) && num > 0) return num;
+    const parsed = Date.parse(String(selfCreatedAt));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }, [selfCreatedAt]);
+  const probationRemainingMs =
+    !isStaffUser && selfCreatedAtMs > 0
+      ? Math.max(0, 10 * 60 * 1000 - (nowMs - selfCreatedAtMs))
+      : 0;
+
+  useEffect(() => {
+    if (!isOpen || probationRemainingMs <= 0) return;
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [isOpen, probationRemainingMs > 0]);
+
+  const handleDeviceBanUser = useCallback(
+    async (targetUsername: string, unban = false) => {
+      if (!isStaffUser) return;
+      try {
+        const res = await fetch("/api/chat/mod/ban-device", {
+          method: "POST",
+          headers: buildModAuthHeaders(),
+          body: JSON.stringify({
+            username: targetUsername,
+            action: unban ? "unban" : "ban",
+            reason: unban ? "unbanned by staff" : "device & shadowban by staff",
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) {
+          notifyToast(data?.error || "failed to update device ban", "error");
+          return;
+        }
+        setProfileData((prev) =>
+          prev && prev.username.toLowerCase() === targetUsername.toLowerCase()
+            ? { ...prev, isShadowbanned: Boolean(data.isShadowbanned) }
+            : prev
+        );
+        void refreshViewingUserStaffAudit(targetUsername);
+        notifyToast(
+          unban
+            ? `removed shadowban & device ban from @${targetUsername}`
+            : `device-banned & shadowbanned @${targetUsername}`,
+          "success"
+        );
+      } catch {
+        notifyToast("device ban request failed", "error");
+      }
+    },
+    [isStaffUser, refreshViewingUserStaffAudit]
+  );
   const visibleChannels = useMemo(
     () => chatChannels.filter((c) => c.visibility !== "staff" || isStaffUser),
     [chatChannels, isStaffUser]
@@ -5425,6 +5512,17 @@ export default function ChatModal() {
                   </span>
                 </div>
               </div>
+            ) : probationRemainingMs > 0 ? (
+              <div class="chat-auth-locked">
+                <div class="chat-auth-locked-text" style={{ color: "#fcd34d" }}>
+                  <i class="fa-solid fa-hourglass-half"></i>
+                  <span>
+                    New accounts must wait{" "}
+                    {Math.floor(Math.ceil(probationRemainingMs / 1000) / 60)}m{" "}
+                    {Math.ceil(probationRemainingMs / 1000) % 60}s before chatting
+                  </span>
+                </div>
+              </div>
             ) : !canTypeInActiveChannel ? (
               <div class="chat-auth-locked">
                 <div class="chat-auth-locked-text">
@@ -6353,6 +6451,24 @@ export default function ChatModal() {
                                     purge #{activeChannel}
                                   </button>
                                 )}
+                                <button
+                                  type="button"
+                                  class={`chat-profile-pill-btn ${
+                                    verifiedProfile?.isShadowbanned ? "" : "danger"
+                                  }`}
+                                  title="Device-ban & shadowban user (invalidates sessions & blocks device)"
+                                  onClick={() =>
+                                    void handleDeviceBanUser(
+                                      targetName,
+                                      Boolean(verifiedProfile?.isShadowbanned)
+                                    )
+                                  }
+                                >
+                                  <i class="fa-solid fa-fingerprint"></i>{" "}
+                                  {verifiedProfile?.isShadowbanned
+                                    ? "unban device / shadowban"
+                                    : "device ban & shadowban"}
+                                </button>
                               </>
                             )}
                           </div>

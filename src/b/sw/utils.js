@@ -1,9 +1,11 @@
 async function coalescedFetch(key, fetchFn) {
-  const existing = _inflight.get(key);
-  if (existing) return existing;
-  const p = fetchFn().finally(() => _inflight.delete(key));
-  _inflight.set(key, p);
-  return p;
+  let p = _inflight.get(key);
+  if (!p) {
+    p = fetchFn().finally(() => _inflight.delete(key));
+    _inflight.set(key, p);
+  }
+  const res = await p;
+  return res && typeof res.clone === "function" ? res.clone() : res;
 }
 
 function estimateBandwidth(bytes, timeMs) {

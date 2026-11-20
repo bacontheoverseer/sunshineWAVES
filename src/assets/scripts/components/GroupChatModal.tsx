@@ -1,4 +1,5 @@
 import { useMemo, useState } from "preact/hooks";
+import { getDeviceSignature } from "../core/deviceSignature.ts";
 
 export interface ChatGroupDef {
   id: string;
@@ -81,13 +82,19 @@ export default function GroupChatModal({
     }
     setBusy(true);
     try {
+      const sig = await getDeviceSignature();
       const res = await fetch("/api/chat/groups/create", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
         },
-        body: JSON.stringify({ name: cleanName, members }),
+        body: JSON.stringify({
+          name: cleanName,
+          members,
+          fingerprint_id: sig.fingerprint_id,
+          storage_token: sig.storage_token,
+        }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.success || !data.group) {
@@ -110,6 +117,7 @@ export default function GroupChatModal({
     if (!existingGroup) return;
     setBusy(true);
     try {
+      const sig = await getDeviceSignature();
       const res = await fetch("/api/chat/groups/members", {
         method: "POST",
         headers: {
@@ -121,6 +129,8 @@ export default function GroupChatModal({
           action,
           ...(username ? { username } : {}),
           ...(action === "rename" ? { name: groupName.trim() } : {}),
+          fingerprint_id: sig.fingerprint_id,
+          storage_token: sig.storage_token,
         }),
       });
       const data = await res.json().catch(() => null);

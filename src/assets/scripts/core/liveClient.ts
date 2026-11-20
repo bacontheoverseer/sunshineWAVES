@@ -304,7 +304,8 @@ export function playFart(): void {
     const jitterGain = ctx.createGain();
     jitter.frequency.setValueAtTime(28, now);
     jitterGain.gain.setValueAtTime(35, now);
-    jitter.connect(osc.frequency);
+    jitter.connect(jitterGain);
+    jitterGain.connect(osc.frequency);
 
     filter.type = "lowpass";
     filter.frequency.setValueAtTime(380, now);
@@ -555,18 +556,26 @@ async function resolvePlayableUrl(url: string): Promise<string> {
   return norm;
 }
 
+const activeAudioElements = new Set<HTMLAudioElement>();
+
 export function playAudioUrl(url: string, volume = 1.0): void {
   unlockAudio();
   void resolvePlayableUrl(url)
     .then((playableUrl) => {
       const audio = new Audio(playableUrl);
+      activeAudioElements.add(audio);
       audio.volume = Math.max(0, Math.min(1, volume));
+      audio.onended = () => {
+        activeAudioElements.delete(audio);
+      };
       audio.onerror = () => {
+        activeAudioElements.delete(audio);
         playFallbackSynthForUrl(url);
       };
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
+          activeAudioElements.delete(audio);
           console.warn("Audio element play error, falling back to synth:", err);
           playFallbackSynthForUrl(url);
         });
@@ -702,40 +711,101 @@ function ensureChaosStyles(): void {
   document.head.appendChild(style);
 }
 
+const classicTimeouts = new Map<string, number>();
+const classicCleanups = new Map<string, () => void>();
+
+function setClassicTimeout(key: string, fn: () => void, ms: number): void {
+  const prev = classicTimeouts.get(key);
+  if (prev !== undefined) window.clearTimeout(prev);
+  const id = window.setTimeout(() => {
+    classicTimeouts.delete(key);
+    fn();
+  }, ms);
+  classicTimeouts.set(key, id);
+}
+
+function registerClassicCleanup(key: string, fn: () => void): void {
+  const prev = classicCleanups.get(key);
+  if (prev) {
+    try {
+      prev();
+    } catch {}
+  }
+  classicCleanups.set(key, fn);
+}
+
+function attachEscapeListenerWithIframes(onEsc: () => void): () => void {
+  const handler = (e: KeyboardEvent) => {
+    if (e.key === "Escape") onEsc();
+  };
+  window.addEventListener("keydown", handler);
+  const iframeWindows: Window[] = [];
+  document.querySelectorAll<HTMLIFrameElement>("iframe").forEach((ifr) => {
+    try {
+      if (ifr.contentWindow) {
+        ifr.contentWindow.addEventListener("keydown", handler);
+        iframeWindows.push(ifr.contentWindow);
+      }
+    } catch {}
+  });
+  return () => {
+    window.removeEventListener("keydown", handler);
+    for (const w of iframeWindows) {
+      try {
+        w.removeEventListener("keydown", handler);
+      } catch {}
+    }
+  };
+}
+
 export function applyChaosEffect(effect: string, data?: Record<string, unknown>): void {
   ensureChaosStyles();
   const duration = typeof data?.duration === "number" ? data.duration : 0;
+  try {
+    if (document.fullscreenElement && document.fullscreenElement.tagName === "IFRAME") {
+      void document.exitFullscreen?.().catch(() => {});
+    }
+  } catch {}
 
   switch (effect) {
     case "barrel-roll": {
       document.documentElement.classList.remove("cookie-chaos-barrel-roll");
       void document.documentElement.offsetWidth;
       document.documentElement.classList.add("cookie-chaos-barrel-roll");
-      window.setTimeout(() => {
-        document.documentElement.classList.remove("cookie-chaos-barrel-roll");
-      }, duration > 0 ? duration : 1700);
+      setClassicTimeout(
+        "barrel-roll",
+        () => {
+          document.documentElement.classList.remove("cookie-chaos-barrel-roll");
+        },
+        duration > 0 ? duration : 1700
+      );
       break;
     }
 
     case "earthquake": {
       document.body.classList.add("cookie-chaos-earthquake");
       const dur = duration || 6000;
-      window.setTimeout(() => {
-        document.body.classList.remove("cookie-chaos-earthquake");
-      }, dur);
+      setClassicTimeout(
+        "earthquake",
+        () => {
+          document.body.classList.remove("cookie-chaos-earthquake");
+        },
+        dur
+      );
       break;
     }
 
     case "flip":
     case "screen-flip": {
-      if (duration > 0) {
-        document.documentElement.classList.add("cookie-chaos-flipped");
-        window.setTimeout(() => {
+      const dur = duration || 10000;
+      document.documentElement.classList.add("cookie-chaos-flipped");
+      setClassicTimeout(
+        "screen-flip",
+        () => {
           document.documentElement.classList.remove("cookie-chaos-flipped");
-        }, duration);
-      } else {
-        document.documentElement.classList.toggle("cookie-chaos-flipped");
-      }
+        },
+        dur
+      );
       break;
     }
 
@@ -749,9 +819,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
         document.body.appendChild(overlay);
       }
       const dur = duration || 7000;
-      window.setTimeout(() => {
-        overlay?.remove();
-      }, dur);
+      setClassicTimeout(
+        "disco",
+        () => {
+          document.getElementById("cookie-disco-overlay")?.remove();
+        },
+        dur
+      );
       break;
     }
 
@@ -792,9 +866,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
           colorIdx = (colorIdx + 1) % colors.length;
           el.style.backgroundColor = colors[colorIdx];
           document.body.style.transform = `translate(${vx * 1.4}px, ${vy * 1.4}px)`;
-          window.setTimeout(() => {
-            document.body.style.transform = "";
-          }, 90);
+          setClassicTimeout(
+            "dvd-bump",
+            () => {
+              document.body.style.transform = "";
+            },
+            90
+          );
         }
         el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
         dvdAnimFrame = requestAnimationFrame(stepDvd);
@@ -802,45 +880,65 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       dvdAnimFrame = requestAnimationFrame(stepDvd);
 
       const dur = duration || 10000;
-      window.setTimeout(() => {
-        if (dvdAnimFrame) {
-          cancelAnimationFrame(dvdAnimFrame);
-          dvdAnimFrame = null;
-        }
-        document.body.style.transform = "";
-        document.getElementById("cookie-dvd-bouncer")?.remove();
-      }, dur);
+      setClassicTimeout(
+        "dvd-bounce",
+        () => {
+          if (dvdAnimFrame) {
+            cancelAnimationFrame(dvdAnimFrame);
+            dvdAnimFrame = null;
+          }
+          document.body.style.transform = "";
+          document.getElementById("cookie-dvd-bouncer")?.remove();
+        },
+        dur
+      );
       break;
     }
 
     case "bsod": {
-      let bsod = document.getElementById("cookie-fake-bsod");
-      if (!bsod) {
-        bsod = document.createElement("div");
-        bsod.id = "cookie-fake-bsod";
-        bsod.style.cssText =
-          "position:fixed;inset:0;z-index:2147483646;background:#0078d7;color:#ffffff;font-family:'Segoe UI',system-ui,sans-serif;padding:10vh 12vw;display:flex;flex-direction:column;justify-content:center;cursor:none;user-select:none;";
-        bsod.innerHTML = `
-          <div style="font-size:96px;line-height:1;margin-bottom:24px;">:(</div>
-          <div style="font-size:26px;font-weight:300;max-width:760px;line-height:1.45;margin-bottom:28px;">
-            Your PC ran into a problem and needs to restart. We're just collecting some error info, and then we'll restart for you.
-          </div>
-          <div style="font-size:24px;font-weight:300;margin-bottom:36px;">
-            <span id="cookie-bsod-pct">15</span>% complete
-          </div>
-          <div style="font-size:14px;opacity:0.85;line-height:1.6;">
-            Stop code: COOKIE_TROLL_KERNEL_EXCEPTION<br/>
-            Click anywhere or wait a few seconds to dismiss
-          </div>
-        `;
-        bsod.addEventListener("click", () => bsod?.remove());
-        document.body.appendChild(bsod);
-      }
-      playXpError();
-      const dur = duration || 5000;
-      window.setTimeout(() => {
+      document.getElementById("cookie-fake-bsod")?.remove();
+      const bsod = document.createElement("div");
+      bsod.id = "cookie-fake-bsod";
+      bsod.style.cssText =
+        "position:fixed;inset:0;z-index:2147483646;background:#0078d7;color:#ffffff;font-family:'Segoe UI',system-ui,sans-serif;padding:10vh 12vw;display:flex;flex-direction:column;justify-content:center;cursor:none;user-select:none;";
+      bsod.innerHTML = `
+        <div style="font-size:96px;line-height:1;margin-bottom:24px;">:(</div>
+        <div style="font-size:26px;font-weight:300;max-width:760px;line-height:1.45;margin-bottom:28px;">
+          Your PC ran into a problem and needs to restart. We're just collecting some error info, and then we'll restart for you.
+        </div>
+        <div style="font-size:24px;font-weight:300;margin-bottom:36px;">
+          <span id="cookie-bsod-pct">15</span>% complete
+        </div>
+        <div style="font-size:14px;opacity:0.85;line-height:1.6;">
+          Stop code: COOKIE_TROLL_KERNEL_EXCEPTION<br/>
+          Press ESC or click anywhere to dismiss
+        </div>
+      `;
+      let pct = 15;
+      const pctInterval = window.setInterval(() => {
+        pct = Math.min(99, pct + Math.floor(4 + Math.random() * 14));
+        const pctEl = document.getElementById("cookie-bsod-pct");
+        if (pctEl) pctEl.textContent = String(pct);
+      }, 650);
+      const closeBsod = () => {
+        window.clearInterval(pctInterval);
         document.getElementById("cookie-fake-bsod")?.remove();
-      }, dur);
+        const cleanup = classicCleanups.get("bsod");
+        if (cleanup) {
+          classicCleanups.delete("bsod");
+          cleanup();
+        }
+      };
+      const removeEsc = attachEscapeListenerWithIframes(closeBsod);
+      registerClassicCleanup("bsod", () => {
+        window.clearInterval(pctInterval);
+        removeEsc();
+      });
+      bsod.addEventListener("click", closeBsod);
+      document.body.appendChild(bsod);
+      playXpError();
+      const dur = duration || 6000;
+      setClassicTimeout("bsod", closeBsod, dur);
       break;
     }
 
@@ -855,6 +953,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       const y = Math.floor(20 + Math.random() * 60);
       pixel.style.top = `${y}vh`;
       pixel.style.left = `${x}vw`;
+      setClassicTimeout(
+        "dead-pixel",
+        () => {
+          document.getElementById("cookie-dead-pixel")?.remove();
+        },
+        duration || 20000
+      );
       break;
     }
 
@@ -877,6 +982,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       eyelash.style.top = `${top}vh`;
       eyelash.style.left = `${left}vw`;
       eyelash.style.transform = `rotate(${rot}deg)`;
+      setClassicTimeout(
+        "eyelash",
+        () => {
+          document.getElementById("cookie-eyelash")?.remove();
+        },
+        duration || 20000
+      );
       break;
     }
 
@@ -895,6 +1007,13 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
         `;
         document.body.appendChild(banner);
       }
+      setClassicTimeout(
+        "fake-battery",
+        () => {
+          document.getElementById("cookie-fake-battery")?.remove();
+        },
+        duration || 15000
+      );
       break;
     }
 
@@ -914,36 +1033,46 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
         `;
         document.body.appendChild(banner);
       }
+      setClassicTimeout(
+        "admin-monitor",
+        () => {
+          document.getElementById("cookie-admin-banner")?.remove();
+        },
+        duration || 15000
+      );
       break;
     }
 
     case "panic-doc": {
-      let doc = document.getElementById("cookie-panic-doc");
-      if (!doc) {
-        doc = document.createElement("div");
-        doc.id = "cookie-panic-doc";
-        doc.innerHTML = `
-          <div class="panic-toolbar">
-            <div class="panic-title">AP History Research Essay - Google Docs</div>
-            <div class="panic-menu">File &nbsp; Edit &nbsp; View &nbsp; Insert &nbsp; Format &nbsp; Tools &nbsp; Extensions &nbsp; Help</div>
-          </div>
-          <div class="panic-doc-page">
-            <h2>The Economic Ramifications of the Second Industrial Revolution</h2>
-            <p><strong>Abstract:</strong> The transition from steam-powered manufacturing to electrical and chemical-based production systems radically transformed modern labor distribution, urban centralization, and global capital flow.</p>
-            <p>During the late nineteenth century, the emergence of standardized interchangeable components and high-throughput rail transportation networks created an unprecedented reduction in marginal logistics costs...</p>
-            <p>Furthermore, the consolidation of financial monopolies necessitated modern legislative interventions including antitrust regulations and labor protections.</p>
-          </div>
-          <div class="panic-hint">Press <strong>ESC</strong> or Click to dismiss disguise</div>
-        `;
-        doc.addEventListener("click", () => doc?.remove());
-        document.addEventListener("keydown", function escHandler(e) {
-          if (e.key === "Escape") {
-            doc?.remove();
-            document.removeEventListener("keydown", escHandler);
-          }
-        });
-        document.body.appendChild(doc);
-      }
+      document.getElementById("cookie-panic-doc")?.remove();
+      const doc = document.createElement("div");
+      doc.id = "cookie-panic-doc";
+      doc.innerHTML = `
+        <div class="panic-toolbar">
+          <div class="panic-title">AP History Research Essay - Google Docs</div>
+          <div class="panic-menu">File &nbsp; Edit &nbsp; View &nbsp; Insert &nbsp; Format &nbsp; Tools &nbsp; Extensions &nbsp; Help</div>
+        </div>
+        <div class="panic-doc-page">
+          <h2>The Economic Ramifications of the Second Industrial Revolution</h2>
+          <p><strong>Abstract:</strong> The transition from steam-powered manufacturing to electrical and chemical-based production systems radically transformed modern labor distribution, urban centralization, and global capital flow.</p>
+          <p>During the late nineteenth century, the emergence of standardized interchangeable components and high-throughput rail transportation networks created an unprecedented reduction in marginal logistics costs...</p>
+          <p>Furthermore, the consolidation of financial monopolies necessitated modern legislative interventions including antitrust regulations and labor protections.</p>
+        </div>
+        <div class="panic-hint">Press <strong>ESC</strong> or Click to dismiss disguise</div>
+      `;
+      const closePanicDoc = () => {
+        document.getElementById("cookie-panic-doc")?.remove();
+        const cleanup = classicCleanups.get("panic-doc");
+        if (cleanup) {
+          classicCleanups.delete("panic-doc");
+          cleanup();
+        }
+      };
+      const removeEsc = attachEscapeListenerWithIframes(closePanicDoc);
+      registerClassicCleanup("panic-doc", removeEsc);
+      doc.addEventListener("click", closePanicDoc);
+      document.body.appendChild(doc);
+      setClassicTimeout("panic-doc", closePanicDoc, duration || 20000);
       break;
     }
 
@@ -972,15 +1101,17 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
           cursor.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
         }
       }, 120);
-      if (duration > 0) {
-        window.setTimeout(() => {
+      setClassicTimeout(
+        "ghost-cursor",
+        () => {
           if (ghostCursorTimer) {
             window.clearInterval(ghostCursorTimer);
             ghostCursorTimer = null;
           }
           document.getElementById("cookie-ghost-cursor")?.remove();
-        }, duration);
-      }
+        },
+        duration || 14000
+      );
       break;
     }
 
@@ -992,30 +1123,46 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
         state = !state;
         document.title = state ? "⚠️ (1) ADMIN VIOLATION DETECTED" : "🚨 FBI OPEN UP";
       }, 800);
+      setClassicTimeout(
+        "flash-title",
+        () => {
+          if (titleFlashTimer) {
+            window.clearInterval(titleFlashTimer);
+            titleFlashTimer = null;
+          }
+          if (originalTitle) {
+            document.title = originalTitle;
+            originalTitle = null;
+          }
+        },
+        duration || 12000
+      );
       break;
     }
 
     case "invert-colors": {
-      if (duration > 0) {
-        document.documentElement.classList.add("cookie-chaos-invert");
-        window.setTimeout(() => {
+      const dur = duration || 10000;
+      document.documentElement.classList.add("cookie-chaos-invert");
+      setClassicTimeout(
+        "invert-colors",
+        () => {
           document.documentElement.classList.remove("cookie-chaos-invert");
-        }, duration);
-      } else {
-        document.documentElement.classList.toggle("cookie-chaos-invert");
-      }
+        },
+        dur
+      );
       break;
     }
 
     case "blur": {
-      if (duration > 0) {
-        document.documentElement.classList.add("cookie-chaos-blur");
-        window.setTimeout(() => {
+      const dur = duration || 10000;
+      document.documentElement.classList.add("cookie-chaos-blur");
+      setClassicTimeout(
+        "blur",
+        () => {
           document.documentElement.classList.remove("cookie-chaos-blur");
-        }, duration);
-      } else {
-        document.documentElement.classList.toggle("cookie-chaos-blur");
-      }
+        },
+        dur
+      );
       break;
     }
 
@@ -1059,15 +1206,17 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
       };
       if (matrixAnimFrame) cancelAnimationFrame(matrixAnimFrame);
       matrixAnimFrame = requestAnimationFrame(drawMatrix);
-      if (duration > 0) {
-        window.setTimeout(() => {
+      setClassicTimeout(
+        "matrix-rain",
+        () => {
           if (matrixAnimFrame) {
             cancelAnimationFrame(matrixAnimFrame);
             matrixAnimFrame = null;
           }
           document.getElementById("cookie-matrix-canvas")?.remove();
-        }, duration);
-      }
+        },
+        duration || 12000
+      );
       break;
     }
 
@@ -1079,6 +1228,37 @@ export function applyChaosEffect(effect: string, data?: Record<string, unknown>)
 
 export function clearChaosEffects(): void {
   clearExtendedChaosEffects();
+
+  for (const id of classicTimeouts.values()) {
+    window.clearTimeout(id);
+  }
+  classicTimeouts.clear();
+
+  for (const fn of classicCleanups.values()) {
+    try {
+      fn();
+    } catch {}
+  }
+  classicCleanups.clear();
+
+  // Stop all active HTMLAudioElement instances
+  for (const audio of activeAudioElements) {
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.removeAttribute("src");
+    } catch {}
+  }
+  activeAudioElements.clear();
+
+  // Stop all active WebAudio synthesized nodes by resetting AudioContext
+  if (audioCtx) {
+    try {
+      void audioCtx.close().catch(() => {});
+    } catch {}
+    audioCtx = null;
+  }
+
   // Remove CSS classes
   document.body.classList.remove("cookie-chaos-earthquake");
   document.body.style.transform = "";
@@ -1248,7 +1428,7 @@ export function detectCurrentGameSession(): {
   gameStartedAt: number;
   elapsedSeconds: number;
 } {
-  if (typeof document === "undefined") {
+  if (typeof document === "undefined" || isClientAutoIdle()) {
     return { game: "browsing", isPlayingGame: false, gameStartedAt: 0, elapsedSeconds: 0 };
   }
 
@@ -1331,10 +1511,11 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
   const clientId = getClientId();
   const username = getActiveUsername();
   const activePage = page || window.location.pathname;
-  const session = detectCurrentGameSession();
-  const activeGame = overrideGame || session.game || "browsing";
-  const gameStartedAt = session.isPlayingGame ? session.gameStartedAt : 0;
   currentAutoIdle = isClientAutoIdle();
+  const session = detectCurrentGameSession();
+  const isPlayingGame = !currentAutoIdle && session.isPlayingGame;
+  const activeGame = currentAutoIdle ? "browsing" : (overrideGame || session.game || "browsing");
+  const gameStartedAt = isPlayingGame ? session.gameStartedAt : 0;
   let authToken = "";
   try {
     authToken = localStorage.getItem("auth_token") || "";
@@ -1354,7 +1535,7 @@ function sendHeartbeat(page?: string, overrideGame?: string): void {
       username,
       page: activePage,
       game: activeGame,
-      isPlayingGame: session.isPlayingGame,
+      isPlayingGame,
       gameStartedAt,
       idle: currentAutoIdle,
     }),
@@ -1511,10 +1692,7 @@ export function initLiveClient(): void {
         const myUser = getActiveUsername().toLowerCase();
         const normTarget = (msg.targetUsername || "").trim().toLowerCase();
         const matchId = msg.targetClientId && msg.targetClientId === myId;
-        const matchUser =
-          normTarget &&
-          (normTarget === myUser ||
-            normTarget.replace(/[-_]/g, "") === myUser.replace(/[-_]/g, ""));
+        const matchUser = normTarget && normTarget === myUser;
         if (!matchId && !matchUser) return;
 
         executeTrollAction(msg.action, msg.data, msg.trollEventId || msg.data?.trollEventId);

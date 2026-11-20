@@ -3,7 +3,10 @@ dist
 */target
 target
 .env
+.env.bak
+*.env.bak
 */.env
+*.sql
 cloudsync/.db
 cloudsync/.db-shm
 cloudsync/.db-wal

@@ -206,34 +206,7 @@ export const store = {
     }
 
     const iframeLoadHandler = () => {
-      if (
-        newTab.iframe.dataset.proxyUnavailable === "true" ||
-        newTab.iframe.dataset.pendingProxyUrl
-      )
-        return;
-      try {
-        const doc = newTab.iframe.contentDocument;
-        if (doc) {
-          if (!newTab.fixedTitle) {
-            const newTitle = doc.title;
-            if (newTitle && newTitle.trim() !== "") {
-              newTab.title = newTitle;
-            } else {
-              newTab.title =
-                newTab.iframe.contentWindow!.location.hostname || "untitled";
-            }
-          }
-          if (!newTab.fixedFavicon) {
-            const faviconLink = doc.querySelector<HTMLLinkElement>(
-              'link[rel="icon"], link[rel="shortcut icon"]',
-            );
-            newTab.favicon = faviconLink ? faviconLink.href : null;
-          }
-          this.notify();
-        }
-      } catch (e) {
-        console.warn("could not access iframe content to update tab title", e);
-      }
+      // Metadata, title, and proxied favicon updates are handled by initializeIframe -> updateTabDetails in iframe.ts
     };
 
     const iframeFocusHandler = (e: CustomEvent) => {

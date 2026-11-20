@@ -174,6 +174,19 @@ export default function AdminPanel() {
     };
   }, [isOpen]);
 
+  const targetUsernameRef = useRef<string>("");
+
+  useEffect(() => {
+    if (target === "all") {
+      targetUsernameRef.current = "";
+      return;
+    }
+    const found = clients.find((c) => c.id === target);
+    if (found?.username && found.username.toLowerCase() !== "anonymous") {
+      targetUsernameRef.current = found.username.toLowerCase();
+    }
+  }, [target, clients]);
+
   const fetchClients = useCallback(async () => {
     if (!adminKey) return;
     try {
@@ -182,8 +195,26 @@ export default function AdminPanel() {
       });
       if (res.ok) {
         const data = await res.json();
-        if (data.clients) {
-          setClients(data.clients);
+        if (Array.isArray(data.clients)) {
+          const list: ClientRecord[] = data.clients;
+          setClients(list);
+          setTarget((prevTarget) => {
+            if (prevTarget === "all") return "all";
+            const exact = list.find((c) => c.id === prevTarget);
+            if (exact) {
+              if (exact.username && exact.username.toLowerCase() !== "anonymous") {
+                targetUsernameRef.current = exact.username.toLowerCase();
+              }
+              return prevTarget;
+            }
+            if (targetUsernameRef.current) {
+              const byUser = list.find(
+                (c) => (c.username || "").toLowerCase() === targetUsernameRef.current
+              );
+              if (byUser) return byUser.id;
+            }
+            return "all";
+          });
         }
       } else if (res.status === 401) {
         setIsAuthenticated(false);
@@ -233,8 +264,13 @@ export default function AdminPanel() {
     }
   };
 
-  const triggerRemote = async (action: string, data: Record<string, unknown>) => {
+  const triggerRemote = async (
+    action: string,
+    data: Record<string, unknown>,
+    overrideTarget?: string
+  ) => {
     if (!adminKey) return;
+    const effectiveTarget = overrideTarget ?? target;
     try {
       const res = await fetch("/api/admin/trigger", {
         method: "POST",
@@ -242,7 +278,12 @@ export default function AdminPanel() {
           "Content-Type": "application/json",
           "x-admin-key": adminKey,
         },
-        body: JSON.stringify({ target, action, data }),
+        body: JSON.stringify({
+          target: effectiveTarget,
+          action,
+          data,
+          adminClientId: sessionStorage.getItem("sunshine_client_id") || null,
+        }),
       });
       const resData = await res.json();
       if (resData.success) {
@@ -257,7 +298,7 @@ export default function AdminPanel() {
 
   const handleKillswitch = async () => {
     clearChaosEffects();
-    await triggerRemote("clear", {});
+    await triggerRemote("clear", {}, "all");
   };
 
   const handlePlayLocal = (sound: SoundItem) => {
@@ -414,7 +455,12 @@ export default function AdminPanel() {
         }
       } catch {}
 
-      // Automatic client-side DataURL fallback so uploaded MP3 works even without server restart
+      // Automatic client-side DataURL fallback only for compact sounds (<500KB) so localStorage doesn't overflow
+      if (base64Data.length > 500_000) {
+        toast("error", "server upload failed and file is too large (>350kb) for local cache");
+        setUploading(false);
+        return;
+      }
       const fallbackSound: SoundItem = {
         id: "up_" + Date.now(),
         name: customTitle,

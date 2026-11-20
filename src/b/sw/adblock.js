@@ -31,19 +31,25 @@ function adblockSkip(hostname) {
   return false;
 }
 
+const BASELINE_ADBLOCK_DOMAINS = [
+  "doubleclick.net",
+  "google-analytics.com",
+  "googlesyndication.com",
+  "googleadservices.com",
+  "adservice.google.com",
+  "acscdn.com",
+  "highperformanceformat.com",
+  "profitableratecpm.com",
+];
+
+if (typeof adblockDomains !== "undefined" && adblockDomains instanceof Set && adblockDomains.size === 0) {
+  for (const d of BASELINE_ADBLOCK_DOMAINS) adblockDomains.add(d);
+}
+
 async function loadAdLists() {
   try {
     const listCache = await caches.open("sunshine-adblock-v1");
-    const newDomains = new Set([
-      "doubleclick.net",
-      "google-analytics.com",
-      "googlesyndication.com",
-      "googleadservices.com",
-      "adservice.google.com",
-      "acscdn.com",
-      "highperformanceformat.com",
-      "profitableratecpm.com",
-    ]);
+    const newDomains = new Set(BASELINE_ADBLOCK_DOMAINS);
     await Promise.all(
       ADBLOCK_LISTS.map(async (url) => {
         try {
@@ -120,7 +126,7 @@ function readyAds() {
 }
 
 function adBlocked(candidate, isNavigate) {
-  if (!isAdblockReady || !candidate) return false;
+  if (!candidate) return false;
   try {
     const candidateUrl = new URL(candidate);
     const host = candidateUrl.hostname.toLowerCase();

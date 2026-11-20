@@ -704,7 +704,7 @@ function updateTabDetails(iframe: HTMLIFrameElement): void {
           tabToUpdate.id === (window.sunshineApp as any)?.splitPair?.right ||
           tabToUpdate.id === (window.sunshineApp as any)?.getActiveTab?.()?.id
         : tabToUpdate.id === (window.sunshineApp as any)?.getActiveTab?.()?.id;
-      if (reloadCount < MAX_RELOADS && isActiveTab) {
+      if (reloadCount < MAX_RELOADS) {
         iframe.dataset.reloadCount = (reloadCount + 1).toString();
         isReloading = true;
         if (!tabToUpdate.fixedTitle) {

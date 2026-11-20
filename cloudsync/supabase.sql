@@ -4,8 +4,29 @@ CREATE TABLE IF NOT EXISTS public.cloudsync_users (
   username_lower TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   token_version INTEGER NOT NULL DEFAULT 1,
+  last_fingerprint_id TEXT NOT NULL DEFAULT '',
+  last_storage_token TEXT NOT NULL DEFAULT '',
+  is_shadowbanned BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.cloudsync_users ADD COLUMN IF NOT EXISTS last_fingerprint_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE public.cloudsync_users ADD COLUMN IF NOT EXISTS last_storage_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE public.cloudsync_users ADD COLUMN IF NOT EXISTS is_shadowbanned BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS public.banned_devices (
+  id BIGSERIAL PRIMARY KEY,
+  fingerprint_id TEXT NOT NULL DEFAULT '',
+  storage_token TEXT NOT NULL DEFAULT '',
+  banned_username TEXT NOT NULL DEFAULT '',
+  banned_reason TEXT NOT NULL DEFAULT '',
+  high_confidence_spam BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_banned_devices_fp ON public.banned_devices(fingerprint_id);
+CREATE INDEX IF NOT EXISTS idx_banned_devices_token ON public.banned_devices(storage_token);
+ALTER TABLE public.banned_devices ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.cloudsync_sync (
   user_id BIGINT PRIMARY KEY REFERENCES public.cloudsync_users(id) ON DELETE CASCADE,

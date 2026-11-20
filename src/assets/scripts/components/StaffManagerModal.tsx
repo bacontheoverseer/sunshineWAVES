@@ -66,6 +66,8 @@ const ACTION_META_MAP: Record<
   remove_mod: { label: "removed mod", tone: "warn" },
   note_added: { label: "added note", tone: "info" },
   note_deleted: { label: "removed note", tone: "warn" },
+  ban_device: { label: "device banned", tone: "danger" },
+  unban_device: { label: "unbanned device", tone: "success" },
 };
 
 export function formatStaffLogActionMeta(action: string): {

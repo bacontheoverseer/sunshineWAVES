@@ -217,13 +217,74 @@ function ensureExtendedChaosStyles(): void {
   document.head.appendChild(style);
 }
 
-function toggleHtmlClassOrTimed(cls: string, durationMs: number): void {
-  if (durationMs > 0) {
-    document.documentElement.classList.add(cls);
-    trackTimeout(() => document.documentElement.classList.remove(cls), durationMs);
-  } else {
-    document.documentElement.classList.toggle(cls);
+const classTimers = new Map<string, number>();
+
+function toggleHtmlClassOrTimed(cls: string, durationMs: number, defaultMs = 12000): void {
+  const dur = durationMs > 0 ? durationMs : defaultMs;
+  document.documentElement.classList.add(cls);
+  const prev = classTimers.get(cls);
+  if (prev !== undefined) {
+    window.clearTimeout(prev);
+    activeTimeouts.delete(prev);
   }
+  const id = trackTimeout(() => {
+    classTimers.delete(cls);
+    document.documentElement.classList.remove(cls);
+  }, dur);
+  classTimers.set(cls, id);
+}
+
+function listenPointerMoveWithIframes(onCoords: (x: number, y: number) => void): () => void {
+  const topHandler = (e: PointerEvent) => {
+    onCoords(e.clientX, e.clientY);
+  };
+  window.addEventListener("pointermove", topHandler, { passive: true });
+  const iframeCleanups: (() => void)[] = [];
+  document.querySelectorAll<HTMLIFrameElement>("iframe").forEach((ifr) => {
+    try {
+      const cw = ifr.contentWindow;
+      if (!cw) return;
+      const ifrHandler = (e: PointerEvent) => {
+        const rect = ifr.getBoundingClientRect();
+        onCoords(rect.left + e.clientX, rect.top + e.clientY);
+      };
+      cw.addEventListener("pointermove", ifrHandler, { passive: true });
+      iframeCleanups.push(() => {
+        try {
+          cw.removeEventListener("pointermove", ifrHandler);
+        } catch {}
+      });
+    } catch {}
+  });
+  return () => {
+    window.removeEventListener("pointermove", topHandler);
+    for (const fn of iframeCleanups) fn();
+  };
+}
+
+function setNoCursorWithIframes(active: boolean): void {
+  if (active) {
+    document.documentElement.classList.add("cookie-chaos-no-cursor");
+  } else {
+    document.documentElement.classList.remove("cookie-chaos-no-cursor");
+  }
+  document.querySelectorAll<HTMLIFrameElement>("iframe").forEach((ifr) => {
+    try {
+      const doc = ifr.contentDocument;
+      if (!doc || !doc.head) return;
+      const existing = doc.getElementById("cookie-iframe-no-cursor");
+      if (active) {
+        if (!existing) {
+          const st = doc.createElement("style");
+          st.id = "cookie-iframe-no-cursor";
+          st.textContent = "html, body, * { cursor: none !important; }";
+          doc.head.appendChild(st);
+        }
+      } else {
+        existing?.remove();
+      }
+    } catch {}
+  });
 }
 
 function bindDismissHandlers(
@@ -252,6 +313,18 @@ function bindDismissHandlers(
     };
     document.addEventListener("keydown", onKey);
     cleanups.push(() => document.removeEventListener("keydown", onKey));
+    document.querySelectorAll<HTMLIFrameElement>("iframe").forEach((ifr) => {
+      try {
+        const cw = ifr.contentWindow;
+        if (!cw) return;
+        cw.addEventListener("keydown", onKey);
+        cleanups.push(() => {
+          try {
+            cw.removeEventListener("keydown", onKey);
+          } catch {}
+        });
+      } catch {}
+    });
   }
   return dismiss;
 }
@@ -322,11 +395,6 @@ export function applyExtendedChaosEffect(
   switch (effect) {
     case "crt-scanlines": {
       const existing = document.getElementById("cookie-crt-overlay");
-      if (existing && duration <= 0) {
-        existing.remove();
-        document.documentElement.classList.remove("cookie-chaos-crt");
-        return true;
-      }
       document.documentElement.classList.add("cookie-chaos-crt");
       const el = existing || document.createElement("div");
       el.id = "cookie-crt-overlay";
@@ -336,42 +404,36 @@ export function applyExtendedChaosEffect(
         "box-shadow:inset 0 0 80px rgba(0,255,120,0.12);",
       ].join("");
       if (!existing) document.body.appendChild(el);
-      if (duration > 0) {
-        trackTimeout(() => {
-          el.remove();
-          document.documentElement.classList.remove("cookie-chaos-crt");
-        }, duration);
-      }
+      trackTimeout(() => {
+        el.remove();
+        document.documentElement.classList.remove("cookie-chaos-crt");
+      }, duration || 14000);
       return true;
     }
 
     case "deep-fried":
-      toggleHtmlClassOrTimed("cookie-chaos-deepfried", duration);
+      toggleHtmlClassOrTimed("cookie-chaos-deepfried", duration, 12000);
       return true;
 
     case "color-cycle":
-      toggleHtmlClassOrTimed("cookie-chaos-rgb", duration);
+      toggleHtmlClassOrTimed("cookie-chaos-rgb", duration, 12000);
       return true;
 
     case "mirror-world":
-      toggleHtmlClassOrTimed("cookie-chaos-mirror", duration);
+      toggleHtmlClassOrTimed("cookie-chaos-mirror", duration, 12000);
       return true;
 
     case "tilt-horizon":
-      toggleHtmlClassOrTimed("cookie-chaos-tilt", duration);
+      toggleHtmlClassOrTimed("cookie-chaos-tilt", duration, 12000);
       return true;
 
     case "drunk-vision":
-      toggleHtmlClassOrTimed("cookie-chaos-drunk", duration || 12000);
+      toggleHtmlClassOrTimed("cookie-chaos-drunk", duration || 12000, 12000);
       return true;
 
     case "tiny-page": {
-      if (duration > 0) {
-        document.body.classList.add("cookie-chaos-tiny");
-        trackTimeout(() => document.body.classList.remove("cookie-chaos-tiny"), duration);
-      } else {
-        document.body.classList.toggle("cookie-chaos-tiny");
-      }
+      document.body.classList.add("cookie-chaos-tiny");
+      trackTimeout(() => document.body.classList.remove("cookie-chaos-tiny"), duration || 12000);
       return true;
     }
 
@@ -393,10 +455,6 @@ export function applyExtendedChaosEffect(
 
     case "cracked-glass": {
       const existing = document.getElementById("cookie-cracked-glass");
-      if (existing && duration <= 0) {
-        existing.remove();
-        return true;
-      }
       const el = existing || document.createElement("div");
       el.id = "cookie-cracked-glass";
       el.style.cssText = "position:fixed;inset:0;z-index:2147483645;pointer-events:none;";
@@ -414,7 +472,7 @@ export function applyExtendedChaosEffect(
           </g>
         </svg>`;
       if (!existing) document.body.appendChild(el);
-      if (duration > 0) trackTimeout(() => el.remove(), duration);
+      trackTimeout(() => el.remove(), duration || 16000);
       return true;
     }
 
@@ -449,12 +507,11 @@ export function applyExtendedChaosEffect(
       mask.style.cssText =
         "position:fixed;inset:0;z-index:2147483645;pointer-events:none;background:radial-gradient(circle 135px at 50vw 50vh, rgba(0,0,0,0) 0%, rgba(2,3,8,0.97) 100%);";
       document.body.appendChild(mask);
-      const onMove = (e: PointerEvent) => {
-        mask.style.background = `radial-gradient(circle 135px at ${e.clientX}px ${e.clientY}px, rgba(0,0,0,0) 0%, rgba(2,3,8,0.97) 100%)`;
-      };
-      window.addEventListener("pointermove", onMove, { passive: true });
+      const unlisten = listenPointerMoveWithIframes((x, y) => {
+        mask.style.background = `radial-gradient(circle 135px at ${x}px ${y}px, rgba(0,0,0,0) 0%, rgba(2,3,8,0.97) 100%)`;
+      });
       const cleanup = trackCleanup(() => {
-        window.removeEventListener("pointermove", onMove);
+        unlisten();
         mask.remove();
       });
       trackTimeout(cleanup, duration || 14000);
@@ -478,16 +535,15 @@ export function applyExtendedChaosEffect(
       document.body.appendChild(el);
       const ret = document.getElementById("cookie-radar-reticle");
       const coords = document.getElementById("cookie-radar-coords");
-      const onMove = (e: PointerEvent) => {
+      const unlisten = listenPointerMoveWithIframes((x, y) => {
         if (ret) {
-          ret.style.left = `${e.clientX}px`;
-          ret.style.top = `${e.clientY}px`;
+          ret.style.left = `${x}px`;
+          ret.style.top = `${y}px`;
         }
-        if (coords) coords.textContent = `X: ${e.clientX}px  Y: ${e.clientY}px`;
-      };
-      window.addEventListener("pointermove", onMove, { passive: true });
+        if (coords) coords.textContent = `X: ${Math.round(x)}px  Y: ${Math.round(y)}px`;
+      });
       const cleanup = trackCleanup(() => {
-        window.removeEventListener("pointermove", onMove);
+        unlisten();
         el.remove();
       });
       trackTimeout(cleanup, duration || 14000);
@@ -599,20 +655,19 @@ export function applyExtendedChaosEffect(
 
     case "mac-beachball": {
       document.getElementById("cookie-mac-beachball")?.remove();
-      document.documentElement.classList.add("cookie-chaos-no-cursor");
+      setNoCursorWithIframes(true);
       const ball = document.createElement("div");
       ball.id = "cookie-mac-beachball";
       ball.style.cssText =
         "position:fixed;left:50vw;top:50vh;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;z-index:2147483647;pointer-events:none;background:conic-gradient(#ef4444 0 60deg,#f59e0b 60deg 120deg,#eab308 120deg 180deg,#22c55e 180deg 240deg,#3b82f6 240deg 300deg,#a855f7 300deg 360deg);animation:cookieChaosSpin 0.55s linear infinite;box-shadow:0 2px 10px rgba(0,0,0,0.45);border:1.5px solid rgba(255,255,255,0.85);";
       document.body.appendChild(ball);
-      const onMove = (e: PointerEvent) => {
-        ball.style.left = `${e.clientX}px`;
-        ball.style.top = `${e.clientY}px`;
-      };
-      window.addEventListener("pointermove", onMove, { passive: true });
+      const unlisten = listenPointerMoveWithIframes((x, y) => {
+        ball.style.left = `${x}px`;
+        ball.style.top = `${y}px`;
+      });
       const cleanup = trackCleanup(() => {
-        window.removeEventListener("pointermove", onMove);
-        document.documentElement.classList.remove("cookie-chaos-no-cursor");
+        unlisten();
+        setNoCursorWithIframes(false);
         ball.remove();
       });
       trackTimeout(cleanup, duration || 11000);
@@ -853,15 +908,16 @@ export function applyExtendedChaosEffect(
     case "gravity-drop": {
       const candidates = Array.from(
         document.querySelectorAll<HTMLElement>(
-          ".main-container, #bookmarks-container .bookmark, .top-bar > *, .game-card",
+          ".main-container, #bookmarks-container .bookmark, .top-bar > *, .game-card, .meow, #iframe-container",
         ),
       ).filter((el) => !el.closest(".admin-menu, .admin-auth-popup, .admin-backdrop"));
-      const saved = candidates.map((el) => ({
-        el,
-        transform: el.style.transform,
-        transition: el.style.transition,
-      }));
-      for (const { el } of saved) {
+      for (const el of candidates) {
+        if (el.dataset.chaosOrigTransform === undefined) {
+          el.dataset.chaosOrigTransform = el.style.transform || "";
+        }
+        if (el.dataset.chaosOrigTransition === undefined) {
+          el.dataset.chaosOrigTransition = el.style.transition || "";
+        }
         const rect = el.getBoundingClientRect();
         const dropY = Math.max(0, window.innerHeight - rect.bottom - 12);
         const tilt = (Math.random() - 0.5) * 28;
@@ -869,9 +925,15 @@ export function applyExtendedChaosEffect(
         el.style.transform = `translate3d(${(Math.random() - 0.5) * 36}px, ${dropY}px, 0) rotate(${tilt}deg)`;
       }
       const restore = trackCleanup(() => {
-        for (const item of saved) {
-          item.el.style.transform = item.transform;
-          item.el.style.transition = item.transition;
+        for (const el of candidates) {
+          if (el.dataset.chaosOrigTransform !== undefined) {
+            el.style.transform = el.dataset.chaosOrigTransform;
+            delete el.dataset.chaosOrigTransform;
+          }
+          if (el.dataset.chaosOrigTransition !== undefined) {
+            el.style.transition = el.dataset.chaosOrigTransition;
+            delete el.dataset.chaosOrigTransition;
+          }
         }
       });
       trackTimeout(restore, duration || 8500);
@@ -879,11 +941,16 @@ export function applyExtendedChaosEffect(
     }
 
     case "runaway-ui": {
-      const shifted = new Map<HTMLElement, string>();
+      const shifted = new Set<HTMLElement>();
       const onOver = (e: MouseEvent) => {
-        const target = (e.target as HTMLElement | null)?.closest<HTMLElement>("button, a, .bookmark");
+        const target = (e.target as HTMLElement | null)?.closest<HTMLElement>(
+          "button, a, .bookmark, .meow, .browser-tab",
+        );
         if (!target || target.closest(".admin-menu, .admin-auth-popup, .admin-backdrop")) return;
-        if (!shifted.has(target)) shifted.set(target, target.style.transform);
+        if (target.dataset.chaosRunawayOrigTransform === undefined) {
+          target.dataset.chaosRunawayOrigTransform = target.style.transform || "";
+        }
+        shifted.add(target);
         const dx = (Math.random() > 0.5 ? 1 : -1) * (50 + Math.random() * 90);
         const dy = (Math.random() > 0.5 ? 1 : -1) * (24 + Math.random() * 60);
         target.style.transition = "transform 0.16s ease-out";
@@ -892,8 +959,11 @@ export function applyExtendedChaosEffect(
       document.addEventListener("mouseover", onOver, { passive: true });
       const cleanup = trackCleanup(() => {
         document.removeEventListener("mouseover", onOver);
-        for (const [el, prev] of shifted) {
-          el.style.transform = prev;
+        for (const el of shifted) {
+          if (el.dataset.chaosRunawayOrigTransform !== undefined) {
+            el.style.transform = el.dataset.chaosRunawayOrigTransform;
+            delete el.dataset.chaosRunawayOrigTransform;
+          }
         }
         shifted.clear();
       });
@@ -916,15 +986,14 @@ export function applyExtendedChaosEffect(
       document.body.appendChild(wrap);
       let mx = window.innerWidth / 2;
       let my = window.innerHeight / 2;
-      const onMove = (e: PointerEvent) => {
-        mx = e.clientX;
-        my = e.clientY;
-      };
-      window.addEventListener("pointermove", onMove, { passive: true });
+      const unlisten = listenPointerMoveWithIframes((x, y) => {
+        mx = x;
+        my = y;
+      });
       let alive = true;
       const cleanup = trackCleanup(() => {
         alive = false;
-        window.removeEventListener("pointermove", onMove);
+        unlisten();
         wrap.remove();
       });
       const dur = duration || 14000;
@@ -1048,6 +1117,8 @@ export function clearExtendedChaosEffects(): void {
 
   document.body.classList.remove("cookie-chaos-tiny");
   document.documentElement.classList.remove(...EXT_HTML_CLASSES);
+  classTimers.clear();
+  setNoCursorWithIframes(false);
 
   for (const id of EXT_OVERLAY_IDS) {
     document.getElementById(id)?.remove();

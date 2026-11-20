@@ -72,9 +72,6 @@ self.addEventListener("message", (event) => {
     };
     const sourceId =
       event.source && "id" in event.source ? event.source.id : null;
-    if (event.source && typeof event.source.postMessage === "function") {
-      event.source.postMessage(payload);
-    }
     metaPending = { payload, sourceId };
     if (!metaFlush) {
       metaFlush = broadcastMeta();

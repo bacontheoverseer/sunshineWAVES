@@ -853,7 +853,7 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              Browse operation cookie&apos;s homepage, use community chat, and switch custom UI
+              Browse the Operation Cookie dashboard, use community chat, and switch custom UI
               themes with zero banner ads while your membership is active.
             </p>
           </article>
@@ -871,9 +871,8 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              Claim {dailyCoinsAmount.toLocaleString()} bonus Cookie Coins every 24 hours to send
-              playful screen effects to friends, unlock custom chat themes, or stack rewards in the
-              Cookie Shop.
+              Claim 1,000 bonus Cookie Coins every 24 hours to send playful screen effects to
+              friends, unlock custom chat themes, or stack rewards in the Cookie Shop.
             </p>
           </article>
 
@@ -886,11 +885,11 @@ export default function CookieMasterPage() {
                 <i class="fa-solid fa-wand-magic-sparkles"></i>
               </div>
               <h3 class="app-card-title" style={{ fontSize: "14px" }}>
-                soon to come
+                exclusive member badge &amp; perks
               </h3>
             </div>
             <p class="app-card-desc">
-              Unlock the cookie crown badge in chat, get even more custom profile styling, plus
+              Unlock the exclusive Cookie Master crown badge in chat, custom profile styling, plus
               automatic access to new member drops as they roll out.
             </p>
           </article>

@@ -123,40 +123,34 @@ export function decodeUrl(encodedUrl: string): string {
   } catch (_e) {}
 
   try {
-    const selectedBackend = localStorage.getItem("backend") ?? "scramjet";
-    if (selectedBackend === "ultraviolet") {
-      const uvConfig = (
-        window as unknown as Record<string, Record<string, unknown>>
-      )["__uv$config"];
-      const prefix = (uvConfig?.["prefix"] as string | undefined) ?? "/b/u/r/";
+    const urlObject = new URL(encodedUrl, window.location.origin);
+    const uvConfig = (
+      window as unknown as Record<string, Record<string, unknown>>
+    )["__uv$config"];
+    const uvPrefix = (uvConfig?.["prefix"] as string | undefined) ?? "/b/u/r/";
+    if (urlObject.pathname.startsWith(uvPrefix)) {
       const decodeFn =
         (uvConfig?.["decodeUrl"] as ((s: string) => string) | undefined) ??
         decodeURIComponent;
-      const urlObject = new URL(encodedUrl, window.location.origin);
-      if (urlObject.pathname.startsWith(prefix)) {
-        const encodedPart = urlObject.pathname.slice(prefix.length);
-        return decodeFn(encodedPart) + urlObject.search + urlObject.hash;
+      const encodedPart = urlObject.pathname.slice(uvPrefix.length);
+      return decodeFn(encodedPart) + urlObject.search + urlObject.hash;
+    }
+    const sjPrefix = "/b/s/r/";
+    if (urlObject.pathname.startsWith(sjPrefix)) {
+      const pathPart = urlObject.pathname.slice(sjPrefix.length);
+      if (pathPart.startsWith("http://") || pathPart.startsWith("https://")) {
+        return pathPart + urlObject.search + urlObject.hash;
       }
-    } else if (selectedBackend === "scramjet") {
-      const prefix = "/b/s/r/";
-      try {
-        const urlObject = new URL(encodedUrl, window.location.origin);
-        if (urlObject.pathname.startsWith(prefix)) {
-          const pathPart = urlObject.pathname.slice(prefix.length);
-          return decodeURIComponent(
-            pathPart + urlObject.search + urlObject.hash,
-          );
-        }
-      } catch (_e) {}
-      const sj = (
-        window as unknown as Record<
-          string,
-          { decode?: (s: string) => string } | undefined
-        >
-      )["sj"];
-      if (sj && typeof sj.decode === "function") {
-        return sj.decode(encodedUrl);
-      }
+      return decodeURIComponent(pathPart) + urlObject.search + urlObject.hash;
+    }
+    const sj = (
+      window as unknown as Record<
+        string,
+        { decode?: (s: string) => string } | undefined
+      >
+    )["sj"];
+    if (sj && typeof sj.decode === "function" && encodedUrl.includes("/b/s/")) {
+      return sj.decode(encodedUrl);
     }
   } catch (_e) {}
 

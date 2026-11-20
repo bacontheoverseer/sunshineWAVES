@@ -480,9 +480,7 @@ export default function ShopPage() {
     try {
       const meUser = getActiveUser().toLowerCase();
       const targetLower = targetUser.trim().toLowerCase();
-      const isSelf =
-        targetLower === meUser ||
-        targetLower.replace(/[-_]/g, "") === meUser.replace(/[-_]/g, "");
+      const isSelf = targetLower === meUser;
 
       // Send over backend SSE to target user first so we can verify target exists / is online
       let resData: { success?: boolean; delivered?: number; userExists?: boolean; error?: string } | null = null;
@@ -521,17 +519,19 @@ export default function ShopPage() {
         executeTrollAction(item.action, actionData, trollEventId);
       }
 
-      // Broadcast over local channel for instant multi-tab execution
-      try {
-        trollBcRef.current?.postMessage({
-          type: "SHOP_TROLL",
-          trollEventId,
-          targetUsername: targetUser,
-          action: item.action,
-          data: actionData,
-          sender: getActiveUser(),
-        });
-      } catch {}
+      // Broadcast over local channel only when backend SSE did not already deliver it
+      if (!isSelf && (resData?.delivered || 0) === 0) {
+        try {
+          trollBcRef.current?.postMessage({
+            type: "SHOP_TROLL",
+            trollEventId,
+            targetUsername: targetUser,
+            action: item.action,
+            data: actionData,
+            sender: getActiveUser(),
+          });
+        } catch {}
+      }
 
       notifyToast(
         `sent 1x "${item.name}" to @${targetUser} (-${item.cost} cookie coins)`,

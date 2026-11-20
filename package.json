@@ -16,6 +16,7 @@
     "postinstall": "bun others/patch.js"
   },
   "dependencies": {
+    "@fingerprintjs/fingerprintjs": "^4.5.1",
     "@mercuryworkshop/bare-mux": "latest",
     "@mercuryworkshop/epoxy-transport": "latest",
     "@mercuryworkshop/libcurl-transport": "latest",
@@ -29,11 +30,13 @@
     "express-rate-limit": "^7.3.1",
     "helmet": "^7.1.0",
     "lru-cache": "^11.1.0",
+    "pg": "^8.23.1",
     "preact": "^10.29.1",
     "vite": "^8.0.8",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@types/pg": "^8.23.1",
     "eslint": "^9.5.0",
     "javascript-obfuscator": "^5.0.1",
     "prettier": "^3.8.2",

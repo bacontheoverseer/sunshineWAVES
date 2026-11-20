@@ -1,3 +1,9 @@
+import {
+  DEVICE_IDB_NAME,
+  DEVICE_STORAGE_TOKEN_KEY,
+  getDeviceSignature,
+} from "../core/deviceSignature.ts";
+
 interface SyncMeta {
   dirty: boolean;
   last_synced: string | null;
@@ -57,6 +63,21 @@ declare global {
       callback: (progressText: string) => void,
     ) => Promise<void>;
     bypassPreventClosing?: boolean;
+    turnstile?: {
+      render: (
+        container: string | HTMLElement,
+        options: {
+          sitekey: string;
+          theme?: "dark" | "light" | "auto";
+          size?: "normal" | "compact" | "flexible";
+          callback?: (token: string) => void;
+          "expired-callback"?: () => void;
+          "error-callback"?: () => void;
+        },
+      ) => string;
+      reset?: (widgetId?: string) => void;
+      getResponse?: (widgetId?: string) => string | undefined;
+    };
   }
 }
 
@@ -67,7 +88,12 @@ const DELTA_MAX_KEYS = 20;
 const DELTA_FULL_INTERVAL = 10;
 const SYNC_TIMEOUT = 60000;
 
-const SKIP_KEYS = new Set(["auth_user", "auth_token", "sunshine-sync-meta"]);
+const SKIP_KEYS = new Set([
+  "auth_user",
+  "auth_token",
+  "sunshine-sync-meta",
+  DEVICE_STORAGE_TOKEN_KEY,
+]);
 
 const LOADING_SCREEN = `
     <div id="loading-screen" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; z-index: 99999; display: flex; justify-content: center; align-items: center; color: #858585; font-family: 'Lexend', sans-serif;">
@@ -115,6 +141,8 @@ export class CloudSync {
   _checkIntervalId: ReturnType<typeof setInterval> | null;
   _authCheckPromise: Promise<void> | null;
   _lastAuthCheckAt: number;
+  _turnstileToken: string;
+  _turnstileWidgetId: string | null;
 
   constructor() {
     this.user = JSON.parse(localStorage.getItem("auth_user") || "{}");
@@ -141,7 +169,10 @@ export class CloudSync {
     this._checkIntervalId = null;
     this._authCheckPromise = null;
     this._lastAuthCheckAt = 0;
+    this._turnstileToken = "";
+    this._turnstileWidgetId = null;
 
+    void getDeviceSignature();
     this.init();
   }
 
@@ -788,6 +819,8 @@ export class CloudSync {
                         </div>
                         <div id="reg-password-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">8+ chars, 1 number, 1 symbol</div>
 
+                        <div id="reg-turnstile-container" style="margin-top: 10px; display: flex; justify-content: center;"></div>
+
                         <div style="text-align: center;">
                             <button type="submit" class="auth-action-btn" style="width: 65%; margin-top: 15px;">sign up for cloudsync</button>
                             <p style="font-size: 11.5px; color: #ff5555; margin-top: 10px; max-width: 85%; margin-left: auto; margin-right: auto;">
@@ -829,6 +862,50 @@ export class CloudSync {
     document.body.appendChild(modal);
     this.attachModalListeners(modal);
     this.updateModalState();
+    void this.initTurnstileWidget();
+  }
+
+  async initTurnstileWidget(): Promise<void> {
+    try {
+      const res = await fetch("/api/auth/turnstile-config", { cache: "no-store" });
+      if (!res.ok) return;
+      const cfg = (await res.json()) as { enabled?: boolean; siteKey?: string };
+      const siteKey = typeof cfg?.siteKey === "string" ? cfg.siteKey.trim() : "";
+      if (!siteKey) return;
+
+      const mountWidget = () => {
+        const container = document.getElementById("reg-turnstile-container");
+        if (!container || !window.turnstile || this._turnstileWidgetId) return;
+        this._turnstileWidgetId = window.turnstile.render(container, {
+          sitekey: siteKey,
+          theme: "dark",
+          callback: (token: string) => {
+            this._turnstileToken = token || "";
+          },
+          "expired-callback": () => {
+            this._turnstileToken = "";
+          },
+          "error-callback": () => {
+            this._turnstileToken = "";
+          },
+        });
+      };
+
+      if (window.turnstile) {
+        mountWidget();
+        return;
+      }
+
+      if (!document.getElementById("cf-turnstile-script")) {
+        const script = document.createElement("script");
+        script.id = "cf-turnstile-script";
+        script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+        script.async = true;
+        script.defer = true;
+        script.onload = () => mountWidget();
+        document.head.appendChild(script);
+      }
+    } catch {}
   }
 
   attachModalListeners(modal: HTMLElement): void {
@@ -1098,11 +1175,17 @@ export class CloudSync {
       );
 
     try {
+      const deviceSig = await getDeviceSignature();
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          username,
+          password,
+          fingerprint_id: deviceSig.fingerprint_id,
+          storage_token: deviceSig.storage_token,
+        }),
       });
 
       let data: Record<string, unknown>;
@@ -1167,11 +1250,29 @@ export class CloudSync {
       );
 
     try {
+      const deviceSig = await getDeviceSignature();
+      const domTurnstileInput = document.querySelector<HTMLInputElement>(
+        '#register-form [name="cf-turnstile-response"]'
+      );
+      const turnstileToken =
+        this._turnstileToken ||
+        (this._turnstileWidgetId && window.turnstile?.getResponse
+          ? window.turnstile.getResponse(this._turnstileWidgetId) || ""
+          : "") ||
+        domTurnstileInput?.value ||
+        "";
+
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          username,
+          password,
+          fingerprint_id: deviceSig.fingerprint_id,
+          storage_token: deviceSig.storage_token,
+          "cf-turnstile-response": turnstileToken,
+        }),
       });
 
       let data: Record<string, unknown>;
@@ -1366,7 +1467,12 @@ export class CloudSync {
 
   async wipeLocalData(): Promise<void> {
     try {
-      const preserveKeys = ["alertClosed", "sunshineVisited", "sunshineVersion"];
+      const preserveKeys = [
+        "alertClosed",
+        "sunshineVisited",
+        "sunshineVersion",
+        DEVICE_STORAGE_TOKEN_KEY,
+      ];
 
       const preservedData: Record<string, string> = {};
       preserveKeys.forEach((key) => {
@@ -1402,7 +1508,7 @@ export class CloudSync {
       try {
         const dbs = await indexedDB.databases();
         for (const dbInfo of dbs) {
-          if (dbInfo.name) {
+          if (dbInfo.name && dbInfo.name !== DEVICE_IDB_NAME) {
             indexedDB.deleteDatabase(
               dbInfo.name!,
             );
