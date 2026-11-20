@@ -2582,8 +2582,8 @@ function checkDeviceBanForSignup({ fingerprint_id = "", storage_token = "", high
     const fpMatches = bannedDevices.filter((b) => b.fingerprint_id && b.fingerprint_id === fp);
     if (fpMatches.length > 0) {
       const spamFlagged = fpMatches.find((b) => b.high_confidence_spam) || (highConfidenceSpam ? fpMatches[0] : null);
-      if (spamFlagged && highConfidenceSpam) {
-        return { hardBlocked: true, shadowban: false, matchedEntry: spamFlagged };
+      if (spamFlagged || highConfidenceSpam) {
+        return { hardBlocked: true, shadowban: false, matchedEntry: spamFlagged || fpMatches[0] };
       }
       return { hardBlocked: false, shadowban: true, matchedEntry: fpMatches[0] };
     }
@@ -2876,7 +2876,66 @@ async function banUserAndDevice(
 
   const wipedCount = wipeUserChatAndMentions(clean);
 
-  return { bannedDevice, signature: sig, wipedCount };
+  // Also shadowban & invalidate any other non-staff alt accounts sharing this exact storage_token or fingerprint_id
+  const linkedAlts = new Set();
+  if (sig.storage_token || sig.fingerprint_id) {
+    for (const [altKey, altSig] of userDeviceMap.entries()) {
+      if (!altKey || altKey === uk || OWNER_USERNAMES.has(altKey) || staffModerators.has(altKey)) continue;
+      const matchesToken = sig.storage_token && altSig?.storage_token === sig.storage_token;
+      const matchesFp = highConfidenceSpam && sig.fingerprint_id && altSig?.fingerprint_id === sig.fingerprint_id;
+      if (matchesToken || matchesFp) linkedAlts.add(altKey);
+    }
+    if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+      try {
+        const clauses = [];
+        const params = [];
+        if (sig.storage_token) {
+          params.push(sig.storage_token);
+          clauses.push(`last_storage_token = $${params.length}`);
+        }
+        if (highConfidenceSpam && sig.fingerprint_id) {
+          params.push(sig.fingerprint_id);
+          clauses.push(`last_fingerprint_id = $${params.length}`);
+        }
+        if (clauses.length > 0) {
+          const altRes = await aivenDb.query(
+            `SELECT id, username, token_version FROM public.cloudsync_users WHERE ${clauses.join(" OR ")}`,
+            params
+          );
+          for (const r of altRes.rows || []) {
+            const altName = String(r.username || "").trim();
+            const altKey = altName.toLowerCase();
+            if (!altKey || altKey === uk || OWNER_USERNAMES.has(altKey) || staffModerators.has(altKey)) continue;
+            linkedAlts.add(altName);
+            const altNextVer = (Number(r.token_version) || 1) + 1;
+            await aivenDb
+              .query("UPDATE public.cloudsync_users SET token_version = $1, is_shadowbanned = TRUE WHERE id = $2", [
+                altNextVer,
+                Number(r.id),
+              ])
+              .catch(() => {});
+            evictCloudSyncUserRecord({ userId: r.id, username: altName });
+          }
+        }
+      } catch {}
+    }
+    for (const altName of linkedAlts) {
+      setAccountShadowbanned(altName, true, { reason: `linked alt of banned user @${clean}`, recordDevice: false });
+      const altKey = String(altName).toLowerCase();
+      for (const [cid, client] of liveClients.entries()) {
+        const cu = String(client?.verifiedUsername || client?.username || "").trim().toLowerCase();
+        if (cu === altKey) {
+          try {
+            client.res.end();
+          } catch {}
+          liveClients.delete(cid);
+        }
+      }
+      wipeUserChatAndMentions(altName);
+    }
+  }
+
+  return { bannedDevice, signature: sig, wipedCount, linkedAlts: Array.from(linkedAlts) };
 }
 
 function getUserAccountCreatedAtMs(username) {
@@ -3085,6 +3144,55 @@ async function ensureChatMetaReadyAsync() {
           supabaseMetaHydrated = true;
           studioGamesRemoteSyncedAt = Date.now();
           studioStudiosRemoteSyncedAt = Date.now();
+          // Hydrate banned_devices & shadowbanned/device signatures directly from Aiven SQL tables
+          try {
+            const [bdRes, userSigRes] = await Promise.all([
+              aivenDb.query(
+                "SELECT id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at FROM public.banned_devices ORDER BY id DESC LIMIT 1000"
+              ),
+              aivenDb.query(
+                "SELECT username, last_fingerprint_id, last_storage_token, is_shadowbanned FROM public.cloudsync_users WHERE is_shadowbanned = TRUE OR last_fingerprint_id <> '' OR last_storage_token <> ''"
+              ),
+            ]);
+            for (const row of bdRes.rows || []) {
+              const fp = String(row.fingerprint_id || "").trim();
+              const st = String(row.storage_token || "").trim();
+              if (!fp && !st) continue;
+              const exists = bannedDevices.some(
+                (b) => (st && b.storage_token === st) || (fp && b.fingerprint_id === fp && b.banned_username === row.banned_username)
+              );
+              if (!exists) {
+                bannedDevices.push({
+                  id: `pg_${row.id}`,
+                  fingerprint_id: fp,
+                  storage_token: st,
+                  banned_username: String(row.banned_username || ""),
+                  banned_reason: String(row.banned_reason || "banned by staff"),
+                  high_confidence_spam: Boolean(row.high_confidence_spam),
+                  created_at: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ""),
+                });
+              }
+            }
+            for (const u of userSigRes.rows || []) {
+              const uk = String(u.username || "").trim().toLowerCase();
+              if (!uk || OWNER_USERNAMES.has(uk)) continue;
+              if (u.is_shadowbanned && !staffModerators.has(uk)) {
+                shadowbannedUsers.add(uk);
+              }
+              const fp = String(u.last_fingerprint_id || "").trim();
+              const st = String(u.last_storage_token || "").trim();
+              if (fp || st) {
+                const prev = userDeviceMap.get(uk) || {};
+                userDeviceMap.set(uk, {
+                  fingerprint_id: fp || prev.fingerprint_id || "",
+                  storage_token: st || prev.storage_token || "",
+                  updatedAt: prev.updatedAt || Date.now(),
+                });
+              }
+            }
+          } catch (e) {
+            console.warn("Aiven anti-spam SQL hydrate warning:", e?.message);
+          }
           if (locallyDirtyProfileKeys.size > 0) {
             scheduleSupabaseKvSync("user_profiles_v2");
           }
@@ -4189,7 +4297,7 @@ app.get("/api/auth/turnstile-config", (_req, res) => {
 });
 
 app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
@@ -4312,7 +4420,7 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
 });
 
 app.post(["/api/auth/login", "/login"], async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   try {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
@@ -4348,9 +4456,12 @@ app.post(["/api/auth/login", "/login"], async (req, res) => {
         fingerprint_id: fingerprintId,
         storage_token: storageToken,
       });
-      if (loginBanCheck.hardBlocked) {
+      if ((loginBanCheck.hardBlocked || loginBanCheck.shadowban) && !isStaffRoleUser(canonicalUsername)) {
         setAccountShadowbanned(canonicalUsername, true, {
-          reason: "logged in from banned storage_token",
+          reason: loginBanCheck.hardBlocked
+            ? "logged in from banned device"
+            : "logged in from banned device fingerprint",
+          recordDevice: false,
         });
       }
     }
@@ -7661,7 +7772,7 @@ function broadcastChatPayload(channel, eventPayload, extraUsernames = []) {
 }
 
 app.post("/api/chat/send", async (req, res) => {
-  ensureChatMetaLoaded();
+  await ensureChatMetaReadyAsync();
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
     const { message } = req.body || {};
@@ -7884,15 +7995,24 @@ app.post("/api/chat/send", async (req, res) => {
       track.recentTexts.push({ norm: normDup, at: nowMs });
     }
 
-    // Regex keyword spam filter & silent shadowban check
+    // Regex keyword spam filter, device-ban check & silent shadowban check
     const spamPatternMatched = !isStaffSender && sanitizedMsg.text ? matchesSpamFilter(sanitizedMsg.text) : null;
-    const isShadowbanned = !isStaffSender && isAccountShadowbanned(authorKey);
+    const sendDeviceBan = !isStaffSender
+      ? checkDeviceBanForSignup({
+          fingerprint_id: fingerprintId || userDeviceMap.get(authorKey)?.fingerprint_id || "",
+          storage_token: storageToken || userDeviceMap.get(authorKey)?.storage_token || "",
+        })
+      : { hardBlocked: false, shadowban: false };
+    const isDeviceBannedSender = Boolean(sendDeviceBan.hardBlocked || sendDeviceBan.shadowban);
+    const isShadowbanned = !isStaffSender && (isAccountShadowbanned(authorKey) || isDeviceBannedSender);
     if (isShadowbanned || spamPatternMatched || isDuplicateMsg) {
-      if (spamPatternMatched && !isShadowbanned) {
+      if ((spamPatternMatched || isDeviceBannedSender) && !isAccountShadowbanned(authorKey)) {
         setAccountShadowbanned(authorName, true, {
-          reason: `auto-shadowban triggered by spam filter (${spamPatternMatched})`,
-          recordDevice: true,
-          highConfidenceSpam: true,
+          reason: spamPatternMatched
+            ? `auto-shadowban triggered by spam filter (${spamPatternMatched})`
+            : "auto-shadowban triggered by banned device signature on chat send",
+          recordDevice: Boolean(spamPatternMatched),
+          highConfidenceSpam: Boolean(spamPatternMatched),
         });
       }
       // Return 200 OK ONLY to sender's client; do NOT save to public DB or broadcast via SSE
