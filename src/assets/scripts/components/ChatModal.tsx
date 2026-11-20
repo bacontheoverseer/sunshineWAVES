@@ -2722,6 +2722,36 @@ export default function ChatModal() {
           if (target && m.author.toLowerCase() !== target) return true;
           return false;
         });
+      } else if (evtKind === "USER_WIPED" && detail.targetUsername) {
+        const target = String(detail.targetUsername).trim().replace(/^@/, "").toLowerCase();
+        if (target) {
+          const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const mentionRe = new RegExp(`(^|[^a-zA-Z0-9_])@${escaped}(?=$|[^a-zA-Z0-9_])`, "gi");
+          setMessages((prev) => {
+            const next = [];
+            for (const m of prev) {
+              if (!m || String(m.author || "").trim().toLowerCase() === target) continue;
+              let copy = m;
+              if (m.replyTo && String(m.replyTo.author || "").trim().toLowerCase() === target) {
+                copy = { ...copy };
+                delete copy.replyTo;
+              }
+              if (typeof copy.text === "string" && mentionRe.test(copy.text)) {
+                mentionRe.lastIndex = 0;
+                const cleanedText = copy.text
+                  .replace(mentionRe, "$1")
+                  .replace(/[ \t]{2,}/g, " ")
+                  .trim();
+                const hasMedia = Boolean(copy.media || copy.attachment || copy.sticker || copy.image);
+                if (!cleanedText && !hasMedia) continue;
+                copy = { ...copy, text: cleanedText };
+              }
+              next.push(copy);
+            }
+            return next;
+          });
+          setDmPeers((prev) => prev.filter((p) => p.toLowerCase() !== target));
+        }
       } else if (evtKind === "STAFF_UPDATED") {
         if (Array.isArray(detail.staffMods)) setStaffMods(detail.staffMods);
         if (Array.isArray(detail.ownerUsers)) setOwnerUsers(detail.ownerUsers);

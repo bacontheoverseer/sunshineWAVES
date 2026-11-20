@@ -2717,6 +2717,98 @@ function addBannedDeviceRecord({
   return entry;
 }
 
+function wipeUserChatAndMentions(targetUsername) {
+  const clean = String(targetUsername || "").trim().replace(/^@/, "");
+  const uk = clean.toLowerCase();
+  if (!uk || OWNER_USERNAMES.has(uk)) return 0;
+
+  const escaped = uk.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const mentionRe = new RegExp(`(^|[^a-zA-Z0-9_])@${escaped}(?=$|[^a-zA-Z0-9_])`, "gi");
+  let changed = 0;
+
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const m = chatHistory[i];
+    if (!m) continue;
+    if (String(m.author || "").trim().toLowerCase() === uk) {
+      chatHistory.splice(i, 1);
+      changed++;
+      continue;
+    }
+
+    let msgModified = false;
+    if (m.replyTo && String(m.replyTo.author || "").trim().toLowerCase() === uk) {
+      delete m.replyTo;
+      msgModified = true;
+    }
+    if (Array.isArray(m.mentions)) {
+      const nextMentions = m.mentions.filter(
+        (u) => String(u || "").trim().replace(/^@/, "").toLowerCase() !== uk
+      );
+      if (nextMentions.length !== m.mentions.length) {
+        m.mentions = nextMentions;
+        msgModified = true;
+      }
+    }
+    if (m.reactions && typeof m.reactions === "object") {
+      for (const [emoji, users] of Object.entries(m.reactions)) {
+        if (Array.isArray(users)) {
+          const filtered = users.filter((u) => String(u || "").trim().toLowerCase() !== uk);
+          if (filtered.length !== users.length) {
+            if (filtered.length === 0) delete m.reactions[emoji];
+            else m.reactions[emoji] = filtered;
+            msgModified = true;
+          }
+        }
+      }
+    }
+    if (typeof m.text === "string" && mentionRe.test(m.text)) {
+      mentionRe.lastIndex = 0;
+      const cleanedText = m.text
+        .replace(mentionRe, "$1")
+        .replace(/[ \t]{2,}/g, " ")
+        .trim();
+      const hasMedia = Boolean(
+        m.image || m.media || m.attachment || m.sticker || m.embed || m.file
+      );
+      if (!cleanedText && !hasMedia) {
+        chatHistory.splice(i, 1);
+        changed++;
+        continue;
+      }
+      m.text = cleanedText;
+      msgModified = true;
+    }
+    if (msgModified) changed++;
+  }
+
+  if (changed > 0) {
+    persistChatHistory();
+  }
+
+  knownUsers.delete(uk);
+  for (const [hid, hb] of httpHeartbeats.entries()) {
+    const hu = String(hb?.verifiedUsername || hb?.username || "").trim().toLowerCase();
+    if (hu === uk) {
+      httpHeartbeats.delete(hid);
+    }
+  }
+  if (cloudSyncUsersCache.map) {
+    cloudSyncUsersCache.map.delete(uk);
+  }
+  invalidateCloudSyncUsersCache();
+
+  broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+  broadcastToClients(
+    {
+      type: "chat-event",
+      event: "USER_WIPED",
+      targetUsername: clean,
+    },
+    "all"
+  );
+  return changed;
+}
+
 async function banUserAndDevice(
   targetUsername,
   { reason = "device banned by staff", highConfidenceSpam = true } = {}
@@ -2782,7 +2874,9 @@ async function banUserAndDevice(
     }
   }
 
-  return { bannedDevice, signature: sig };
+  const wipedCount = wipeUserChatAndMentions(clean);
+
+  return { bannedDevice, signature: sig, wipedCount };
 }
 
 function getUserAccountCreatedAtMs(username) {
@@ -4463,7 +4557,15 @@ function buildCloudSyncUsersMap(rows) {
     if (r && r.username) {
       const clean = String(r.username).trim();
       const k = clean.toLowerCase();
-      if (!clean || isReservedSystemUsername(clean) || deleted.has(k) || staleUsernameAliases.has(k)) continue;
+      if (
+        !clean ||
+        isReservedSystemUsername(clean) ||
+        deleted.has(k) ||
+        shadowbannedUsers.has(k) ||
+        staleUsernameAliases.has(k)
+      ) {
+        continue;
+      }
       const numId = Number(r.id) || 0;
       if (numId > 0 && keyById.has(numId) && keyById.get(numId) !== k) {
         continue;
@@ -4609,7 +4711,7 @@ async function getCloudSyncUsersMapAsync(forceRefresh = false) {
       if (cloudSyncUsersCache.map) {
         const deleted = getDeletedUsersSet();
         for (const [k, rec] of cloudSyncUsersCache.map.entries()) {
-          if (map.has(k) || deleted.has(k) || staleUsernameAliases.has(k)) continue;
+          if (map.has(k) || deleted.has(k) || shadowbannedUsers.has(k) || staleUsernameAliases.has(k)) continue;
           map.set(k, rec);
         }
       }
@@ -4847,10 +4949,11 @@ function getPresenceSnapshot() {
   const usersLoaded = Boolean(!USE_SUPABASE_CLOUDSYNC || cloudSyncUsersLoaded);
   const deletedSet = getDeletedUsersSet();
 
-  // Prune stale, deleted, aliased, or non-CloudSync entries once directory is loaded
+  // Prune stale, deleted, shadowbanned, aliased, or non-CloudSync entries once directory is loaded
   for (const [k] of knownUsers.entries()) {
     if (
       deletedSet.has(k) ||
+      shadowbannedUsers.has(k) ||
       staleUsernameAliases.has(k) ||
       (usersLoaded && ((csMap.size > 0 && !csMap.has(k)) || (isTemporaryGuestName(k) && !csMap.has(k))))
     ) {
@@ -4880,7 +4983,7 @@ function getPresenceSnapshot() {
     const rawClean = String(c.username || "").trim();
     if (!rawClean) return;
     const rawKey = rawClean.toLowerCase();
-    if (deletedSet.has(rawKey)) return;
+    if (deletedSet.has(rawKey) || shadowbannedUsers.has(rawKey)) return;
 
     const alias = staleUsernameAliases.get(rawKey);
     const sessionUserId = Number(c.userId) || 0;
@@ -4890,7 +4993,7 @@ function getPresenceSnapshot() {
       csRecord = csById.get(sessionUserId);
     }
     const key = csRecord ? csRecord.username.toLowerCase() : rawKey;
-    if (deletedSet.has(key)) return;
+    if (deletedSet.has(key) || shadowbannedUsers.has(key)) return;
 
     const hasVerifiedSession = Boolean(
       c.verifiedUsername && (c.verifiedUsername === rawKey || c.verifiedUsername === key)
@@ -4961,7 +5064,7 @@ function getPresenceSnapshot() {
   const offlineUsers = [];
   const seenOfflineKeys = new Set();
   for (const [key, u] of knownUsers.entries()) {
-    if (deletedSet.has(key) || staleUsernameAliases.has(key)) continue;
+    if (deletedSet.has(key) || shadowbannedUsers.has(key) || staleUsernameAliases.has(key)) continue;
     const csRecord = csMap.get(key);
     if (csRecord?.id > 0 && onlineByAccount.has(`id:${csRecord.id}`)) continue;
     if (onlineUsernameKeys.has(key) || onlineByAccount.has(`name:${key}`)) continue;
@@ -7207,7 +7310,12 @@ app.get(["/api/users", "/api/cloudsync/users"], async (req, res) => {
           id: Number(r.id) || 0,
           username: String(r.username || "").trim(),
           createdAt: r.created_at || r.createdAt || null,
-        })).filter((u) => u.username && !isReservedSystemUsername(u.username));
+        })).filter(
+          (u) =>
+            u.username &&
+            !isReservedSystemUsername(u.username) &&
+            !shadowbannedUsers.has(u.username.toLowerCase())
+        );
         const payload = {
           success: true,
           users,
@@ -8122,6 +8230,8 @@ app.post(["/api/chat/mod/ban-device", "/api/admin/ban-user"], async (req, res) =
         targetUsername,
         details: "removed shadowban & device ban",
       });
+      invalidateCloudSyncUsersCache();
+      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
       return res.json({
         success: true,
         username: targetUsername,
