@@ -10,6 +10,7 @@ export {
   UserAvatar,
   RoleBadge,
   GoatBadge,
+  MasterVerifiedBadge,
   getNameClasses,
   NameplateMediaLayer,
 } from "./ProfileBadgeVisuals.tsx";

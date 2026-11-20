@@ -2943,6 +2943,27 @@ html.chromebook-mode .chat-lastfm-eq > i {
   flex-shrink: 0;
 }
 
+.chat-role-badge.icon-only {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  justify-content: center;
+  font-size: 9px;
+}
+
+.chat-master-verified {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fde047;
+  font-size: 12.5px;
+  line-height: 1;
+  margin-left: 1px;
+  margin-right: 1px;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 3px rgba(250, 204, 21, 0.4));
+}
+
 .chat-role-badge.owner {
   color: #f9a8d4;
   background: linear-gradient(90deg, rgba(168, 85, 247, 0.26), rgba(236, 72, 153, 0.26));

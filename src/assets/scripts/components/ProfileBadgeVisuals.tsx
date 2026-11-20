@@ -81,15 +81,15 @@ export function UserAvatar({
 export function RoleBadge({ role }: { role?: ChatRole | undefined }) {
   if (role === "owner") {
     return (
-      <span class="chat-role-badge owner" title="Site Owner">
-        <i class="fa-solid fa-crown" /> owner
+      <span class="chat-role-badge owner icon-only" title="Site Owner" aria-label="Site Owner">
+        <i class="fa-solid fa-crown" />
       </span>
     );
   }
   if (role === "mod") {
     return (
-      <span class="chat-role-badge mod" title="Chat Staff Moderator">
-        <i class="fa-solid fa-shield-halved" /> mod
+      <span class="chat-role-badge mod icon-only" title="Chat Staff Moderator" aria-label="Moderator">
+        <i class="fa-solid fa-shield-halved" />
       </span>
     );
   }
@@ -101,10 +101,21 @@ export function GoatBadge({ isGoat }: { isGoat?: boolean | undefined }) {
   if (!isGoat) return null;
   return (
     <span
-      class="chat-role-badge goat"
+      class="chat-role-badge goat icon-only"
       title="GOAT — Awarded by staff for suggesting a great feature or idea"
+      aria-label="GOAT"
     >
-      <i class="fa-solid fa-trophy" /> GOAT
+      <i class="fa-solid fa-trophy" />
+    </span>
+  );
+}
+
+/** Gold verified checkmark for active Cookie Master members. */
+export function MasterVerifiedBadge({ isCookieMaster }: { isCookieMaster?: boolean | undefined }) {
+  if (!isCookieMaster) return null;
+  return (
+    <span class="chat-master-verified" title="Cookie Master" aria-label="Cookie Master">
+      <i class="fa-solid fa-circle-check" />
     </span>
   );
 }

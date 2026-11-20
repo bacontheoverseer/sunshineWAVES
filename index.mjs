@@ -3147,14 +3147,28 @@ async function ensureChatMetaReadyAsync() {
           studioStudiosRemoteSyncedAt = Date.now();
           // Hydrate banned_devices & shadowbanned/device signatures directly from Aiven SQL tables
           try {
-            const [bdRes, userSigRes] = await Promise.all([
+            const [bdRes, userSigRes, cmSubsRes] = await Promise.all([
               aivenDb.query(
                 "SELECT id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at FROM public.banned_devices ORDER BY id DESC LIMIT 1000"
               ),
               aivenDb.query(
                 "SELECT username, last_fingerprint_id, last_storage_token, is_shadowbanned FROM public.cloudsync_users WHERE is_shadowbanned = TRUE OR last_fingerprint_id <> '' OR last_storage_token <> ''"
               ),
+              aivenDb
+                .query(
+                  "SELECT subscription_id, checkout_session_id, invoice_id, customer_id, email_lower, user_name_lower, custom_username_lower, claimed_username_lower, price_id, product_id, tier_name, status, managed_payments, customer_portal_url, amount, verified_at, expires_at, cancelled_at FROM public.stripe_subscriptions WHERE expires_at > NOW() ORDER BY expires_at DESC LIMIT 500"
+                )
+                .catch(() => ({ rows: [] })),
             ]);
+            if (Array.isArray(cmSubsRes?.rows) && cmSubsRes.rows.length > 0) {
+              const existingSubs = loadStripeSubscriptions();
+              const byId = new Map(existingSubs.map((s) => [s.subscriptionId, s]));
+              for (const row of cmSubsRes.rows) {
+                const hydrated = hydrateStripeRow(row);
+                byId.set(hydrated.subscriptionId, hydrated);
+              }
+              saveStripeSubscriptions(Array.from(byId.values()));
+            }
             for (const row of bdRes.rows || []) {
               const fp = String(row.fingerprint_id || "").trim();
               const st = String(row.storage_token || "").trim();
@@ -5215,6 +5229,7 @@ function getPresenceSnapshot() {
     staffMods: getCanonicalStaffMods(csMap),
     ownerUsers: getCanonicalOwnerUsers(csMap),
     goatUsers: getCanonicalGoatUsers(csMap),
+    cookieMasterUsers: getActiveCookieMasterUsersList(),
   };
 }
 
@@ -7675,6 +7690,7 @@ app.get("/api/chat/state", async (req, res) => {
     staffMods: getCanonicalStaffMods(csMap),
     ownerUsers: getCanonicalOwnerUsers(csMap),
     goatUsers: presence.goatUsers,
+    cookieMasterUsers: presence.cookieMasterUsers || [],
     selfRole,
     selfTimeout,
     selfCreatedAt: authUser ? getUserAccountCreatedAtMs(authUser.username) : 0,
@@ -10189,6 +10205,26 @@ function loadStripeSubscriptions() {
   return stripeSubscriptionsCache;
 }
 
+function getActiveCookieMasterUsersList() {
+  const now = Date.now();
+  const seen = new Set();
+  const out = [];
+  try {
+    const subs = loadStripeSubscriptions();
+    for (const s of subs) {
+      if (!isStripeRecordActive(s, now)) continue;
+      for (const candidate of [s.claimedUsernameLower, s.customUsernameLower, s.userNameLower]) {
+        const clean = String(candidate || "").trim().toLowerCase();
+        if (clean && !seen.has(clean)) {
+          seen.add(clean);
+          out.push(clean);
+        }
+      }
+    }
+  } catch {}
+  return out;
+}
+
 function saveStripeSubscriptions(list) {
   stripeSubscriptionsCache = list;
   try {
@@ -10298,6 +10334,9 @@ async function persistStripeSubscriptionRecord(record) {
   }
   saveStripeSubscriptions(list);
   stripeSubscriptionLookupCache.clear();
+  try {
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+  } catch {}
 
   if (USE_SUPABASE_CLOUDSYNC && supabaseHasStripeTable !== false) {
     try {

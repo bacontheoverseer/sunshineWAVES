@@ -13,7 +13,13 @@ import {
   isClientAutoIdle,
   isLiveStreamConnected,
 } from "../core/liveClient.ts";
-import { awardChatMessageCoins, formatPlayTime, getCookieCoins, spendCookieCoins } from "../core/cookieCoins.ts";
+import {
+  awardChatMessageCoins,
+  formatPlayTime,
+  getCookieCoins,
+  isCookieMasterActive,
+  spendCookieCoins,
+} from "../core/cookieCoins.ts";
 import { getDeviceSignature } from "../core/deviceSignature.ts";
 import {
   ChatRole,
@@ -42,6 +48,7 @@ import EmojiPicker, { getJumboEmojiCount } from "./EmojiPicker.tsx";
 import GroupChatModal, { ChatGroupDef } from "./GroupChatModal.tsx";
 import {
   GoatBadge,
+  MasterVerifiedBadge,
   NameplateMediaLayer,
   ProfileEffectLayer,
   ProfileFrameLayer,
@@ -413,6 +420,7 @@ interface ChatMessageRowProps {
   safeFallbackColor: string;
   authorRole: ChatRole;
   isAuthorGoat: boolean;
+  isAuthorCookieMaster?: boolean;
   canDeleteMsg: boolean;
   displayName: string;
   replyAuthorLabel: string;
@@ -459,6 +467,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   safeFallbackColor,
   authorRole,
   isAuthorGoat,
+  isAuthorCookieMaster,
   canDeleteMsg,
   displayName,
   replyAuthorLabel,
@@ -589,6 +598,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
               >
                 {displayName}
               </span>
+              <MasterVerifiedBadge isCookieMaster={isAuthorCookieMaster} />
               <RoleBadge role={authorRole} />
               <GoatBadge isGoat={isAuthorGoat} />
               {msgCustom?.customTag && (
@@ -849,6 +859,7 @@ interface ChatUserRowProps {
   offline?: boolean;
   blocked: boolean;
   isGoat: boolean;
+  isCookieMaster?: boolean;
   dotStatus: "online" | "idle" | "dnd";
   playingDurationLabel: string;
   onOpenUserProfile: (username: string) => void;
@@ -861,6 +872,7 @@ const ChatUserRow = memo(function ChatUserRow({
   offline = false,
   blocked,
   isGoat,
+  isCookieMaster,
   dotStatus,
   playingDurationLabel,
   onOpenUserProfile,
@@ -925,6 +937,7 @@ const ChatUserRow = memo(function ChatUserRow({
           >
             {displayName}
           </span>
+          <MasterVerifiedBadge isCookieMaster={isCookieMaster} />
           <RoleBadge role={u.role} />
           <GoatBadge isGoat={isGoat} />
           {!offline && u.isTimedOut && (
@@ -1130,6 +1143,8 @@ export default function ChatModal() {
   const ownerUsersRef = useRef<string[]>([]);
   ownerUsersRef.current = ownerUsers;
   const [goatUsers, setGoatUsers] = useState<string[]>([]);
+  const [cookieMasterUsers, setCookieMasterUsers] = useState<string[]>([]);
+  const [selfIsCookieMaster, setSelfIsCookieMaster] = useState<boolean>(() => isCookieMasterActive());
   const [selfRole, setSelfRole] = useState<ChatRole>("member");
   const [selfTimeout, setSelfTimeout] = useState<{ until: number; reason?: string } | null>(null);
   const [selfIdle, setSelfIdle] = useState<boolean>(() => isClientAutoIdle());
@@ -2556,6 +2571,9 @@ export default function ChatModal() {
           if (Array.isArray(data.goatUsers)) {
             setGoatUsers(data.goatUsers);
           }
+          if (Array.isArray(data.cookieMasterUsers)) {
+            setCookieMasterUsers(data.cookieMasterUsers);
+          }
           if (typeof data.selfRole === "string") {
             setSelfRole(data.selfRole as ChatRole);
           } else {
@@ -2898,6 +2916,9 @@ export default function ChatModal() {
       if (Array.isArray(detail.goatUsers)) {
         setGoatUsers(detail.goatUsers);
       }
+      if (Array.isArray(detail.cookieMasterUsers)) {
+        setCookieMasterUsers(detail.cookieMasterUsers);
+      }
       if (Array.isArray(detail.registeredUsers) && (usersLoaded || detail.registeredUsers.length > 0)) {
         setRegisteredCloudSyncUsers(detail.registeredUsers);
       }
@@ -3178,12 +3199,18 @@ export default function ChatModal() {
     return () => window.clearTimeout(timer);
   }, [isOpen, showGifPicker, gifSearch, fetchKlipyGifs]);
 
-  // Sync local Cookie Coins balance for the Gift Picker
+  // Sync local Cookie Coins balance & Cookie Master status
   useEffect(() => {
     const syncCoins = () => setMyCoinBalance(getCookieCoins());
+    const syncMaster = () => setSelfIsCookieMaster(isCookieMasterActive());
     syncCoins();
+    syncMaster();
     window.addEventListener("cookie-coins-updated", syncCoins);
-    return () => window.removeEventListener("cookie-coins-updated", syncCoins);
+    window.addEventListener("cookie-master-changed", syncMaster);
+    return () => {
+      window.removeEventListener("cookie-coins-updated", syncCoins);
+      window.removeEventListener("cookie-master-changed", syncMaster);
+    };
   }, []);
 
   // Close GIF, Emoji, Gift, or Reaction picker when clicking outside
@@ -4021,6 +4048,20 @@ export default function ChatModal() {
   const isUserGoat = useCallback(
     (username?: string | null) => Boolean(username && goatSet.has(username.toLowerCase())),
     [goatSet]
+  );
+
+  const cookieMasterSet = useMemo(() => {
+    const set = new Set(cookieMasterUsers.map((u) => u.toLowerCase()));
+    if (selfIsCookieMaster && cloudUser) {
+      set.add(cloudUser.trim().toLowerCase());
+    }
+    return set;
+  }, [cookieMasterUsers, selfIsCookieMaster, cloudUser]);
+
+  const isUserCookieMaster = useCallback(
+    (username?: string | null) =>
+      Boolean(username && cookieMasterSet.has(username.trim().toLowerCase())),
+    [cookieMasterSet]
   );
 
   const handleToggleGoatUser = useCallback(
@@ -5027,6 +5068,7 @@ export default function ChatModal() {
                     <span class={`chat-sidebar-username ${getNameClasses(editingCustom)}`}>
                       {editingCustom.displayName || cloudUser}
                     </span>
+                    <MasterVerifiedBadge isCookieMaster={isUserCookieMaster(cloudUser)} />
                     <RoleBadge role={selfRole} />
                     <GoatBadge isGoat={isUserGoat(cloudUser)} />
                   </div>
@@ -5407,6 +5449,7 @@ export default function ChatModal() {
                           <span class={getNameClasses(vMeta?.customization)}>
                             {vMeta?.customization?.displayName || p.username}
                           </span>
+                          <MasterVerifiedBadge isCookieMaster={isUserCookieMaster(p.username)} />
                           <RoleBadge role={vMeta?.role} />
                           <GoatBadge isGoat={isUserGoat(p.username)} />
                           {isMe && <span class="chat-you-pill">you</span>}
@@ -5603,6 +5646,7 @@ export default function ChatModal() {
                     safeFallbackColor={safeFallbackColor}
                     authorRole={authorRole}
                     isAuthorGoat={isUserGoat(msg.author)}
+                    isAuthorCookieMaster={isUserCookieMaster(msg.author)}
                     canDeleteMsg={canDeleteMsg}
                     displayName={displayName}
                     replyAuthorLabel={replyAuthorLabel}
@@ -6137,6 +6181,7 @@ export default function ChatModal() {
                     user={u}
                     blocked={blocked}
                     isGoat={isUserGoat(u.username)}
+                    isCookieMaster={isUserCookieMaster(u.username)}
                     dotStatus={dotStatus}
                     playingDurationLabel={playingDurationLabel}
                     onOpenUserProfile={openUserProfile}
@@ -6190,6 +6235,7 @@ export default function ChatModal() {
                     offline
                     blocked={isUserBlocked(u.username)}
                     isGoat={isUserGoat(u.username)}
+                    isCookieMaster={isUserCookieMaster(u.username)}
                     dotStatus="idle"
                     playingDurationLabel=""
                     onOpenUserProfile={openUserProfile}
@@ -6418,6 +6464,7 @@ export default function ChatModal() {
                           <h3 class={`chat-profile-username ${getNameClasses(custom)}`}>
                             {displayLabel}
                           </h3>
+                          <MasterVerifiedBadge isCookieMaster={isUserCookieMaster(targetName)} />
                           <RoleBadge role={targetRole} />
                           <GoatBadge isGoat={targetIsGoat} />
                         </div>
