@@ -5824,7 +5824,7 @@ app.post("/api/chat/gift", async (req, res) => {
       const nextExpiresAt = baseExpiry + THIRTY_DAYS_MS;
       const giftSubId = `gift_cm_${now}_${Math.random().toString(36).slice(2, 8)}`;
 
-      await upsertStripeSubscription({
+      await persistStripeSubscriptionRecord({
         subscriptionId: giftSubId,
         checkoutSessionId: giftSubId,
         invoiceId: giftSubId,
@@ -5868,8 +5868,14 @@ app.post("/api/chat/gift", async (req, res) => {
           channel,
           author: senderName,
           role: getUserChatRole(senderName),
-          text: `🎁 gifted 1 month of Cookie Master to @${canonicalRecipient}!${note ? ` — "${note}"` : ""}`,
-          timestamp: now,
+          text: "",
+          gift: {
+            type: "cookie_master",
+            from: senderName,
+            to: canonicalRecipient,
+            note,
+          },
+          timestamp: new Date(now).toISOString(),
           customization: authorProf?.customization || null,
           isGoat: goatUsers.has(senderKey),
         };
@@ -5908,8 +5914,15 @@ app.post("/api/chat/gift", async (req, res) => {
         channel,
         author: senderName,
         role: getUserChatRole(senderName),
-        text: `🎁 gifted ${amount.toLocaleString()} Cookie Coins to @${canonicalRecipient}!${note ? ` — "${note}"` : ""}`,
-        timestamp: now,
+        text: "",
+        gift: {
+          type: "coins",
+          from: senderName,
+          to: canonicalRecipient,
+          amount,
+          note,
+        },
+        timestamp: new Date(now).toISOString(),
         customization: authorProf?.customization || null,
         isGoat: goatUsers.has(senderKey),
       };
@@ -11100,7 +11113,7 @@ app.post("/api/cookie-master/buy-with-coins", async (req, res) => {
       const baseExpiry = existing && existing.expiresAt > now ? existing.expiresAt : now;
       const nextExpiresAt = baseExpiry + THIRTY_DAYS_MS;
 
-      await upsertStripeSubscription({
+      await persistStripeSubscriptionRecord({
         subscriptionId: subId,
         checkoutSessionId: subId,
         invoiceId: subId,

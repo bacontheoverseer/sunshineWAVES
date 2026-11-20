@@ -38,12 +38,12 @@ export const COOKIE_MASTER_COIN_PRICE = 5000;
 const DAILY_CLAIM_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HOURLY_DROP_KEY = "cookie_hourly_drop_at_v1";
 const HOURLY_DROP_INTERVAL_MS = 60 * 60 * 1000;
-export const HOURLY_DROP_COINS = 150;
+export const HOURLY_DROP_COINS = 75;
 const DAILY_STREAK_KEY = "cookie_daily_streak_v1";
 const CLICKER_BONUS_KEY = "cookie_clicker_bonus_v1";
-const CLICKER_WINDOW_MS = 15 * 60 * 1000;
-const CLICKER_MAX_BURSTS = 15;
-export const CLICKER_BURST_COINS = 20;
+const CLICKER_WINDOW_MS = 30 * 60 * 1000;
+const CLICKER_MAX_BURSTS = 8;
+export const CLICKER_BURST_COINS = 10;
 let lastChatCoinAwardAt = 0;
 
 export interface CookieMasterState {
@@ -318,9 +318,9 @@ export function spendCookieCoins(cost: number): boolean {
 
 export function awardChatMessageCoins(): number {
   const now = Date.now();
-  if (now - lastChatCoinAwardAt < 15000) return 0;
+  if (now - lastChatCoinAwardAt < 30000) return 0;
   lastChatCoinAwardAt = now;
-  const amount = 10;
+  const amount = 5;
   setCookieCoins(getCookieCoins() + amount);
   return amount;
 }
@@ -346,7 +346,7 @@ export function claimHourlyCookieDrop(): { claimed: boolean; amount: number; rem
 }
 
 export function getDailyStreakState(): { streak: number; remainingMs: number; nextReward: number } {
-  const rewards = [250, 400, 550, 700, 1000];
+  const rewards = [100, 150, 225, 325, 500];
   try {
     const raw = JSON.parse(localStorage.getItem(DAILY_STREAK_KEY) || "{}");
     const lastAt = Number(raw?.lastAt || 0);
@@ -359,7 +359,7 @@ export function getDailyStreakState(): { streak: number; remainingMs: number; ne
     const nextIdx = Math.min(rewards.length - 1, streak);
     return { streak, remainingMs, nextReward: rewards[nextIdx] };
   } catch {
-    return { streak: 0, remainingMs: 0, nextReward: 250 };
+    return { streak: 0, remainingMs: 0, nextReward: 100 };
   }
 }
 

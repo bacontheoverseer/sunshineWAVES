@@ -540,7 +540,7 @@ export default function CookieMasterPage() {
       return;
     }
     const nextClicks = clickCount + 1;
-    if (nextClicks >= 10) {
+    if (nextClicks >= 15) {
       setClickCount(0);
       const res = claimCookieClickerBurst();
       if (res.claimed) {
@@ -964,7 +964,7 @@ export default function CookieMasterPage() {
             <span>earn cookie coins faster</span>
           </div>
           <span style={{ fontSize: "11.5px", color: "var(--color-sublabel)", textTransform: "lowercase" }}>
-            +25 coins/min playing games (+75 every 5 min) · +10 coins chatting
+            +10 coins/min playing games (+25 every 5 min) · +5 coins chatting
           </span>
         </div>
 
@@ -1023,7 +1023,7 @@ export default function CookieMasterPage() {
                 </h3>
               </div>
               <p class="app-card-desc">
-                check in daily for +250 up to +1,000 bonus coins per day!
+                check in daily for +100 up to +500 bonus coins per day!
               </p>
             </div>
             <button
@@ -1055,11 +1055,11 @@ export default function CookieMasterPage() {
                   <i class="fa-solid fa-cookie-bite" style={{ color: "#f59e0b" }}></i>
                 </div>
                 <h3 class="app-card-title" style={{ fontSize: "13.5px" }}>
-                  cookie clicker (+{CLICKER_BURST_COINS} / 10 taps)
+                  cookie clicker (+{CLICKER_BURST_COINS} / 15 taps)
                 </h3>
               </div>
               <p class="app-card-desc">
-                tap to bake coins fast! {clickerState.remainingBursts} bursts left this 15m ({clickCount}/10).
+                tap to bake coins! {clickerState.remainingBursts} bursts left this 30m ({clickCount}/15).
               </p>
             </div>
             <button
@@ -1078,7 +1078,7 @@ export default function CookieMasterPage() {
               <span>
                 {clickerState.remainingBursts <= 0
                   ? `recharges in ${formatDurationCompact(clickerState.resetInMs)}`
-                  : `tap cookie (${clickCount}/10)`}
+                  : `tap cookie (${clickCount}/15)`}
               </span>
             </button>
           </article>

@@ -66,6 +66,14 @@ interface ChatReplyRef {
   hasImage?: boolean;
 }
 
+interface ChatGiftPayload {
+  type: "coins" | "cookie_master";
+  from: string;
+  to: string;
+  amount?: number;
+  note?: string;
+}
+
 interface ChatMessage {
   id: string;
   author: string;
@@ -73,6 +81,7 @@ interface ChatMessage {
   role?: ChatRole;
   customization?: ProfileCustomization | null;
   text: string;
+  gift?: ChatGiftPayload | null;
   gifUrl?: string;
   gifTitle?: string;
   imageUrl?: string;
@@ -646,6 +655,36 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 </div>
               );
             })()
+          )}
+          {msg.gift && (
+            <div class={`chat-gift-card${msg.gift.type === "cookie_master" ? " is-master" : ""}`}>
+              <div class="chat-gift-card-icon">
+                <i class="fa-solid fa-gift"></i>
+              </div>
+              <div class="chat-gift-card-body">
+                <div class="chat-gift-card-route">
+                  <span class="chat-gift-card-user">@{msg.gift.from}</span>
+                  <i class="fa-solid fa-arrow-right chat-gift-card-arrow"></i>
+                  <span class="chat-gift-card-user">@{msg.gift.to}</span>
+                </div>
+                <div class="chat-gift-card-amount">
+                  {msg.gift.type === "cookie_master" ? (
+                    <>
+                      <i class="fa-solid fa-crown"></i> 1 month of cookie master
+                    </>
+                  ) : (
+                    <>
+                      <i class="fa-solid fa-coins"></i> {(Number(msg.gift.amount) || 0).toLocaleString()} cookie coins
+                    </>
+                  )}
+                </div>
+                {msg.gift.note && (
+                  <div class="chat-gift-card-note">
+                    <em>&ldquo;{msg.gift.note}&rdquo;</em>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
           {isAllowedKlipyUrl(msg.gifUrl) && (
             <div class="chat-entry-gif-wrap">
@@ -2480,7 +2519,15 @@ export default function ChatModal() {
                   (isDm || isMention) &&
                   (!isOpenRef.current || activeChannelRef.current !== msg.channel)
                 ) {
-                  const toastPreview = msg.text.trim() || (msg.gifUrl ? "[gif]" : "");
+                  const toastPreview =
+          msg.text.trim() ||
+          (msg.gift
+            ? msg.gift.type === "cookie_master"
+              ? `gifted 1 month of cookie master to @${msg.gift.to}`
+              : `gifted ${(Number(msg.gift.amount) || 0).toLocaleString()} coins to @${msg.gift.to}`
+            : msg.gifUrl
+              ? "[gif]"
+              : "");
                   notifyDmOrMentionToast(msg.author, toastPreview, isDm, () => {
                     setActiveChannel(msg.channel);
                     setIsOpen(true);

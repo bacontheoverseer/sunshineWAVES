@@ -644,12 +644,12 @@ export default function GameSpaceModal() {
         });
       }
 
-      // Every 60 seconds of active play, award +25 Cookie Coins (+50 bonus every 5 minutes)!
+      // Every 60 seconds of active play, award +10 Cookie Coins (+25 on 5-minute streak)!
       if (playSeconds % 60 === 0) {
         if (playSeconds % 300 === 0) {
-          addCookieCoins(75, `5-min streak playing ${gName}`);
+          addCookieCoins(25, `5-min streak playing ${gName}`);
         } else {
-          addCookieCoins(25, `playing ${gName}`);
+          addCookieCoins(10, `playing ${gName}`);
         }
       }
     }, 1000);
