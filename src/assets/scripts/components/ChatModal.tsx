@@ -13,7 +13,7 @@ import {
   isClientAutoIdle,
   isLiveStreamConnected,
 } from "../core/liveClient.ts";
-import { formatPlayTime, getCookieCoins, spendCookieCoins } from "../core/cookieCoins.ts";
+import { awardChatMessageCoins, formatPlayTime, getCookieCoins, spendCookieCoins } from "../core/cookieCoins.ts";
 import { getDeviceSignature } from "../core/deviceSignature.ts";
 import {
   ChatRole,
@@ -4035,6 +4035,7 @@ export default function ChatModal() {
       return;
     }
     await sendChatMessage(inputText);
+    awardChatMessageCoins();
   };
 
   const handleSendGif = async (gif: KlipyGifItem) => {

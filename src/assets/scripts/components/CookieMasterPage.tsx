@@ -1,17 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { showHomeView } from "../state/store.ts";
 import {
+  CLICKER_BURST_COINS,
+  COOKIE_MASTER_COIN_PRICE,
   COOKIE_MASTER_DAILY_COINS,
   CookieMasterState,
+  HOURLY_DROP_COINS,
   canClaimDailyMasterCoins,
+  claimCookieClickerBurst,
   claimDailyMasterCoins,
+  claimDailyStreakBonus,
+  claimHourlyCookieDrop,
   formatDurationCompact,
   getActiveUser,
+  getClickerBonusState,
   getCookieCoins,
   getCookieMasterState,
+  getDailyStreakState,
+  getHourlyDropRemainingMs,
   getNextDailyClaimRemainingMs,
   isCookieMasterActive,
   setCookieMasterState,
+  spendCookieCoins,
   syncAdFreeDomClass,
 } from "../core/cookieCoins.ts";
 
@@ -77,6 +87,11 @@ export default function CookieMasterPage() {
   const [lookupInput, setLookupInput] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [claiming, setClaiming] = useState(false);
+  const [buyingWithCoins, setBuyingWithCoins] = useState(false);
+  const [hourlyRemMs, setHourlyRemMs] = useState<number>(() => getHourlyDropRemainingMs());
+  const [streakState, setStreakState] = useState(() => getDailyStreakState());
+  const [clickerState, setClickerState] = useState(() => getClickerBonusState());
+  const [clickCount, setClickCount] = useState(0);
   const [showCancelPanel, setShowCancelPanel] = useState(false);
   const [awaitingCheckout, setAwaitingCheckout] = useState(false);
   const [claimRemainingMs, setClaimRemainingMs] = useState<number>(() =>
@@ -92,6 +107,9 @@ export default function CookieMasterPage() {
     setCoins(getCookieCoins());
     setMasterState(getCookieMasterState());
     setClaimRemainingMs(getNextDailyClaimRemainingMs());
+    setHourlyRemMs(getHourlyDropRemainingMs());
+    setStreakState(getDailyStreakState());
+    setClickerState(getClickerBonusState());
   }, []);
 
   const hide = useCallback(() => {
@@ -448,6 +466,92 @@ export default function CookieMasterPage() {
     }
   };
 
+  const handleBuyWithCoins = async () => {
+    if (buyingWithCoins) return;
+    if (getCookieCoins() < COOKIE_MASTER_COIN_PRICE) {
+      const needed = COOKIE_MASTER_COIN_PRICE - getCookieCoins();
+      notifyToast(`need ${needed.toLocaleString()} more cookie coins to unlock cookie master`, "error");
+      return;
+    }
+    setBuyingWithCoins(true);
+    try {
+      const token = localStorage.getItem("auth_token") || "";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const res = await fetch("/api/cookie-master/buy-with-coins", {
+        method: "POST",
+        credentials: "include",
+        headers,
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notifyToast(data?.error || "could not activate cookie master right now", "error");
+        return;
+      }
+
+      if (!spendCookieCoins(COOKIE_MASTER_COIN_PRICE)) {
+        notifyToast("not enough cookie coins", "error");
+        return;
+      }
+
+      const prev = getCookieMasterState();
+      setCookieMasterState({
+        active: true,
+        licenseKey: String(data.subscriptionId || prev?.licenseKey || "coins"),
+        subscriptionId: typeof data.subscriptionId === "string" ? data.subscriptionId : prev?.subscriptionId,
+        status: "active",
+        email: prev?.email,
+        verifiedAt: Date.now(),
+        expiresAt: Number(data.expiresAt) || Date.now() + 30 * 24 * 60 * 60 * 1000,
+        cancelledAt: null,
+        lastDailyClaimAt: prev?.lastDailyClaimAt || 0,
+      });
+      refreshState();
+      notifyToast("cookie master unlocked for 30 days! enjoy ad-free mode & daily coins", "success");
+    } catch {
+      notifyToast("failed to activate cookie master — try again", "error");
+    } finally {
+      setBuyingWithCoins(false);
+    }
+  };
+
+  const handleClaimHourly = () => {
+    const res = claimHourlyCookieDrop();
+    if (!res.claimed) {
+      notifyToast(`hourly cookie jar ready in ${formatDurationCompact(res.remainingMs)}`, "info");
+    }
+    refreshState();
+  };
+
+  const handleClaimStreak = () => {
+    const res = claimDailyStreakBonus();
+    if (!res.claimed) {
+      notifyToast(`next check-in ready in ${formatDurationCompact(res.remainingMs)}`, "info");
+    }
+    refreshState();
+  };
+
+  const handleClickerTap = () => {
+    const st = getClickerBonusState();
+    if (st.remainingBursts <= 0) {
+      notifyToast(`cookie clicker recharges in ${formatDurationCompact(st.resetInMs)}`, "info");
+      setClickerState(st);
+      return;
+    }
+    const nextClicks = clickCount + 1;
+    if (nextClicks >= 10) {
+      setClickCount(0);
+      const res = claimCookieClickerBurst();
+      if (res.claimed) {
+        notifyToast(`+${res.amount} cookie coins · cookie clicker!`, "success");
+      }
+      refreshState();
+    } else {
+      setClickCount(nextClicks);
+    }
+  };
+
   const handleActivateSubmit = (e: Event) => {
     e.preventDefault();
     void verifyMembership(lookupInput);
@@ -555,7 +659,7 @@ export default function CookieMasterPage() {
             <span>cookie master</span>
           </div>
           <span class="app-proxy-badge" style={{ fontSize: "11px" }}>
-            ${config.priceMonthly} / month
+            {COOKIE_MASTER_COIN_PRICE.toLocaleString()} coins / month
           </span>
         </div>
 
@@ -594,33 +698,7 @@ export default function CookieMasterPage() {
         </div>
       </div>
 
-      {config.testMode && (
-        <div
-          id="cookie-master-test-banner"
-          role="alert"
-          class="studio-panel"
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            gap: "12px",
-            padding: "13px 16px",
-            borderRadius: "12px",
-            background:
-              "linear-gradient(90deg, rgba(36, 25, 8, 0.96) 0%, rgba(24, 19, 10, 0.96) 100%)",
-            border: "1px solid rgba(245, 158, 11, 0.55)",
-            color: "#fef3c7",
-            fontSize: "13px",
-            fontWeight: 700,
-            letterSpacing: "0.02em",
-            lineHeight: 1.4,
-          }}
-        >
-          <i class="fa-solid fa-triangle-exclamation" style={{ color: "#fbbf24", fontSize: "16px", flexShrink: 0 }}></i>
-          <span>TEST MODE - PLEASE DO NOT MAKE PAYMENTS. THEY WILL NOT GO THROUGH</span>
-        </div>
-      )}
-
-      {/* Product Hero Card (Native Operation Cookie Product Page + Stripe Managed Payments Checkout) */}
+      {/* Product Hero Card (Cookie Coins Monthly Pass) */}
       <div
         class="studio-panel"
         style={{
@@ -689,12 +767,10 @@ export default function CookieMasterPage() {
                 maxWidth: "560px",
               }}
             >
-              upgrade your account with one monthly membership powered by stripe managed payments.
+              unlock 30 days of cookie master right now using {COOKIE_MASTER_COIN_PRICE.toLocaleString()} cookie coins — no card needed!
               {activeUsername !== "guest"
-                ? ` your cloudsync account (@${activeUsername}) is linked automatically during checkout,`
-                : ""}{" "}
-              or verify anytime below using your billing email, subscription id (sub_...), or
-              checkout session id (cs_...).
+                ? ` synced directly to your cloudsync account (@${activeUsername}).`
+                : " sign in to cloudsync to sync your pass across devices."}
             </p>
           </div>
 
@@ -711,18 +787,19 @@ export default function CookieMasterPage() {
               border: "1px solid var(--bg-surface-10)",
             }}
           >
-            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
               <span
                 style={{
-                  fontSize: "28px",
+                  fontSize: "24px",
                   fontWeight: 700,
                   color: "var(--text-primary)",
                 }}
               >
-                ${config.priceMonthly}
+                <i class="fa-solid fa-coins" style={{ color: "#facc15", marginRight: "6px", fontSize: "20px" }}></i>
+                {COOKIE_MASTER_COIN_PRICE.toLocaleString()}
                 <span
                   style={{
-                    fontSize: "13px",
+                    fontSize: "12.5px",
                     fontWeight: 400,
                     color: "var(--color-sublabel)",
                     marginLeft: "4px",
@@ -731,52 +808,35 @@ export default function CookieMasterPage() {
                   / month
                 </span>
               </span>
-              <span class="app-proxy-badge">cancel anytime</span>
+              <span class="app-proxy-badge">30-day pass</span>
             </div>
 
-            {isActiveMaster ? (
-              <button
-                type="button"
-                onClick={() => void handleOpenBillingPortal()}
-                class="apps-custom-btn"
-                style={{
-                  justifyContent: "center",
-                  padding: "12px 16px",
-                  fontSize: "13.5px",
-                  fontWeight: 600,
-                  textAlign: "center",
-                }}
-              >
-                <i class="fa-solid fa-crown"></i>
-                <span>manage subscription</span>
-              </button>
-            ) : (
-              <a
-                href={buildCheckoutUrl() || "#"}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={handleOpenStripeCheckout}
-                class="apps-custom-btn"
-                style={{
-                  justifyContent: "center",
-                  padding: "12px 16px",
-                  fontSize: "13.5px",
-                  fontWeight: 600,
-                  textDecoration: "none",
-                  textAlign: "center",
-                  opacity: configLoaded && !config.configured ? 0.8 : 1,
-                }}
-              >
-                <i class="fa-solid fa-crown"></i>
-                <span>
-                  {!configLoaded
-                    ? "loading checkout..."
-                    : config.configured
-                      ? `buy cookie master — $${config.priceMonthly}/mo`
-                      : "stripe checkout not configured"}
-                </span>
-              </a>
-            )}
+            <button
+              type="button"
+              onClick={() => void handleBuyWithCoins()}
+              disabled={buyingWithCoins || coins < COOKIE_MASTER_COIN_PRICE}
+              class="apps-custom-btn"
+              style={{
+                justifyContent: "center",
+                padding: "12px 16px",
+                fontSize: "13.5px",
+                fontWeight: 600,
+                textAlign: "center",
+                opacity: buyingWithCoins || coins < COOKIE_MASTER_COIN_PRICE ? 0.65 : 1,
+                cursor: buyingWithCoins || coins < COOKIE_MASTER_COIN_PRICE ? "not-allowed" : "pointer",
+              }}
+            >
+              <i class={`fa-solid ${buyingWithCoins ? "fa-spinner fa-spin" : "fa-crown"}`}></i>
+              <span>
+                {buyingWithCoins
+                  ? "activating..."
+                  : coins < COOKIE_MASTER_COIN_PRICE
+                    ? `need ${(COOKIE_MASTER_COIN_PRICE - coins).toLocaleString()} more coins`
+                    : isActiveMaster
+                      ? `extend +30 days — ${COOKIE_MASTER_COIN_PRICE.toLocaleString()} coins`
+                      : `unlock cookie master — ${COOKIE_MASTER_COIN_PRICE.toLocaleString()} coins`}
+              </span>
+            </button>
 
             <div
               style={{
@@ -786,7 +846,7 @@ export default function CookieMasterPage() {
                 textTransform: "lowercase",
               }}
             >
-              checkout via stripe managed payments · synced with cloudsync
+              instant unlock with cookie coins · synced with cloudsync
             </div>
 
             <div
@@ -892,6 +952,135 @@ export default function CookieMasterPage() {
               Unlock the exclusive Cookie Master crown badge in chat, custom profile styling, plus
               automatic access to new member drops as they roll out.
             </p>
+          </article>
+        </div>
+      </div>
+
+      {/* Earn Cookie Coins Faster Hub */}
+      <div class="studio-panel" style={{ padding: "20px", gap: "14px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "15px", fontWeight: 700, textTransform: "lowercase" }}>
+            <i class="fa-solid fa-bolt" style={{ color: "#facc15" }}></i>
+            <span>earn cookie coins faster</span>
+          </div>
+          <span style={{ fontSize: "11.5px", color: "var(--color-sublabel)", textTransform: "lowercase" }}>
+            +25 coins/min playing games (+75 every 5 min) · +10 coins chatting
+          </span>
+        </div>
+
+        <div
+          class="studio-community-grid"
+          style={{
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: "12px",
+          }}
+        >
+          {/* 1. Hourly Cookie Jar */}
+          <article class="studio-game-card" style={{ padding: "15px", gap: "10px", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "9px" }}>
+                <div class="app-icon-box" style={{ width: "32px", height: "32px", borderRadius: "10px", fontSize: "14px" }}>
+                  <i class="fa-solid fa-jar" style={{ color: "#facc15" }}></i>
+                </div>
+                <h3 class="app-card-title" style={{ fontSize: "13.5px" }}>
+                  hourly cookie jar (+{HOURLY_DROP_COINS})
+                </h3>
+              </div>
+              <p class="app-card-desc">
+                grab {HOURLY_DROP_COINS} free cookie coins every hour with one click.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="apps-custom-btn"
+              disabled={hourlyRemMs > 0}
+              onClick={handleClaimHourly}
+              style={{
+                justifyContent: "center",
+                padding: "8px 12px",
+                fontSize: "12px",
+                opacity: hourlyRemMs > 0 ? 0.55 : 1,
+              }}
+            >
+              <i class="fa-solid fa-coins"></i>
+              <span>
+                {hourlyRemMs > 0
+                  ? `ready in ${formatDurationCompact(hourlyRemMs)}`
+                  : `claim +${HOURLY_DROP_COINS} coins`}
+              </span>
+            </button>
+          </article>
+
+          {/* 2. Daily Check-In Streak */}
+          <article class="studio-game-card" style={{ padding: "15px", gap: "10px", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "9px" }}>
+                <div class="app-icon-box" style={{ width: "32px", height: "32px", borderRadius: "10px", fontSize: "14px" }}>
+                  <i class="fa-solid fa-fire" style={{ color: "#fb923c" }}></i>
+                </div>
+                <h3 class="app-card-title" style={{ fontSize: "13.5px" }}>
+                  daily streak (day {streakState.streak + 1})
+                </h3>
+              </div>
+              <p class="app-card-desc">
+                check in daily for +250 up to +1,000 bonus coins per day!
+              </p>
+            </div>
+            <button
+              type="button"
+              class="apps-custom-btn"
+              disabled={streakState.remainingMs > 0}
+              onClick={handleClaimStreak}
+              style={{
+                justifyContent: "center",
+                padding: "8px 12px",
+                fontSize: "12px",
+                opacity: streakState.remainingMs > 0 ? 0.55 : 1,
+              }}
+            >
+              <i class="fa-solid fa-calendar-check"></i>
+              <span>
+                {streakState.remainingMs > 0
+                  ? `next in ${formatDurationCompact(streakState.remainingMs)}`
+                  : `claim +${streakState.nextReward.toLocaleString()} coins`}
+              </span>
+            </button>
+          </article>
+
+          {/* 3. Cookie Clicker Mini-Bonus */}
+          <article class="studio-game-card" style={{ padding: "15px", gap: "10px", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "9px" }}>
+                <div class="app-icon-box" style={{ width: "32px", height: "32px", borderRadius: "10px", fontSize: "14px" }}>
+                  <i class="fa-solid fa-cookie-bite" style={{ color: "#f59e0b" }}></i>
+                </div>
+                <h3 class="app-card-title" style={{ fontSize: "13.5px" }}>
+                  cookie clicker (+{CLICKER_BURST_COINS} / 10 taps)
+                </h3>
+              </div>
+              <p class="app-card-desc">
+                tap to bake coins fast! {clickerState.remainingBursts} bursts left this 15m ({clickCount}/10).
+              </p>
+            </div>
+            <button
+              type="button"
+              class="apps-custom-btn"
+              disabled={clickerState.remainingBursts <= 0}
+              onClick={handleClickerTap}
+              style={{
+                justifyContent: "center",
+                padding: "8px 12px",
+                fontSize: "12px",
+                opacity: clickerState.remainingBursts <= 0 ? 0.55 : 1,
+              }}
+            >
+              <i class="fa-solid fa-cookie"></i>
+              <span>
+                {clickerState.remainingBursts <= 0
+                  ? `recharges in ${formatDurationCompact(clickerState.resetInMs)}`
+                  : `tap cookie (${clickCount}/10)`}
+              </span>
+            </button>
           </article>
         </div>
       </div>

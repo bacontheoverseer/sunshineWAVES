@@ -11086,6 +11086,60 @@ app.get("/api/cookie-master/status", async (req, res) => {
   }
 });
 
+app.post("/api/cookie-master/buy-with-coins", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const now = Date.now();
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const subId = `coins_cm_${now}_${Math.random().toString(36).slice(2, 8)}`;
+
+    if (authUser?.username) {
+      const userLower = authUser.username.toLowerCase();
+      const existing = await findActiveStripeSubscription({ username: authUser.username }).catch(() => null);
+      const baseExpiry = existing && existing.expiresAt > now ? existing.expiresAt : now;
+      const nextExpiresAt = baseExpiry + THIRTY_DAYS_MS;
+
+      await upsertStripeSubscription({
+        subscriptionId: subId,
+        checkoutSessionId: subId,
+        invoiceId: subId,
+        customerId: `coins_${userLower}`,
+        emailLower: "",
+        userNameLower: userLower,
+        customUsernameLower: userLower,
+        claimedUsernameLower: userLower,
+        priceId: "coins_5000_monthly",
+        productId: "cookie_master_coins",
+        tierName: "Cookie Master (Coins)",
+        status: "active",
+        managedPayments: false,
+        customerPortalUrl: "",
+        amount: 5000,
+        verifiedAt: now,
+        expiresAt: nextExpiresAt,
+        cancelledAt: null,
+      });
+
+      return res.json({
+        success: true,
+        active: true,
+        subscriptionId: subId,
+        expiresAt: nextExpiresAt,
+      });
+    }
+
+    return res.json({
+      success: true,
+      active: true,
+      subscriptionId: subId,
+      expiresAt: now + THIRTY_DAYS_MS,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to activate Cookie Master" });
+  }
+});
+
 app.post("/api/cookie-master/verify", async (req, res) => {
   try {
     const authUser = await getAuthenticatedCloudSyncUser(req);
