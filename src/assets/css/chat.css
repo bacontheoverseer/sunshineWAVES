@@ -4096,10 +4096,11 @@ html.chromebook-mode .chat-user-item {
 }
 
 .chat-emoji-picker.is-reaction-picker {
-  bottom: auto;
-  top: 26px;
-  right: 12px;
-  height: 310px;
+  bottom: calc(100% + 6px);
+  top: auto;
+  right: 18px;
+  height: 340px;
+  z-index: 60;
 }
 
 

@@ -840,15 +840,6 @@ const ChatMessageRow = memo(function ChatMessageRow({
           </button>
         </div>
       )}
-
-      {isReactPickerOpen && (
-        <EmojiPicker
-          pickerRef={reactPickerRef}
-          containerClass="is-reaction-picker"
-          onSelect={(emoji) => onToggleReaction(msg.id, emoji)}
-          onClose={onCloseReactPicker}
-        />
-      )}
     </div>
   );
 });
@@ -5899,6 +5890,19 @@ export default function ChatModal() {
                 pickerRef={emojiPickerRef}
                 onSelect={handleInsertEmoji}
                 onClose={() => setShowEmojiPicker(false)}
+              />
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && reactPickerMessageId && (
+              <EmojiPicker
+                pickerRef={reactPickerRef}
+                containerClass="is-reaction-picker"
+                onSelect={(emoji) => {
+                  const targetId = reactPickerMessageId;
+                  setReactPickerMessageId(null);
+                  if (targetId) void handleToggleReaction(targetId, emoji);
+                }}
+                onClose={() => setReactPickerMessageId(null)}
               />
             )}
 
