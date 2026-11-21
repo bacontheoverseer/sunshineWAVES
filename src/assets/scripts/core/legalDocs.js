@@ -1,5 +1,7 @@
-export const LEGAL_LAST_UPDATED = "November 16, 2026";
+export const LEGAL_LAST_UPDATED = "November 20, 2026";
 export const LEGAL_SERVICE_NAME = "Operation Cookie";
+export const COPYRIGHT_TAKEDOWN_FORM_URL =
+  "https://docs.google.com/forms/d/e/1FAIpQLSdXHyOMbhd9o8znnAA09ap7m7P-hNB6hY2uevUf2LhOphV2OA/viewform?usp=publish-editor";
 
 export const TERMS_SECTIONS = [
   {
@@ -61,7 +63,7 @@ export const TERMS_SECTIONS = [
     title: "8. Third-Party Links, Services & Intellectual Property",
     body: [
       "Links, proxied destinations, external games, font/icon CDNs, Stripe Checkout pages, and advertisements shown on non-ad-free sessions belong to independent third parties with their own terms and privacy practices. Operation Cookie assumes zero liability for third-party acts, omissions, content, malware, or losses.",
-      "Operation Cookie branding, original interface code, and compiled assets are protected by applicable intellectual property laws. If you believe content hosted directly by us infringes your copyright, please contact the site administrator immediately with identification of the material and your contact details so it can be reviewed and removed promptly.",
+      "Operation Cookie respects copyright and intellectual property rights. If you believe any game, image, or other work on our website is copyrighted by you and you want it taken down, please fill out our Copyright Takedown Form (linked in the Legal tab) with identification of the material and your contact details so it can be reviewed and removed promptly.",
     ],
   },
   {

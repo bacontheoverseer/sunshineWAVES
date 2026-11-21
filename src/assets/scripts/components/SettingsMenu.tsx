@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "preact/hooks";
 import {
+  COPYRIGHT_TAKEDOWN_FORM_URL,
   LEGAL_LAST_UPDATED,
   PRIVACY_SECTIONS,
   TERMS_SECTIONS,
@@ -789,6 +790,26 @@ export default function SettingsMenu() {
                 {activeLegalTitle} · last updated {LEGAL_LAST_UPDATED}
               </div>
 
+              <div class="legal-card" style={{ marginBottom: "12px" }}>
+                <h4>copyright &amp; dmca takedown requests</h4>
+                <p>
+                  we respect copyright and intellectual property. if you believe any work, asset, or game on our website is copyrighted by you and want it taken down, please fill out our google form below and we will review and remove it promptly.
+                </p>
+                <div style={{ marginTop: "10px" }}>
+                  <a
+                    href={COPYRIGHT_TAKEDOWN_FORM_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="legal-pill-btn active"
+                    style={{ display: "inline-flex", alignItems: "center", gap: "7px", textDecoration: "none" }}
+                  >
+                    <i class="fa-solid fa-copyright" />
+                    <span>submit copyright takedown form</span>
+                    <i class="fa-solid fa-arrow-up-right-from-square" style={{ fontSize: "10px" }} />
+                  </a>
+                </div>
+              </div>
+
               <div class="legal-sections-list">
                 {activeLegalSections.map((sec) => (
                   <div key={sec.title} class="legal-card">
@@ -807,15 +828,22 @@ export default function SettingsMenu() {
               <label>credits</label>
               <p>selenite - game source</p>
               <p>gn-math - game source</p>
-              <p>edurocks - game source</p>
               <p>velara - game source</p>
               <p>truffled - game source</p>
-            <p>seraph - game source</p>
-            <p>wasm.rip - game source</p>
-            <p>tglsc - game source</p>
-            <p>3kh0 - game source</p>
+              <p>seraph - game source</p>
+              <p>wasm.rip - pc web ports game source</p>
+              <p>tglsc - game source</p>
+              <p>3kh0 - game source</p>
+              <p>discord - profile decorations, effects, frames &amp; nameplates</p>
+              <p>klipy - chat gif search &amp; picker</p>
+              <p>last.fm - now playing music status</p>
+              <p>myinstants - soundboard audio clips</p>
+              <p>font awesome - interface icons</p>
               <p>titanium network - ultraviolet</p>
-              <p>mercury workshop - scramjet, epoxy, and libcurl</p>
+              <p>mercury workshop - scramjet, epoxy, libcurl &amp; wisp</p>
+              <p>preact &amp; vite - frontend framework &amp; bundler</p>
+              <p>fingerprintjs &amp; cloudflare turnstile - anti-spam protection</p>
+              <p>aiven postgresql - cloud database hosting</p>
             </div>
             <div class="settings-item">
               <label>you have reached the end!</label>
