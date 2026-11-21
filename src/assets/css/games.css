@@ -47,13 +47,13 @@ body.games-view #arrow-pointer {
 
 .games-topbar {
   position: sticky;
-  top: 51px;
+  top: 82px;
   width: 100%;
   max-width: 100%;
   margin: 0 auto;
   z-index: 1004;
   display: none;
-  padding: 12px;
+  padding: 6px 12px 10px;
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -68,9 +68,8 @@ body.games-view .games-topbar {
 
 .games-filter-pill {
   pointer-events: auto;
-  margin-top: -54px;
-  height: 46px;
-  padding: 0 15px;
+  height: 52px;
+  padding: 0 16px;
   border-radius: 999px;
   background-color: var(--bg-surface-3);
   border: 1px solid var(--bg-surface-10);
@@ -122,15 +121,15 @@ body.games-view .games-topbar {
   align-items: center;
   pointer-events: auto;
   justify-content: center;
-  margin-top: -54px;
+  margin-top: 0;
   width: 100%;
   min-width: 0;
-  transition: width 0.1s cubic-bezier(0.4, 0, 0.2, 1), max-width 0.s ease;
+  transition: width 0.15s cubic-bezier(0.4, 0, 0.2, 1), max-width 0.15s ease;
   max-width: 520px;
 }
 
 .games-search-bar.is-sticky {
-  max-width: 380px;
+  max-width: 420px;
 }
 
 .games-search-bar input[type="text"] {
@@ -167,7 +166,7 @@ body.games-view #right-top-icons {
 }
 
 body.games-view .games-page {
-  padding-top: 130px;
+  padding-top: 86px;
 }
 
 .game-grid-container {
