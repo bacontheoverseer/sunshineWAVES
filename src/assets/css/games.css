@@ -170,8 +170,8 @@ body.games-view .games-page {
 }
 
 .game-grid-container {
-  margin-top: -80px;
-  padding: 18px;
+  margin-top: 0;
+  padding: 6px 18px 18px;
   transform: translateY(6px) translateZ(0);
   transition: transform 0.1s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
