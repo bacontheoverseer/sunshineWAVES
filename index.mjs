@@ -10113,6 +10113,73 @@ function isWebsiteNotGameServer(rawName) {
   return SERVER_NON_GAME_PATTERNS.some((re) => re.test(s));
 }
 
+const THREEKHO_MIME_BY_EXT = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".wav": "audio/wav",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".xml": "application/xml",
+  ".txt": "text/plain; charset=utf-8",
+  ".swf": "application/x-shockwave-flash",
+  ".unityweb": "application/octet-stream",
+  ".data": "application/octet-stream",
+  ".mem": "application/octet-stream",
+};
+
+// Proxy 3kh0-assets raw files from GitLab with proper MIME types so games run natively
+app.use("/api/3kh0", async (req, res) => {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return res.status(405).end();
+  }
+  const rawPath = String(req.path || "").replace(/^\/+/, "");
+  if (!rawPath || rawPath.includes("..") || rawPath.includes("\\")) {
+    return res.status(400).send("Invalid asset path");
+  }
+  const finalPath = rawPath.endsWith("/") ? `${rawPath}index.html` : rawPath;
+  const upstreamUrl = `https://gitlab.com/3kh0/3kh0-assets/-/raw/main/${finalPath}`;
+  try {
+    const upstream = await fetch(upstreamUrl, {
+      method: req.method,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; OperationCookie/1.0)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!upstream.ok) {
+      return res.status(upstream.status).send("Asset not found");
+    }
+    const ext = path.extname(finalPath).toLowerCase();
+    const mime = THREEKHO_MIME_BY_EXT[ext] || upstream.headers.get("content-type") || "application/octet-stream";
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    if (req.method === "HEAD") {
+      return res.status(200).end();
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    return res.status(200).send(buf);
+  } catch (err) {
+    return res.status(502).send(err?.message || "Failed to fetch 3kh0 asset");
+  }
+});
+
 app.get("/api/games/leaderboard", (req, res) => {
   const gameKey = ((req.query.game || "") + "").trim().toLowerCase();
   if (!gameKey || isWebsiteNotGameServer(gameKey)) {

@@ -21,6 +21,7 @@ interface SourceConfig {
   seraph: { games: string; base: string };
   "wasm.rip": { games: string; base: string };
   tglsc: { games: string; base: string };
+  "3kh0": { games: string; gitlabRawBase: string };
 }
 
 type SourceKey = keyof SourceConfig;
@@ -81,6 +82,12 @@ interface TglscGame {
   embed_url?: string;
 }
 
+interface ThreeKhoGame {
+  link: string;
+  imgSrc?: string;
+  title: string;
+}
+
 const SOURCE_CONFIG: SourceConfig = {
   selenite: {
     games: "/!!/" + encodeMochiUrl("https://selenite.cc/resources/games.json") + "/",
@@ -111,6 +118,10 @@ const SOURCE_CONFIG: SourceConfig = {
     games: "/!!/" + encodeMochiUrl("https://glseries.net/api/cdn") + "/",
     base: "https://glseries.net",
   },
+  "3kh0": {
+    games: "/!!/" + encodeMochiUrl("https://raw.githubusercontent.com/3kh0/3kh0-lite/main/config/games.json") + "/",
+    gitlabRawBase: "https://gitlab.com/3kh0/3kh0-assets/-/raw/main/",
+  },
 };
 
 const ALL_SOURCE_KEYS: SourceKey[] = [
@@ -121,6 +132,7 @@ const ALL_SOURCE_KEYS: SourceKey[] = [
   "seraph",
   "wasm.rip",
   "tglsc",
+  "3kh0",
 ];
 
 export function isCombineGameSourcesEnabled(): boolean {
@@ -148,11 +160,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v4";
+const GAMES_DISK_CACHE = "sunshine-games-v5";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v4-${scope}`;
+  return `sunshine-game-cache-v5-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -464,6 +476,30 @@ function mapTglscGames(data: unknown): GameEntry[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function mapThreeKhoGames(data: unknown): GameEntry[] {
+  const games = Array.isArray(data) ? (data as ThreeKhoGame[]) : [];
+  const rawBase = SOURCE_CONFIG["3kh0"].gitlabRawBase;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return games
+    .filter((g) => g && g.title && g.link)
+    .map((game) => {
+      const relLink = String(game.link).replace(/^\/+/, "").replace(/^projects\//, "");
+      const relImg = String(game.imgSrc || "").replace(/^\/+/, "").replace(/^projects\//, "");
+      const gameUrl = `${origin}/api/3kh0/${relLink}`;
+      const coverUrl = relImg ? `/!cover!/${encodeMochiUrl(`${rawBase}${relImg}`)}/` : "";
+      return {
+        id: relLink || game.title,
+        name: String(game.title).trim(),
+        coverUrl,
+        gameUrl,
+        isExternal: false,
+        featured: false,
+        sourceKey: "3kh0",
+      } satisfies GameEntry;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function fetchWithTimeout(url: string, timeoutMs = 7000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -503,6 +539,7 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
     seraph: () => fetchWithTimeout(SOURCE_CONFIG.seraph.games).then(okText).then(mapSeraphGames),
     "wasm.rip": () => fetchWithTimeout(SOURCE_CONFIG["wasm.rip"].games).then(ok).then(mapWasmRipGames),
     tglsc: () => fetchWithTimeout(SOURCE_CONFIG.tglsc.games).then(ok).then(mapTglscGames),
+    "3kh0": () => fetchWithTimeout(SOURCE_CONFIG["3kh0"].games).then(ok).then(mapThreeKhoGames),
   };
 
   const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {

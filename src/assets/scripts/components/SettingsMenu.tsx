@@ -439,6 +439,7 @@ export default function SettingsMenu() {
     "seraph",
     "wasm.rip",
     "tglsc",
+    "3kh0",
   ];
   const allThemes = [
     "default",
@@ -812,6 +813,7 @@ export default function SettingsMenu() {
             <p>seraph - game source</p>
             <p>wasm.rip - game source</p>
             <p>tglsc - game source</p>
+            <p>3kh0 - game source</p>
               <p>titanium network - ultraviolet</p>
               <p>mercury workshop - scramjet, epoxy, and libcurl</p>
             </div>
