@@ -1230,7 +1230,8 @@ app.use(
     verify: (req, _res, buf) => {
       if (
         req.originalUrl?.startsWith("/api/cookie-master/webhook") ||
-        req.originalUrl?.startsWith("/api/stripe/webhook")
+        req.originalUrl?.startsWith("/api/stripe/webhook") ||
+        req.originalUrl?.startsWith("/api/didit/webhook")
       ) {
         req.rawBody = buf;
       }
@@ -1347,6 +1348,13 @@ const userCreatedAtMap = new Map(); // usernameLower -> timestampMs
 const userLastMessageTrack = new Map(); // usernameLower -> { lastSentAt, recentTexts: Array<{ norm, at }>, recentDmTargets: Map<targetLower, number> }
 const TURNSTILE_SITE_KEY = (process.env.TURNSTILE_SITE_KEY || process.env.CF_TURNSTILE_SITE_KEY || "").trim();
 const TURNSTILE_SECRET_KEY = (process.env.TURNSTILE_SECRET_KEY || process.env.CF_TURNSTILE_SECRET_KEY || "").trim();
+const DIDIT_API_KEY = (process.env.DIDIT_API_KEY || "").trim();
+const DIDIT_WORKFLOW_ID = (process.env.DIDIT_WORKFLOW_ID || "").trim();
+const DIDIT_WEBHOOK_SECRET = (process.env.DIDIT_WEBHOOK_SECRET || "").trim();
+const DIDIT_CALLBACK_URL = (process.env.DIDIT_CALLBACK_URL || "").trim();
+const DIDIT_API_BASE = "https://verification.didit.me";
+const diditVerifiedMap = new Map(); // usernameLower -> { verified, status, sessionId, verifiedAt, updatedAt }
+let diditPolicyCutoverAt = 0; // timestamp ms when Didit face verification policy took effect
 const ACCOUNT_CHAT_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes before global chat or DMs
 const ACCOUNT_ADMIN_DM_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes before DMing admins (@bacontheoverseer) or mass-messaging
 const CHAT_SLOWMODE_MS = 3000; // 3-second slowmode per user
@@ -1481,6 +1489,8 @@ const CHAT_META_KV_KEYS = [
   "shadowbanned_users_v1",
   "user_device_map_v1",
   "user_created_at_v1",
+  "didit_verified_users_v1",
+  "didit_policy_cutover_v1",
   "pending_coin_grants_v1",
   "coin_claim_cooldowns_v1",
   STUDIO_GAMES_KV_KEY,
@@ -2319,6 +2329,24 @@ function applyChatMetaKvMap(kvMap) {
       if (cleanK && numTs > 0) userCreatedAtMap.set(cleanK, numTs);
     }
   }
+  const sDiditMap = kvMap.didit_verified_users_v1;
+  if (sDiditMap && typeof sDiditMap === "object") {
+    for (const [uk, val] of Object.entries(sDiditMap)) {
+      const cleanK = String(uk || "").trim().toLowerCase();
+      if (!cleanK || !val || typeof val !== "object") continue;
+      diditVerifiedMap.set(cleanK, {
+        verified: Boolean(val.verified),
+        status: String(val.status || (val.verified ? "Approved" : "Not Started")).slice(0, 60),
+        sessionId: String(val.sessionId || "").trim().slice(0, 160),
+        verifiedAt: Number(val.verifiedAt) || 0,
+        updatedAt: Number(val.updatedAt) || Date.now(),
+      });
+    }
+  }
+  const sDiditCutover = Number(kvMap.didit_policy_cutover_v1) || 0;
+  if (sDiditCutover > 0 && (!diditPolicyCutoverAt || sDiditCutover < diditPolicyCutoverAt)) {
+    diditPolicyCutoverAt = sDiditCutover;
+  }
 }
 
 function ensureChatMetaLoaded() {
@@ -2339,6 +2367,8 @@ function ensureChatMetaLoaded() {
     shadowbanned_users_v1: kvGetJson("shadowbanned_users_v1", []),
     user_device_map_v1: kvGetJson("user_device_map_v1", {}),
     user_created_at_v1: kvGetJson("user_created_at_v1", {}),
+    didit_verified_users_v1: kvGetJson("didit_verified_users_v1", {}),
+    didit_policy_cutover_v1: kvGetJson("didit_policy_cutover_v1", 0),
     [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
     [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
   });
@@ -2414,6 +2444,101 @@ function persistUserCreatedAtMap() {
     if (++count >= 5000) break;
   }
   kvSetJson("user_created_at_v1", out);
+}
+
+function isDiditConfigured() {
+  return Boolean(DIDIT_API_KEY && DIDIT_WORKFLOW_ID);
+}
+
+function ensureDiditPolicyCutoverAt() {
+  if (!diditPolicyCutoverAt) {
+    diditPolicyCutoverAt = Date.now();
+    kvSetJson("didit_policy_cutover_v1", diditPolicyCutoverAt);
+  }
+  return diditPolicyCutoverAt;
+}
+
+function persistDiditVerifiedMap() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of diditVerifiedMap.entries()) {
+    out[k] = v;
+    if (++count >= 10000) break;
+  }
+  kvSetJson("didit_verified_users_v1", out);
+}
+
+function isUserDiditVerified(username) {
+  const cleanK = String(username || "").trim().toLowerCase();
+  if (!cleanK) return false;
+  const entry = diditVerifiedMap.get(cleanK);
+  return Boolean(entry && entry.verified);
+}
+
+function isExistingAccountForDidit(username) {
+  const cutover = ensureDiditPolicyCutoverAt();
+  const createdMs = getUserAccountCreatedAtMs(username);
+  if (!createdMs || createdMs <= 0) return true;
+  return createdMs < cutover;
+}
+
+function verifyDiditWebhookSignature(req) {
+  if (!DIDIT_WEBHOOK_SECRET) return true;
+  const rawBody = req.rawBody;
+  if (!rawBody) return false;
+  const rawStr = Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : String(rawBody);
+  const tsHeader = String(req.headers["x-timestamp"] || "").trim();
+  if (tsHeader) {
+    const tsNum = Number(tsHeader);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(tsNum) || Math.abs(nowSec - tsNum) > 300) {
+      return false;
+    }
+  }
+  const sigHeader = String(
+    req.headers["x-signature-v2"] ||
+      req.headers["x-signature-simple"] ||
+      req.headers["x-signature"] ||
+      ""
+  ).trim();
+  if (!sigHeader) return false;
+
+  const expectedHex = crypto
+    .createHmac("sha256", DIDIT_WEBHOOK_SECRET)
+    .update(rawStr, "utf8")
+    .digest("hex");
+
+  const sigBuf = Buffer.from(sigHeader, "utf8");
+  const expBuf = Buffer.from(expectedHex, "utf8");
+  if (sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return true;
+  }
+  // Fallback for Didit X-Signature-V2 canonical JSON format (sorted keys, no extra spaces)
+  try {
+    const parsed = JSON.parse(rawStr);
+    const canonical = JSON.stringify(sortObjectKeysDeep(parsed));
+    const canonicalHex = crypto
+      .createHmac("sha256", DIDIT_WEBHOOK_SECRET)
+      .update(canonical, "utf8")
+      .digest("hex");
+    const cBuf = Buffer.from(canonicalHex, "utf8");
+    if (sigBuf.length === cBuf.length && crypto.timingSafeEqual(sigBuf, cBuf)) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function sortObjectKeysDeep(obj) {
+  if (Array.isArray(obj)) return obj.map(sortObjectKeysDeep);
+  if (obj && typeof obj === "object") {
+    const sorted = {};
+    for (const k of Object.keys(obj).sort()) {
+      sorted[k] = sortObjectKeysDeep(obj[k]);
+    }
+    return sorted;
+  }
+  return obj;
 }
 
 const DISPOSABLE_EMAIL_DOMAINS = new Set([
@@ -4442,6 +4567,12 @@ app.post(["/api/auth/login", "/login"], async (req, res) => {
     const password = String(req.body?.password || "");
     const fingerprintId = String(req.body?.fingerprint_id || req.body?.fingerprintId || "").trim().slice(0, 120);
     const storageToken = String(req.body?.storage_token || req.body?.storageToken || "").trim().slice(0, 120);
+    const turnstileToken = String(
+      req.body?.["cf-turnstile-response"] ||
+        req.body?.cf_turnstile_response ||
+        req.body?.turnstileToken ||
+        ""
+    ).trim();
     if (!username || !password || isReservedSystemUsername(username)) {
       return res
         .status(400)
@@ -4451,6 +4582,16 @@ app.post(["/api/auth/login", "/login"], async (req, res) => {
       return res
         .status(400)
         .json({ success: false, user: null, error: "password too long" });
+    }
+
+    const turnstileOk = await verifyTurnstileToken(
+      turnstileToken,
+      req.headers["cf-connecting-ip"] || req.ip || ""
+    );
+    if (!turnstileOk) {
+      return res
+        .status(403)
+        .json({ success: false, user: null, error: "security verification failed — please complete the check and try again" });
     }
 
     const row = await dbFindUserByUsername(username, { includePasswordHash: true });
@@ -4542,6 +4683,206 @@ app.delete("/api/auth/me", async (req, res) => {
     return res
       .status(500)
       .json({ success: false, user: null, error: "failed to delete account" });
+  }
+});
+
+// --- Didit Hosted Face Verification Endpoints (/api/didit/*) ---
+app.get("/api/didit/status", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const user = await getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res.status(401).json({ success: false, error: "unauthorized" });
+  }
+  const userKey = user.username.toLowerCase();
+  const configured = isDiditConfigured();
+  const isExistingAccount = isExistingAccountForDidit(user.username);
+  let entry = diditVerifiedMap.get(userKey) || {
+    verified: false,
+    status: "Not Started",
+    sessionId: "",
+    verifiedAt: 0,
+    updatedAt: 0,
+  };
+
+  const wantRefresh = String(req.query?.refresh || "") === "1" || String(req.query?.refresh || "") === "true";
+  const querySessionId = String(req.query?.sessionId || "").trim().slice(0, 160);
+  const checkSessionId = querySessionId || entry.sessionId;
+
+  if (wantRefresh && !entry.verified && configured && checkSessionId) {
+    try {
+      const decRes = await fetch(
+        `${DIDIT_API_BASE}/v3/session/${encodeURIComponent(checkSessionId)}/decision/`,
+        {
+          method: "GET",
+          headers: {
+            "x-api-key": DIDIT_API_KEY,
+            Accept: "application/json",
+          },
+        }
+      );
+      if (decRes.ok) {
+        const decData = await decRes.json().catch(() => null);
+        const vendorData = String(decData?.vendor_data || "").trim().toLowerCase();
+        const remoteStatus = String(decData?.status || "").trim();
+        if (remoteStatus && (!vendorData || vendorData === userKey)) {
+          const isApproved = remoteStatus === "Approved";
+          entry = {
+            verified: isApproved,
+            status: remoteStatus,
+            sessionId: checkSessionId,
+            verifiedAt: isApproved ? Date.now() : entry.verifiedAt || 0,
+            updatedAt: Date.now(),
+          };
+          diditVerifiedMap.set(userKey, entry);
+          persistDiditVerifiedMap();
+        }
+      }
+    } catch (err) {
+      console.warn("[didit] Decision refresh failed:", err?.message || err);
+    }
+  }
+
+  return res.json({
+    success: true,
+    configured,
+    verified: Boolean(entry.verified),
+    status: entry.status || (entry.verified ? "Approved" : "Not Started"),
+    sessionId: entry.sessionId || "",
+    isExistingAccount,
+  });
+});
+
+app.post("/api/didit/session", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const user = await getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res.status(401).json({ success: false, error: "unauthorized" });
+  }
+  const userKey = user.username.toLowerCase();
+  if (isUserDiditVerified(user.username)) {
+    return res.json({
+      success: true,
+      alreadyVerified: true,
+      verified: true,
+      status: "Approved",
+    });
+  }
+  if (!isDiditConfigured()) {
+    return res.status(503).json({
+      success: false,
+      error: "Didit verification is not configured on the server yet (set DIDIT_API_KEY and DIDIT_WORKFLOW_ID).",
+    });
+  }
+
+  try {
+    const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
+    const host = String(req.headers["x-forwarded-host"] || req.get("host") || "").split(",")[0].trim();
+    const defaultCallback = host ? `${proto}://${host}/?didit_callback=1` : "";
+    const callbackUrl = DIDIT_CALLBACK_URL || defaultCallback;
+
+    const payload = {
+      workflow_id: DIDIT_WORKFLOW_ID,
+      vendor_data: userKey,
+    };
+    if (callbackUrl) {
+      payload.callback = callbackUrl;
+    }
+
+    const sessionRes = await fetch(`${DIDIT_API_BASE}/v3/session/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "x-api-key": DIDIT_API_KEY,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await sessionRes.json().catch(() => ({}));
+    if (!sessionRes.ok) {
+      console.error("[didit] Create session error:", sessionRes.status, data);
+      return res.status(502).json({
+        success: false,
+        error: data?.detail || data?.message || data?.error || "Failed to start Didit verification session",
+      });
+    }
+
+    const sessionId = String(data?.session_id || "").trim();
+    const verificationUrl = String(data?.url || data?.verification_url || "").trim();
+    const status = String(data?.status || "Not Started").trim();
+    if (!verificationUrl) {
+      return res.status(502).json({
+        success: false,
+        error: "Didit did not return a hosted verification URL",
+      });
+    }
+
+    diditVerifiedMap.set(userKey, {
+      verified: false,
+      status,
+      sessionId,
+      verifiedAt: 0,
+      updatedAt: Date.now(),
+    });
+    persistDiditVerifiedMap();
+
+    return res.json({
+      success: true,
+      sessionId,
+      verificationUrl,
+      status,
+    });
+  } catch (err) {
+    console.error("[didit] Create session exception:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Could not reach Didit verification servers — please try again",
+    });
+  }
+});
+
+app.post("/api/didit/webhook", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    if (!verifyDiditWebhookSignature(req)) {
+      console.warn("[didit] Invalid webhook signature");
+      return res.status(401).json({ success: false, error: "Invalid webhook signature" });
+    }
+
+    const body = req.body || {};
+    const sessionId = String(body.session_id || "").trim().slice(0, 160);
+    const status = String(body.status || "").trim().slice(0, 60);
+    let userKey = String(body.vendor_data || "").trim().toLowerCase();
+
+    if (!userKey && sessionId) {
+      for (const [k, v] of diditVerifiedMap.entries()) {
+        if (v?.sessionId === sessionId) {
+          userKey = k;
+          break;
+        }
+      }
+    }
+
+    if (userKey && status) {
+      const existing = diditVerifiedMap.get(userKey);
+      const isApproved = status === "Approved" || Boolean(existing?.verified);
+      diditVerifiedMap.set(userKey, {
+        verified: isApproved,
+        status: isApproved ? "Approved" : status,
+        sessionId: sessionId || existing?.sessionId || "",
+        verifiedAt: isApproved ? (existing?.verifiedAt || Date.now()) : 0,
+        updatedAt: Date.now(),
+      });
+      persistDiditVerifiedMap();
+      if (isApproved) {
+        broadcastToClients({ type: "didit-verified", username: userKey }, "all");
+      }
+    }
+
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error("[didit] Webhook handler error:", err);
+    return res.status(500).json({ success: false });
   }
 });
 
@@ -8241,6 +8582,14 @@ app.post("/api/chat/send", async (req, res) => {
     const authorName = authUser ? authUser.username : String(message.author).trim().slice(0, 40);
     const authorKey = authorName.toLowerCase();
     const isStaffSender = Boolean(authUser && isStaffRoleUser(authUser.username));
+
+    if (isDiditConfigured() && !isUserDiditVerified(authorName)) {
+      return res.status(403).json({
+        success: false,
+        diditRequired: true,
+        error: "Face verification via Didit is required before sending chat messages.",
+      });
+    }
 
     const fingerprintId = String(req.body?.fingerprint_id || req.body?.fingerprintId || "").trim().slice(0, 120);
     const storageToken = String(req.body?.storage_token || req.body?.storageToken || "").trim().slice(0, 120);

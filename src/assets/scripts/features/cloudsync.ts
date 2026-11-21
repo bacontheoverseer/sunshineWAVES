@@ -143,6 +143,10 @@ export class CloudSync {
   _lastAuthCheckAt: number;
   _turnstileToken: string;
   _turnstileWidgetId: string | null;
+  _loginTurnstileToken: string;
+  _loginTurnstileWidgetId: string | null;
+  _turnstileSiteKey: string;
+  _turnstileEnabled: boolean;
 
   constructor() {
     this.user = JSON.parse(localStorage.getItem("auth_user") || "{}");
@@ -171,6 +175,10 @@ export class CloudSync {
     this._lastAuthCheckAt = 0;
     this._turnstileToken = "";
     this._turnstileWidgetId = null;
+    this._loginTurnstileToken = "";
+    this._loginTurnstileWidgetId = null;
+    this._turnstileSiteKey = "";
+    this._turnstileEnabled = false;
 
     void getDeviceSignature();
     this.init();
@@ -802,6 +810,8 @@ export class CloudSync {
                             <i class="fa-solid fa-eye password-toggle" data-target="login-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
                         </div>
 
+                        <div id="login-turnstile-container" style="margin-top: 12px; display: flex; justify-content: center;"></div>
+
                         <div style="text-align: center;">
                             <button type="submit" class="auth-action-btn" style="width: 55%; margin-top: 15px;">login</button>
                         </div>
@@ -865,34 +875,57 @@ export class CloudSync {
     void this.initTurnstileWidget();
   }
 
+  mountTurnstileWidgets(): void {
+    const siteKey = this._turnstileSiteKey;
+    if (!siteKey || !window.turnstile) return;
+
+    const regContainer = document.getElementById("reg-turnstile-container");
+    if (regContainer && !this._turnstileWidgetId) {
+      this._turnstileWidgetId = window.turnstile.render(regContainer, {
+        sitekey: siteKey,
+        theme: "dark",
+        callback: (token: string) => {
+          this._turnstileToken = token || "";
+        },
+        "expired-callback": () => {
+          this._turnstileToken = "";
+        },
+        "error-callback": () => {
+          this._turnstileToken = "";
+        },
+      });
+    }
+
+    const loginContainer = document.getElementById("login-turnstile-container");
+    if (loginContainer && !this._loginTurnstileWidgetId) {
+      this._loginTurnstileWidgetId = window.turnstile.render(loginContainer, {
+        sitekey: siteKey,
+        theme: "dark",
+        callback: (token: string) => {
+          this._loginTurnstileToken = token || "";
+        },
+        "expired-callback": () => {
+          this._loginTurnstileToken = "";
+        },
+        "error-callback": () => {
+          this._loginTurnstileToken = "";
+        },
+      });
+    }
+  }
+
   async initTurnstileWidget(): Promise<void> {
     try {
       const res = await fetch("/api/auth/turnstile-config", { cache: "no-store" });
       if (!res.ok) return;
       const cfg = (await res.json()) as { enabled?: boolean; siteKey?: string };
       const siteKey = typeof cfg?.siteKey === "string" ? cfg.siteKey.trim() : "";
+      this._turnstileEnabled = Boolean(cfg?.enabled && siteKey);
+      this._turnstileSiteKey = siteKey;
       if (!siteKey) return;
 
-      const mountWidget = () => {
-        const container = document.getElementById("reg-turnstile-container");
-        if (!container || !window.turnstile || this._turnstileWidgetId) return;
-        this._turnstileWidgetId = window.turnstile.render(container, {
-          sitekey: siteKey,
-          theme: "dark",
-          callback: (token: string) => {
-            this._turnstileToken = token || "";
-          },
-          "expired-callback": () => {
-            this._turnstileToken = "";
-          },
-          "error-callback": () => {
-            this._turnstileToken = "";
-          },
-        });
-      };
-
       if (window.turnstile) {
-        mountWidget();
+        this.mountTurnstileWidgets();
         return;
       }
 
@@ -902,7 +935,7 @@ export class CloudSync {
         script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
         script.async = true;
         script.defer = true;
-        script.onload = () => mountWidget();
+        script.onload = () => this.mountTurnstileWidgets();
         document.head.appendChild(script);
       }
     } catch {}
@@ -1009,6 +1042,7 @@ export class CloudSync {
         promptText.textContent = "don't have an account?";
         actionText.textContent = "create an account!";
       }
+      this.mountTurnstileWidgets();
       this.showError("");
     });
 
@@ -1165,6 +1199,24 @@ export class CloudSync {
       document.getElementById("login-password") as HTMLInputElement
     ).value;
 
+    const domLoginTurnstileInput = document.querySelector<HTMLInputElement>(
+      '#login-form [name="cf-turnstile-response"]'
+    );
+    const loginTurnstileToken =
+      this._loginTurnstileToken ||
+      (this._loginTurnstileWidgetId && window.turnstile?.getResponse
+        ? window.turnstile.getResponse(this._loginTurnstileWidgetId) || ""
+        : "") ||
+      domLoginTurnstileInput?.value ||
+      "";
+
+    if (this._turnstileEnabled && !loginTurnstileToken) {
+      const msg = "please complete the security check first!";
+      this.showError(msg);
+      if (window.showToast) window.showToast("error", msg, "shield-halved");
+      return;
+    }
+
     let toastController: ToastController | null = null;
     if (window.showToast)
       toastController = window.showToast(
@@ -1185,6 +1237,7 @@ export class CloudSync {
           password,
           fingerprint_id: deviceSig.fingerprint_id,
           storage_token: deviceSig.storage_token,
+          "cf-turnstile-response": loginTurnstileToken,
         }),
       });
 
@@ -1200,11 +1253,16 @@ export class CloudSync {
 
       if (res.ok) {
         if (toastController) toastController.hide();
+        this._loginTurnstileToken = "";
         this.setSession(data as unknown as SessionData);
         await this.toggleModal();
         await this.restoreData();
       } else {
         if (toastController) toastController.hide();
+        this._loginTurnstileToken = "";
+        if (this._loginTurnstileWidgetId && window.turnstile?.reset) {
+          window.turnstile.reset(this._loginTurnstileWidgetId);
+        }
         const msg = (data.error as string) || "login failed!";
         this.showError(msg);
         if (window.showToast)
@@ -1212,6 +1270,10 @@ export class CloudSync {
       }
     } catch (err) {
       if (toastController) toastController.hide();
+      this._loginTurnstileToken = "";
+      if (this._loginTurnstileWidgetId && window.turnstile?.reset) {
+        window.turnstile.reset(this._loginTurnstileWidgetId);
+      }
       const msg = err instanceof Error ? err.message : "connection error!";
       this.showError(msg);
       if (window.showToast)
@@ -1262,6 +1324,14 @@ export class CloudSync {
         domTurnstileInput?.value ||
         "";
 
+      if (this._turnstileEnabled && !turnstileToken) {
+        if (toastController) toastController.hide();
+        const msg = "please complete the security check first!";
+        this.showError(msg);
+        if (window.showToast) window.showToast("error", msg, "shield-halved");
+        return;
+      }
+
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1287,6 +1357,7 @@ export class CloudSync {
 
       if (res.ok) {
         if (toastController) toastController.hide();
+        this._turnstileToken = "";
         this.setSession(data as unknown as SessionData);
         await this.toggleModal();
         this.syncMeta.dirty = true;
@@ -1295,6 +1366,10 @@ export class CloudSync {
         await this.syncData();
       } else {
         if (toastController) toastController.hide();
+        this._turnstileToken = "";
+        if (this._turnstileWidgetId && window.turnstile?.reset) {
+          window.turnstile.reset(this._turnstileWidgetId);
+        }
         const msg = (data.error as string) || "registration failed!";
         this.showError(msg);
         if (window.showToast)
@@ -1302,6 +1377,10 @@ export class CloudSync {
       }
     } catch (err) {
       if (toastController) toastController.hide();
+      this._turnstileToken = "";
+      if (this._turnstileWidgetId && window.turnstile?.reset) {
+        window.turnstile.reset(this._turnstileWidgetId);
+      }
       const msg = err instanceof Error ? err.message : "connection error!";
       this.showError(msg);
       if (window.showToast)
