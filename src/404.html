@@ -1,68 +1,481 @@
 <!DOCTYPE html>
 <html lang="en">
-   <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>404</title>
-      <link rel="icon" type="image/x-icon" href="/sunshinelogo.png">
-      <style>
-         @font-face {
-         font-family: 'Lexend';
-         src: url('/assets/fonts/Lexend-Regular.woff2') format('woff2');
-         font-weight: 400;
-         font-style: normal;
-         font-display: swap;
-         }
-         body {
-         font-family: 'Lexend', sans-serif;
-         margin: 0;
-         padding: 0;
-         height: 85vh;
-         background-color: #050505;
-         background-size: 100% 100%, 20px 20px, 20px 20px;
-         color: white;
-         display: flex;
-         justify-content: center;
-         align-items: center;
-         }
-         ::selection {
-         background-color: #ffffff;
-         color: #000000;
-         }
-         .container {
-         text-align: center;
-         padding: 0 20px;
-         }
-         h1 {
-         font-size: 40px;
-         margin-bottom: 15px;
-         color: #e7e7e7;
-         }
-         p {
-         margin: 10px auto;
-         font-size: 12px;
-         color: #d1d1d1ef;
-         max-width: 300px;
-         line-height: 1.5;
-         }
-      </style>
-   </head>
-   <body>
-      <div class="container" id="msgBox">
-         <h1>404</h1>
-         <p style="font-size: 14px; font-weight: bold; color: #dbdbdb; margin-top: -15px;">
-            this page does not exist!
-         </p>
-         <p>This page could not be found.</p>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>404 — operation cookie</title>
+    <link rel="icon" type="image/png" href="/sunshinelogo.png" />
+    <style>
+      @font-face {
+        font-family: "Lexend";
+        src: url("/assets/fonts/Lexend-Regular.woff2") format("woff2");
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+      }
+
+      :root {
+        --bg: #0b0b0f;
+        --card-bg: rgba(20, 20, 26, 0.82);
+        --card-border: rgba(255, 255, 255, 0.1);
+        --text-main: #f4f4f5;
+        --text-muted: #a1a1aa;
+        --accent: #facc15;
+        --accent-warm: #d97706;
+        --btn-bg: #f4f4f5;
+        --btn-text: #0b0b0f;
+        --btn-sec-bg: rgba(255, 255, 255, 0.07);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+        height: 100%;
+        font-family: "Lexend", system-ui, -apple-system, sans-serif;
+        background-color: var(--bg);
+        background-image:
+          radial-gradient(circle at 20% 20%, rgba(250, 204, 21, 0.08), transparent 42%),
+          radial-gradient(circle at 80% 80%, rgba(217, 119, 6, 0.09), transparent 45%);
+        color: var(--text-main);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        text-transform: lowercase;
+      }
+
+      ::selection {
+        background-color: #facc15;
+        color: #0b0b0f;
+      }
+
+      .crumb-layer {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        overflow: hidden;
+        z-index: 1;
+      }
+
+      .bg-crumb {
+        position: absolute;
+        border-radius: 50%;
+        background: rgba(217, 119, 6, 0.22);
+        animation: floatCrumb linear infinite;
+      }
+
+      @keyframes floatCrumb {
+        0% {
+          transform: translateY(105vh) rotate(0deg);
+          opacity: 0;
+        }
+        15% {
+          opacity: 0.65;
+        }
+        85% {
+          opacity: 0.65;
+        }
+        100% {
+          transform: translateY(-12vh) rotate(360deg);
+          opacity: 0;
+        }
+      }
+
+      .card {
+        position: relative;
+        z-index: 2;
+        width: min(460px, 92vw);
+        padding: 34px 30px 28px;
+        border-radius: 26px;
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.58);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .brand-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 12px 5px 7px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+
+      .brand-pill img {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        object-fit: cover;
+      }
+
+      .code-row {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 4px;
+        user-select: none;
+      }
+
+      .code-digit {
+        font-size: 72px;
+        font-weight: 800;
+        line-height: 1;
+        letter-spacing: -0.04em;
+        color: var(--text-main);
+      }
+
+      .cookie-btn {
+        position: relative;
+        width: 78px;
+        height: 78px;
+        border: none;
+        padding: 0;
+        background: transparent;
+        cursor: pointer;
+        border-radius: 50%;
+        transition: transform 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+
+      .cookie-btn:hover {
+        transform: scale(1.08) rotate(-5deg);
+      }
+
+      .cookie-btn:active {
+        transform: scale(0.92) rotate(4deg);
+      }
+
+      .cookie-btn svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+        filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.45));
+      }
+
+      .cookie-btn.baking svg {
+        animation: cookieSpin 2.4s ease-in-out infinite;
+      }
+
+      @keyframes cookieSpin {
+        0%, 100% {
+          transform: rotate(-8deg) scale(1);
+        }
+        50% {
+          transform: rotate(8deg) scale(1.06);
+        }
+      }
+
+      h1 {
+        margin: 2px 0 0;
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--text-main);
+        letter-spacing: -0.01em;
+      }
+
+      .subtitle {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--text-muted);
+        max-width: 350px;
+      }
+
+      .bite-note {
+        font-size: 11.5px;
+        color: var(--accent);
+        min-height: 16px;
+        opacity: 0.92;
+      }
+
+      .actions {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 9px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+        width: 100%;
+      }
+
+      .pill-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        padding: 10px 18px;
+        border-radius: 999px;
+        font-family: inherit;
+        font-size: 12.5px;
+        font-weight: 600;
+        text-decoration: none;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: transform 0.12s ease, opacity 0.15s ease, background-color 0.15s ease;
+      }
+
+      .pill-btn:hover {
+        transform: translateY(-1px);
+      }
+
+      .pill-btn.primary {
+        background: var(--btn-bg);
+        color: var(--btn-text);
+      }
+
+      .pill-btn.secondary {
+        background: var(--btn-sec-bg);
+        border-color: var(--card-border);
+        color: var(--text-main);
+      }
+
+      .pill-btn.secondary:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      .oven-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 2px 0;
+      }
+
+      .oven-dots span {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+        animation: dotPulse 1.2s ease-in-out infinite;
+      }
+
+      .oven-dots span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+
+      .oven-dots span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+
+      @keyframes dotPulse {
+        0%, 80%, 100% {
+          opacity: 0.25;
+          transform: scale(0.8);
+        }
+        40% {
+          opacity: 1;
+          transform: scale(1.15);
+        }
+      }
+
+      .flying-crumb {
+        position: fixed;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #d97706;
+        pointer-events: none;
+        z-index: 99;
+        animation: crumbPop 0.55s cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+      }
+
+      @keyframes crumbPop {
+        0% {
+          opacity: 1;
+          transform: translate(0, 0) scale(1);
+        }
+        100% {
+          opacity: 0;
+          transform: translate(var(--dx), var(--dy)) scale(0.2);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="crumb-layer" id="crumbLayer"></div>
+
+    <main class="card" id="msgBox">
+      <div class="brand-pill">
+        <img src="/sunshinelogo.png" alt="operation cookie" />
+        <span>operation cookie</span>
       </div>
 
-      <script>
-         if (window.top !== window.self) {
-             const box = document.getElementById('msgBox');
-             box.innerHTML = `
-                 <p style="font-size: 14px; font-weight: bold; color: #dbdbdb; margin-top: 25px; max-width: 400px;">one sec! Your content will be available very soon...</p>
-             `;
-         }
-      </script>
-   </body>
+      <div class="code-row">
+        <span class="code-digit">4</span>
+        <button type="button" class="cookie-btn" id="cookieBtn" title="take a bite!">
+          <svg viewBox="0 0 100 100" aria-hidden="true">
+            <defs>
+              <radialGradient id="cookieDough" cx="35%" cy="30%" r="70%">
+                <stop offset="0%" stop-color="#f5c078" />
+                <stop offset="65%" stop-color="#d28b42" />
+                <stop offset="100%" stop-color="#9a5820" />
+              </radialGradient>
+              <mask id="biteMask">
+                <rect width="100" height="100" fill="white" />
+                <circle id="bite1" cx="84" cy="22" r="0" fill="black" />
+                <circle id="bite2" cx="72" cy="14" r="0" fill="black" />
+                <circle id="bite3" cx="88" cy="48" r="0" fill="black" />
+                <circle id="bite4" cx="68" cy="78" r="0" fill="black" />
+                <circle id="bite5" cx="30" cy="82" r="0" fill="black" />
+              </mask>
+            </defs>
+            <g mask="url(#biteMask)">
+              <circle cx="50" cy="50" r="45" fill="url(#cookieDough)" stroke="#7c4314" stroke-width="3" />
+              <circle cx="34" cy="34" r="6" fill="#3b1d0a" />
+              <circle cx="62" cy="30" r="5" fill="#3b1d0a" />
+              <circle cx="48" cy="54" r="6.5" fill="#3b1d0a" />
+              <circle cx="28" cy="62" r="5" fill="#3b1d0a" />
+              <circle cx="67" cy="60" r="5.5" fill="#3b1d0a" />
+              <circle cx="46" cy="76" r="4.5" fill="#3b1d0a" />
+            </g>
+          </svg>
+        </button>
+        <span class="code-digit">4</span>
+      </div>
+
+      <h1>oops — someone ate this page.</h1>
+      <p class="subtitle">
+        we checked the cookie jar, behind the oven, and under all the crumbs, but this page doesn't exist.
+      </p>
+      <div class="bite-note" id="biteNote">psst... click the cookie to take a bite</div>
+
+      <div class="actions">
+        <a href="/" class="pill-btn primary">back to operation cookie</a>
+        <button type="button" class="pill-btn secondary" id="bakeBtn">take a bite</button>
+      </div>
+    </main>
+
+    <script>
+      // Spawn subtle floating background crumbs
+      const crumbLayer = document.getElementById("crumbLayer");
+      for (let i = 0; i < 14; i++) {
+        const dot = document.createElement("span");
+        dot.className = "bg-crumb";
+        const size = 4 + Math.random() * 6;
+        dot.style.width = size + "px";
+        dot.style.height = size + "px";
+        dot.style.left = Math.random() * 100 + "%";
+        dot.style.animationDuration = 10 + Math.random() * 14 + "s";
+        dot.style.animationDelay = -Math.random() * 18 + "s";
+        crumbLayer.appendChild(dot);
+      }
+
+      if (window.top !== window.self) {
+        const box = document.getElementById("msgBox");
+        box.innerHTML = `
+          <div class="brand-pill">
+            <img src="/sunshinelogo.png" alt="operation cookie" />
+            <span>operation cookie</span>
+          </div>
+          <div class="cookie-btn baking" style="cursor: default; margin-top: 2px;">
+            <svg viewBox="0 0 100 100" aria-hidden="true">
+              <defs>
+                <radialGradient id="ovenDough" cx="35%" cy="30%" r="70%">
+                  <stop offset="0%" stop-color="#f5c078" />
+                  <stop offset="65%" stop-color="#d28b42" />
+                  <stop offset="100%" stop-color="#9a5820" />
+                </radialGradient>
+              </defs>
+              <circle cx="50" cy="50" r="45" fill="url(#ovenDough)" stroke="#7c4314" stroke-width="3" />
+              <circle cx="34" cy="34" r="6" fill="#3b1d0a" />
+              <circle cx="62" cy="30" r="5" fill="#3b1d0a" />
+              <circle cx="48" cy="54" r="6.5" fill="#3b1d0a" />
+              <circle cx="28" cy="62" r="5" fill="#3b1d0a" />
+              <circle cx="67" cy="60" r="5.5" fill="#3b1d0a" />
+              <circle cx="46" cy="76" r="4.5" fill="#3b1d0a" />
+            </svg>
+          </div>
+          <h1>warming up the oven...</h1>
+          <p class="subtitle">
+            hang tight! your content is baking and will be fresh out of the oven in just a sec.
+          </p>
+          <div class="oven-dots" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div class="actions">
+            <button type="button" class="pill-btn secondary" onclick="window.location.reload()">retry now</button>
+          </div>
+        `;
+      } else {
+        const cookieBtn = document.getElementById("cookieBtn");
+        const bakeBtn = document.getElementById("bakeBtn");
+        const biteNote = document.getElementById("biteNote");
+        const bites = [
+          { el: document.getElementById("bite1"), r: 18 },
+          { el: document.getElementById("bite2"), r: 16 },
+          { el: document.getElementById("bite3"), r: 20 },
+          { el: document.getElementById("bite4"), r: 22 },
+          { el: document.getElementById("bite5"), r: 24 },
+        ];
+        const quips = [
+          "crunch! tastes like a missing route.",
+          "chomp! still no page in here...",
+          "munch! okay save some for later.",
+          "almost gone... hope you're full!",
+          "all eaten! baking a fresh cookie...",
+        ];
+        let biteIndex = 0;
+        let totalCookies = 0;
+
+        function spawnCrumbs(rect) {
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          for (let i = 0; i < 8; i++) {
+            const c = document.createElement("span");
+            c.className = "flying-crumb";
+            c.style.left = cx + "px";
+            c.style.top = cy + "px";
+            c.style.background = i % 2 === 0 ? "#d97706" : "#3b1d0a";
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 28 + Math.random() * 48;
+            c.style.setProperty("--dx", Math.cos(angle) * dist + "px");
+            c.style.setProperty("--dy", Math.sin(angle) * dist + "px");
+            document.body.appendChild(c);
+            setTimeout(() => c.remove(), 580);
+          }
+        }
+
+        function takeBite() {
+          const rect = cookieBtn.getBoundingClientRect();
+          spawnCrumbs(rect);
+          if (biteIndex < bites.length) {
+            bites[biteIndex].el.setAttribute("r", String(bites[biteIndex].r));
+            biteNote.textContent = quips[biteIndex];
+            biteIndex++;
+            if (biteIndex === bites.length) {
+              totalCookies++;
+              bakeBtn.textContent = "bake another";
+            }
+          } else {
+            for (const b of bites) b.el.setAttribute("r", "0");
+            biteIndex = 0;
+            bakeBtn.textContent = "take a bite";
+            biteNote.textContent =
+              totalCookies === 1
+                ? "fresh out of the oven! (1 cookie eaten)"
+                : `fresh out of the oven! (${totalCookies} cookies eaten)`;
+          }
+        }
+
+        cookieBtn.addEventListener("click", takeBite);
+        bakeBtn.addEventListener("click", takeBite);
+      }
+    </script>
+  </body>
 </html>
