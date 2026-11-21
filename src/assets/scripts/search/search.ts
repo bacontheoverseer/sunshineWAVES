@@ -8,6 +8,7 @@ import {
   isServiceWorkerSupportedContext,
 } from "../core/utils.ts";
 import { checkContent } from "../core/contentFilter.ts";
+import { resolveLuminGameUrl } from "../features/luminSdk.ts";
 
 interface TabLike {
   iframe: HTMLIFrameElement;
@@ -143,6 +144,31 @@ export async function handleSearch(
 
   showBrowserView();
   activeTab.isUrlLoaded = true;
+
+  if (query.trim().startsWith("luminsdk://")) {
+    const rawId = query.trim().slice("luminsdk://".length);
+    const gameId = decodeURIComponent(rawId);
+    try {
+      const playableUrl = await resolveLuminGameUrl(gameId);
+      const allowAttrs = activeTab.iframe.getAttribute("allow") || "";
+      const requiredAllow = ["autoplay", "fullscreen", "pointer-lock", "gamepad"];
+      const mergedAllow = Array.from(
+        new Set([
+          ...allowAttrs.split(";").map((s) => s.trim()).filter(Boolean),
+          ...requiredAllow,
+        ]),
+      ).join("; ");
+      activeTab.iframe.setAttribute("allow", mergedAllow);
+      navigateIframeTo(activeTab.iframe, playableUrl);
+    } catch (err) {
+      console.error("Failed to resolve LuminSDK game URL:", err);
+      if (typeof (window as any).showToast === "function") {
+        (window as any).showToast("failed to load game from luminsdk", "error");
+      }
+    }
+    return;
+  }
+
   const searchURL = executeBang(query) || generateSearchUrl(query);
 
   const urlCheck = checkContent(searchURL);

@@ -1,4 +1,5 @@
 import { encodeMochiUrl, normalizeGameHistoryUrl } from "../core/utils.ts";
+import { fetchAllLuminGames, type LuminRawGame } from "./luminSdk.ts";
 
 export interface GameEntry {
   id: string | number;
@@ -22,6 +23,7 @@ interface SourceConfig {
   "wasm.rip": { games: string; base: string };
   tglsc: { games: string; base: string };
   "3kh0": { games: string; gitlabRawBase: string };
+  luminsdk: { sdk: string };
 }
 
 type SourceKey = keyof SourceConfig;
@@ -122,6 +124,9 @@ const SOURCE_CONFIG: SourceConfig = {
     games: "/!!/" + encodeMochiUrl("https://raw.githubusercontent.com/3kh0/3kh0-lite/main/config/games.json") + "/",
     gitlabRawBase: "https://gitlab.com/3kh0/3kh0-assets/-/raw/main/",
   },
+  luminsdk: {
+    sdk: "https://cdn.jsdelivr.net/gh/luminsdk/script@latest/lumin.min.js",
+  },
 };
 
 const ALL_SOURCE_KEYS: SourceKey[] = [
@@ -133,6 +138,7 @@ const ALL_SOURCE_KEYS: SourceKey[] = [
   "wasm.rip",
   "tglsc",
   "3kh0",
+  "luminsdk",
 ];
 
 export function isCombineGameSourcesEnabled(): boolean {
@@ -160,11 +166,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v6";
+const GAMES_DISK_CACHE = "sunshine-games-v7";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v6-${scope}`;
+  return `sunshine-game-cache-v7-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -500,6 +506,30 @@ function mapThreeKhoGames(data: unknown): GameEntry[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function mapLuminGames(games: LuminRawGame[]): GameEntry[] {
+  if (!Array.isArray(games)) return [];
+  const seen = new Set<string>();
+  const out: GameEntry[] = [];
+  for (const game of games) {
+    if (!game || !game.id || !game.name) continue;
+    const id = String(game.id).trim();
+    const name = String(game.name).trim();
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      name,
+      author: game.category ? String(game.category).trim() : undefined,
+      coverUrl: game.image_token ? `luminsdk-img://${game.image_token}` : "",
+      gameUrl: `luminsdk://${encodeURIComponent(id)}`,
+      isExternal: false,
+      featured: false,
+      sourceKey: "luminsdk",
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -540,6 +570,7 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
     "wasm.rip": () => fetchWithTimeout(SOURCE_CONFIG["wasm.rip"].games).then(ok).then(mapWasmRipGames),
     tglsc: () => fetchWithTimeout(SOURCE_CONFIG.tglsc.games).then(ok).then(mapTglscGames),
     "3kh0": () => fetchWithTimeout(SOURCE_CONFIG["3kh0"].games).then(ok).then(mapThreeKhoGames),
+    luminsdk: () => fetchAllLuminGames().then(mapLuminGames),
   };
 
   const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {

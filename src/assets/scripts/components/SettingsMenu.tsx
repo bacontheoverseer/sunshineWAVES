@@ -441,6 +441,7 @@ export default function SettingsMenu() {
     "wasm.rip",
     "tglsc",
     "3kh0",
+    "luminsdk",
   ];
   const allThemes = [
     "default",
@@ -834,6 +835,7 @@ export default function SettingsMenu() {
               <p>wasm.rip - pc web ports game source</p>
               <p>tglsc - game source</p>
               <p>3kh0 - game source</p>
+              <p>luminsdk - game source</p>
               <p>discord - profile decorations, effects, frames &amp; nameplates</p>
               <p>klipy - chat gif search &amp; picker</p>
               <p>last.fm - now playing music status</p>

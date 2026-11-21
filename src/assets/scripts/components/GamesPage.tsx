@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "preact/hooks";
 import { memo } from "preact/compat";
 import { fetchGameData, resetGameCache, getGameDisplayLabel, type GameEntry } from "../features/games.ts";
+import { getCachedLuminImageUrl, resolveLuminImageUrl } from "../features/luminSdk.ts";
 import { showHomeView } from "../state/store.ts";
 import { attachSearchLight } from "../core/searchLight.ts";
 import { useChromebookMode } from "../core/chromebookMode.ts";
@@ -8,6 +9,8 @@ import { useChromebookMode } from "../core/chromebookMode.ts";
 const FADE_DURATION = 100;
 const SKELETON_KEYS = Array.from({ length: 12 }, (_, i) => `skeleton-${i}`);
 const RENDER_BATCH = 48;
+
+const LUMIN_IMG_PREFIX = "luminsdk-img://";
 
 const GameCard = memo(function GameCard({
   game,
@@ -18,19 +21,53 @@ const GameCard = memo(function GameCard({
   onPlay: (game: GameEntry) => void;
   onCloudPlay: (game: GameEntry, e: MouseEvent) => void;
 }) {
+  const isLuminCover = game.coverUrl.startsWith(LUMIN_IMG_PREFIX);
+  const luminToken = isLuminCover ? game.coverUrl.slice(LUMIN_IMG_PREFIX.length) : "";
+  const [resolvedCover, setResolvedCover] = useState<string>(() =>
+    isLuminCover ? (getCachedLuminImageUrl(luminToken) ?? "") : game.coverUrl,
+  );
   const [loaded, setLoaded] = useState(false);
   const [errored, setErrored] = useState(false);
+
+  useEffect(() => {
+    setLoaded(false);
+    setErrored(false);
+    if (!isLuminCover) {
+      setResolvedCover(game.coverUrl);
+      return;
+    }
+    const cached = getCachedLuminImageUrl(luminToken);
+    if (cached) {
+      setResolvedCover(cached);
+      return;
+    }
+    setResolvedCover("");
+    let cancelled = false;
+    resolveLuminImageUrl(luminToken)
+      .then((blobUrl) => {
+        if (!cancelled) setResolvedCover(blobUrl);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoaded(true);
+          setErrored(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [game.coverUrl, isLuminCover, luminToken]);
 
   return (
     <article class="game-card" onClick={() => onPlay(game)}>
       <div
         class={`game-cover${!loaded && !errored ? " skeleton" : ""}${errored ? " no-cover" : ""}${loaded && !errored ? " loaded" : ""}`}
       >
-        {game.coverUrl && !errored && (
+        {resolvedCover && !errored && (
           <img
             loading="lazy"
             decoding="async"
-            src={game.coverUrl}
+            src={resolvedCover}
             onLoad={() => setLoaded(true)}
             onError={() => { setLoaded(true); setErrored(true); }}
           />
@@ -288,13 +325,21 @@ export default function GamesPage() {
     };
   }, [show, hide, toggle]);
 
+  const getPlayIconUrl = (coverUrl: string): string => {
+    if (!coverUrl) return "";
+    if (coverUrl.startsWith(LUMIN_IMG_PREFIX)) {
+      return getCachedLuminImageUrl(coverUrl.slice(LUMIN_IMG_PREFIX.length)) ?? "";
+    }
+    return coverUrl;
+  };
+
   const handlePlay = useCallback(
     async (game: GameEntry) => {
       if (game.isExternal) {
         window.open(game.gameUrl, "_blank");
       } else if ((window as any).sunshineApp?.handleSearch) {
         hide();
-        (window as any).sunshineApp.handleSearch(game.gameUrl, game.name, game.coverUrl);
+        (window as any).sunshineApp.handleSearch(game.gameUrl, game.name, getPlayIconUrl(game.coverUrl));
       }
     },
     [hide],
@@ -306,7 +351,7 @@ export default function GamesPage() {
       e.stopPropagation();
       if (!game.isExternal && (window as any).sunshineApp?.handleSearch) {
         hide();
-        await (window as any).sunshineApp.handleSearch(game.gameUrl, game.name, game.coverUrl);
+        await (window as any).sunshineApp.handleSearch(game.gameUrl, game.name, getPlayIconUrl(game.coverUrl));
         setTimeout(() => {
           document.dispatchEvent(
             new CustomEvent("toggleGameSpaceModal", {
