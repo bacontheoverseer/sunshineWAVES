@@ -430,7 +430,15 @@ export default function SettingsMenu() {
     "canva",
   ];
   const allLinkCloaking = ["none", "about:blank", "blob:"];
-  const allGameSources = ["selenite", "gn-math", "edurocks", "velara", "truffled"];
+  const allGameSources = [
+    "selenite",
+    "gn-math",
+    "edurocks",
+    "velara",
+    "truffled",
+    "seraph",
+    "wasm.rip",
+  ];
   const allThemes = [
     "default",
     "catppuccin",
@@ -800,6 +808,8 @@ export default function SettingsMenu() {
               <p>edurocks - game source</p>
               <p>velara - game source</p>
               <p>truffled - game source</p>
+            <p>seraph - game source</p>
+            <p>wasm.rip - game source</p>
               <p>titanium network - ultraviolet</p>
               <p>mercury workshop - scramjet, epoxy, and libcurl</p>
             </div>

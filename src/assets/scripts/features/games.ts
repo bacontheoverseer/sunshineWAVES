@@ -19,6 +19,8 @@ interface SourceConfig {
   velara: { games: string; assets: string };
   edurocks: { games: string; assets: string };
   truffled: { games: string; base: string };
+  seraph: { games: string; base: string };
+  "wasm.rip": { games: string; base: string };
 }
 
 type SourceKey = keyof SourceConfig;
@@ -60,6 +62,15 @@ interface GnMathZone {
   featured?: boolean;
 }
 
+interface WasmRipGame {
+  id?: string | number;
+  name: string;
+  gameUrl: string;
+  imageUrl?: string;
+  porter?: string;
+  featured?: boolean;
+}
+
 const SOURCE_CONFIG: SourceConfig = {
   selenite: {
     games: "/!!/" + encodeMochiUrl("https://selenite.cc/resources/games.json") + "/",
@@ -82,9 +93,25 @@ const SOURCE_CONFIG: SourceConfig = {
     games: "/!!/" + encodeMochiUrl("https://truffled.lol/js/json/g.json") + "/",
     base: "https://truffled.lol",
   },
+  seraph: {
+    games: "/!!/" + encodeMochiUrl("https://seraph-delta.vercel.app/games/index.html") + "/",
+    base: "https://seraph-delta.vercel.app",
+  },
+  "wasm.rip": {
+    games: "/!!/" + encodeMochiUrl("https://wasm.rip/games.json") + "/",
+    base: "https://wasm.rip",
+  },
 };
 
-const ALL_SOURCE_KEYS: SourceKey[] = ["selenite", "gn-math", "edurocks", "velara", "truffled"];
+const ALL_SOURCE_KEYS: SourceKey[] = [
+  "selenite",
+  "gn-math",
+  "edurocks",
+  "velara",
+  "truffled",
+  "seraph",
+  "wasm.rip",
+];
 
 export function isCombineGameSourcesEnabled(): boolean {
   try {
@@ -111,11 +138,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v1";
+const GAMES_DISK_CACHE = "sunshine-games-v2";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache${scope}`;
+  return `sunshine-game-cache-v2-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -316,6 +343,80 @@ function mapTruffledGames(data: unknown): GameEntry[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function mapSeraphGames(html: string): GameEntry[] {
+  if (!html || typeof html !== "string") return [];
+  const gamesBase = `${SOURCE_CONFIG.seraph.base}/games/`;
+  const re =
+    /<a[^>]+href="([^"]+)"[^>]*>\s*<div[^>]*class="button"[^>]*style="[^"]*background-image:\s*url\(['"]?([^'")]+)['"]?\)[^"]*"[^>]*>[\s\S]*?<h2>([^<]+)<\/h2>[\s\S]*?<\/a>/gi;
+  const out: GameEntry[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const rawHref = (m[1] || "").trim();
+    const rawImg = (m[2] || "").trim();
+    const name = (m[3] || "").trim();
+    if (!rawHref || !name || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) continue;
+    let gameUrl = "";
+    let coverUrl = "";
+    try {
+      gameUrl = new URL(rawHref, gamesBase).href;
+    } catch {
+      continue;
+    }
+    if (seen.has(gameUrl)) continue;
+    seen.add(gameUrl);
+    if (rawImg) {
+      try {
+        const resolvedImg = new URL(rawImg, gamesBase).href;
+        coverUrl = `/!cover!/${encodeMochiUrl(resolvedImg)}/`;
+      } catch {}
+    }
+    out.push({
+      id: name,
+      name,
+      coverUrl,
+      gameUrl,
+      isExternal: false,
+      featured: false,
+      sourceKey: "seraph",
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function mapWasmRipGames(data: unknown): GameEntry[] {
+  const games = Array.isArray(data) ? (data as WasmRipGame[]) : [];
+  const base = `${SOURCE_CONFIG["wasm.rip"].base}/`;
+  return games
+    .filter((g) => g && g.name && g.gameUrl)
+    .map((game) => {
+      let gameUrl = game.gameUrl;
+      try {
+        gameUrl = new URL(game.gameUrl, base).href;
+      } catch {}
+      let coverUrl = "";
+      if (game.imageUrl) {
+        try {
+          const resolvedImg = new URL(game.imageUrl, base).href;
+          coverUrl = `/!cover!/${encodeMochiUrl(resolvedImg)}/`;
+        } catch {}
+      }
+      return {
+        id: game.id ?? game.name,
+        name: game.name,
+        author: game.porter,
+        coverUrl,
+        gameUrl,
+        isExternal: false,
+        featured: Boolean(game.featured),
+        sourceKey: "wasm.rip",
+      } satisfies GameEntry;
+    })
+    .sort((a, b) =>
+      a.featured === b.featured ? a.name.localeCompare(b.name) : a.featured ? -1 : 1,
+    );
+}
+
 export function fetchGameData(): Promise<GameEntry[]> {
   if (gameDataPromise) return gameDataPromise;
 
@@ -334,6 +435,7 @@ export function fetchGameData(): Promise<GameEntry[]> {
   }
 
   const ok = (res: Response) => (res.ok ? res.json() : Promise.reject(res.statusText));
+  const okText = (res: Response) => (res.ok ? res.text() : Promise.reject(res.statusText));
 
   const fetchSourceGames: Record<SourceKey, () => Promise<GameEntry[]>> = {
     velara: () => fetch(SOURCE_CONFIG.velara.games).then(ok).then(mapVelaraGames),
@@ -341,6 +443,8 @@ export function fetchGameData(): Promise<GameEntry[]> {
     edurocks: () => fetch(SOURCE_CONFIG.edurocks.games).then(ok).then(mapEdurocksGames),
     "gn-math": () => fetch(SOURCE_CONFIG["gn-math"].zones).then(ok).then(mapGnMathGames),
     truffled: () => fetch(SOURCE_CONFIG.truffled.games).then(ok).then(mapTruffledGames),
+    seraph: () => fetch(SOURCE_CONFIG.seraph.games).then(okText).then(mapSeraphGames),
+    "wasm.rip": () => fetch(SOURCE_CONFIG["wasm.rip"].games).then(ok).then(mapWasmRipGames),
   };
 
   const fetchFresh = async (): Promise<GameEntry[]> => {
