@@ -160,11 +160,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v5";
+const GAMES_DISK_CACHE = "sunshine-games-v6";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v5-${scope}`;
+  return `sunshine-game-cache-v6-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -500,7 +500,7 @@ function mapThreeKhoGames(data: unknown): GameEntry[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function fetchWithTimeout(url: string, timeoutMs = 7000): Promise<Response> {
+function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   return fetch(url, { signal: controller.signal }).finally(() => {
@@ -544,23 +544,31 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
 
   const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {
     if (combineAll) {
-      const merged: GameEntry[] = [];
-      const seenKeys = new Set<string>();
+      const byDedupKey = new Map<string, GameEntry>();
+      let succeededSources = 0;
+
+      const buildSnapshot = (): GameEntry[] =>
+        applySearchCacheFields(Array.from(byDedupKey.values())).sort((a, b) =>
+          a.featured === b.featured ? a.name.localeCompare(b.name) : a.featured ? -1 : 1,
+        );
 
       const addBatch = (batch: GameEntry[]) => {
-        let added = 0;
+        let changed = false;
         for (const g of batch) {
           const normName = String(g.name || "").trim().toLowerCase();
           const dedupKey = normName || `${g.sourceKey}:${g.gameUrl}`;
-          if (seenKeys.has(dedupKey)) continue;
-          seenKeys.add(dedupKey);
-          merged.push(g);
-          added++;
+          const existing = byDedupKey.get(dedupKey);
+          if (!existing) {
+            byDedupKey.set(dedupKey, g);
+            changed = true;
+          } else if (g.sourceKey === "wasm.rip" && existing.sourceKey !== "wasm.rip") {
+            // Always prioritize wasm.rip PC ports so PC games count & filter stay 100% consistent
+            byDedupKey.set(dedupKey, g);
+            changed = true;
+          }
         }
-        if (added > 0) {
-          const snapshot = applySearchCacheFields([...merged]).sort((a, b) =>
-            a.featured === b.featured ? a.name.localeCompare(b.name) : a.featured ? -1 : 1,
-          );
+        if (changed) {
+          const snapshot = buildSnapshot();
           allGames = snapshot;
           if (onProgress) onProgress(snapshot);
         }
@@ -570,25 +578,29 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
         ALL_SOURCE_KEYS.map((key) =>
           fetchSourceGames[key]()
             .then((list) => {
-              if (Array.isArray(list) && list.length > 0) addBatch(list);
+              if (Array.isArray(list) && list.length > 0) {
+                succeededSources++;
+                addBatch(list);
+              }
             })
             .catch(() => {}),
         ),
       );
 
-      if (merged.length === 0) {
+      if (byDedupKey.size === 0) {
         if (!isRetry) {
           await new Promise((r) => setTimeout(r, 600));
           return fetchFresh(true);
         }
         throw new Error("All game sources failed to load");
       }
-      merged.sort((a, b) =>
-        a.featured === b.featured ? a.name.localeCompare(b.name) : a.featured ? -1 : 1,
-      );
-      const ready = saveToCache("all", applySearchCacheFields(merged));
-      allGames = ready;
-      return ready;
+      const finalMerged = buildSnapshot();
+      allGames = finalMerged;
+      // Only persist to disk/session cache when most sources succeeded so partial timeouts never lock in a low count
+      if (succeededSources >= Math.max(1, ALL_SOURCE_KEYS.length - 1)) {
+        saveToCache("all", finalMerged);
+      }
+      return finalMerged;
     }
 
     const source = scope as SourceKey;
