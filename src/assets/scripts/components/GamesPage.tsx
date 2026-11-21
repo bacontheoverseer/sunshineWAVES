@@ -93,7 +93,12 @@ export default function GamesPage() {
 
   const loadGames = useCallback(() => {
     setError(null);
-    fetchGameData()
+    fetchGameData((partial) => {
+      if (partial.length > 0) {
+        setAllGames(partial);
+        setLoaded(true);
+      }
+    })
       .then((games) => {
         setAllGames(games);
         setLoaded(true);

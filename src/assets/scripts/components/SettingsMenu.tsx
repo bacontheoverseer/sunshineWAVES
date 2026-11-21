@@ -113,9 +113,10 @@ export default function SettingsMenu() {
   const [combineGameSources, setCombineGameSources] = useState(
     () => localStorage.getItem("combineGameSources") !== "false",
   );
-  const [gameSource, setGameSource] = useState(
-    () => localStorage.getItem("gameSource") || "selenite",
-  );
+  const [gameSource, setGameSource] = useState(() => {
+    const saved = localStorage.getItem("gameSource") || "selenite";
+    return saved === "edurocks" ? "selenite" : saved;
+  });
   const [theme, setTheme] = useState(
     () => localStorage.getItem("theme") || "default",
   );
@@ -433,7 +434,6 @@ export default function SettingsMenu() {
   const allGameSources = [
     "selenite",
     "gn-math",
-    "edurocks",
     "velara",
     "truffled",
     "seraph",

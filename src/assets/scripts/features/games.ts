@@ -17,7 +17,6 @@ interface SourceConfig {
   selenite: { games: string; assets: string };
   "gn-math": { zones: string; covers: string; html: string };
   velara: { games: string; assets: string };
-  edurocks: { games: string; assets: string };
   truffled: { games: string; base: string };
   seraph: { games: string; base: string };
   "wasm.rip": { games: string; base: string };
@@ -85,10 +84,6 @@ const SOURCE_CONFIG: SourceConfig = {
     games: "/!!/" + encodeMochiUrl("https://velara.cc/data/games.json") + "/",
     assets: "https://velara.cc",
   },
-  edurocks: {
-    games: "/!!/" + encodeMochiUrl("https://edunet.climaref.cl/gxxes.json") + "/",
-    assets: "https://edunet.climaref.cl",
-  },
   truffled: {
     games: "/!!/" + encodeMochiUrl("https://truffled.lol/js/json/g.json") + "/",
     base: "https://truffled.lol",
@@ -106,7 +101,6 @@ const SOURCE_CONFIG: SourceConfig = {
 const ALL_SOURCE_KEYS: SourceKey[] = [
   "selenite",
   "gn-math",
-  "edurocks",
   "velara",
   "truffled",
   "seraph",
@@ -138,11 +132,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v2";
+const GAMES_DISK_CACHE = "sunshine-games-v3";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v2-${scope}`;
+  return `sunshine-game-cache-v3-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -417,8 +411,19 @@ function mapWasmRipGames(data: unknown): GameEntry[] {
     );
 }
 
-export function fetchGameData(): Promise<GameEntry[]> {
-  if (gameDataPromise) return gameDataPromise;
+function fetchWithTimeout(url: string, timeoutMs = 7000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => {
+    window.clearTimeout(timer);
+  });
+}
+
+export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promise<GameEntry[]> {
+  if (gameDataPromise) {
+    if (onProgress && allGames.length > 0) onProgress(allGames);
+    return gameDataPromise;
+  }
 
   const combineAll = isCombineGameSourcesEnabled();
   const scope: CacheScopeKey = combineAll ? "all" : getSourceKey();
@@ -438,33 +443,53 @@ export function fetchGameData(): Promise<GameEntry[]> {
   const okText = (res: Response) => (res.ok ? res.text() : Promise.reject(res.statusText));
 
   const fetchSourceGames: Record<SourceKey, () => Promise<GameEntry[]>> = {
-    velara: () => fetch(SOURCE_CONFIG.velara.games).then(ok).then(mapVelaraGames),
-    selenite: () => fetch(SOURCE_CONFIG.selenite.games).then(ok).then(mapSeleniteGames),
-    edurocks: () => fetch(SOURCE_CONFIG.edurocks.games).then(ok).then(mapEdurocksGames),
-    "gn-math": () => fetch(SOURCE_CONFIG["gn-math"].zones).then(ok).then(mapGnMathGames),
-    truffled: () => fetch(SOURCE_CONFIG.truffled.games).then(ok).then(mapTruffledGames),
-    seraph: () => fetch(SOURCE_CONFIG.seraph.games).then(okText).then(mapSeraphGames),
-    "wasm.rip": () => fetch(SOURCE_CONFIG["wasm.rip"].games).then(ok).then(mapWasmRipGames),
+    velara: () => fetchWithTimeout(SOURCE_CONFIG.velara.games).then(ok).then(mapVelaraGames),
+    selenite: () => fetchWithTimeout(SOURCE_CONFIG.selenite.games).then(ok).then(mapSeleniteGames),
+    "gn-math": () => fetchWithTimeout(SOURCE_CONFIG["gn-math"].zones).then(ok).then(mapGnMathGames),
+    truffled: () => fetchWithTimeout(SOURCE_CONFIG.truffled.games).then(ok).then(mapTruffledGames),
+    seraph: () => fetchWithTimeout(SOURCE_CONFIG.seraph.games).then(okText).then(mapSeraphGames),
+    "wasm.rip": () => fetchWithTimeout(SOURCE_CONFIG["wasm.rip"].games).then(ok).then(mapWasmRipGames),
   };
 
-  const fetchFresh = async (): Promise<GameEntry[]> => {
+  const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {
     if (combineAll) {
-      const results = await Promise.allSettled(
-        ALL_SOURCE_KEYS.map((key) => fetchSourceGames[key]()),
-      );
       const merged: GameEntry[] = [];
       const seenKeys = new Set<string>();
-      for (const res of results) {
-        if (res.status !== "fulfilled" || !Array.isArray(res.value)) continue;
-        for (const g of res.value) {
+
+      const addBatch = (batch: GameEntry[]) => {
+        let added = 0;
+        for (const g of batch) {
           const normName = String(g.name || "").trim().toLowerCase();
           const dedupKey = normName || `${g.sourceKey}:${g.gameUrl}`;
           if (seenKeys.has(dedupKey)) continue;
           seenKeys.add(dedupKey);
           merged.push(g);
+          added++;
         }
-      }
+        if (added > 0) {
+          const snapshot = applySearchCacheFields([...merged]).sort((a, b) =>
+            a.featured === b.featured ? a.name.localeCompare(b.name) : a.featured ? -1 : 1,
+          );
+          allGames = snapshot;
+          if (onProgress) onProgress(snapshot);
+        }
+      };
+
+      await Promise.allSettled(
+        ALL_SOURCE_KEYS.map((key) =>
+          fetchSourceGames[key]()
+            .then((list) => {
+              if (Array.isArray(list) && list.length > 0) addBatch(list);
+            })
+            .catch(() => {}),
+        ),
+      );
+
       if (merged.length === 0) {
+        if (!isRetry) {
+          await new Promise((r) => setTimeout(r, 600));
+          return fetchFresh(true);
+        }
         throw new Error("All game sources failed to load");
       }
       merged.sort((a, b) =>
@@ -476,10 +501,18 @@ export function fetchGameData(): Promise<GameEntry[]> {
     }
 
     const source = scope as SourceKey;
-    const list = await (fetchSourceGames[source] ?? fetchSourceGames.selenite)();
-    const ready = saveToCache(source, applySearchCacheFields(list));
-    allGames = ready;
-    return ready;
+    try {
+      const list = await (fetchSourceGames[source] ?? fetchSourceGames.selenite)();
+      const ready = saveToCache(source, applySearchCacheFields(list));
+      allGames = ready;
+      return ready;
+    } catch (err) {
+      if (!isRetry) {
+        await new Promise((r) => setTimeout(r, 600));
+        return fetchFresh(true);
+      }
+      throw err;
+    }
   };
 
   gameDataPromise = readPersistentGamesCache(scope)
