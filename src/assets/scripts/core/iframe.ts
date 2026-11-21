@@ -83,6 +83,154 @@ function clearIframeLoadFailTimeout(iframe: HTMLIFrameElement): void {
     window.clearTimeout(iframeExt.__loadFailTimeout as number);
     iframeExt.__loadFailTimeout = null;
   }
+  if (iframeExt.__stuckScreenInterval) {
+    window.clearInterval(iframeExt.__stuckScreenInterval as number);
+    iframeExt.__stuckScreenInterval = null;
+  }
+}
+
+function triggerCookieTimeoutFallback(
+  iframe: HTMLIFrameElement,
+  isGame: boolean,
+  tabId: number | null,
+): void {
+  clearIframeLoadFailTimeout(iframe);
+  iframe.dataset.timeoutFallback = "true";
+  iframe.dataset.proxyUnavailable = "true";
+  hideLoading(tabId ?? undefined);
+  window.sunshineApp.isLoading = false;
+  iframe.parentElement?.classList.add("loaded");
+  iframe.srcdoc = buildCookieTimeoutFallbackHtml(isGame, tabId);
+}
+
+function sampleCanvasSignature(doc: Document): string {
+  try {
+    const canvas = doc.querySelector("canvas") as HTMLCanvasElement | null;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) return "no-canvas";
+    const probe = document.createElement("canvas");
+    probe.width = 16;
+    probe.height = 16;
+    const ctx = probe.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return `${canvas.width}x${canvas.height}`;
+    ctx.drawImage(canvas, 0, 0, 16, 16);
+    const data = ctx.getImageData(0, 0, 16, 16).data;
+    let hash = 2166136261;
+    let nonZero = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+      if (a > 0 && (r > 4 || g > 4 || b > 4)) nonZero++;
+      hash ^= (r << 16) ^ (g << 8) ^ b ^ a;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${canvas.width}x${canvas.height}:${nonZero}:${hash >>> 0}`;
+  } catch {
+    return "canvas-opaque";
+  }
+}
+
+function isFrameLookingStuckOrLoading(doc: Document): { stuckCandidate: boolean; signature: string } {
+  const body = doc.body;
+  if (!body) return { stuckCandidate: true, signature: "no-body" };
+
+  const text = (body.innerText || "").trim().slice(0, 300);
+  const hasVisibleMedia = Boolean(
+    doc.querySelector("canvas, iframe[src], embed, object, video"),
+  );
+  const loaderEl = doc.querySelector(
+    "progress, [id*='loading' i], [class*='loading' i], [id*='loader' i], [class*='loader' i], [id*='progress' i], #unity-loading-bar, .preloader",
+  ) as HTMLElement | null;
+  let loaderVisible = false;
+  let loaderState = "";
+  if (loaderEl) {
+    try {
+      const cs = doc.defaultView?.getComputedStyle(loaderEl);
+      loaderVisible = Boolean(
+        cs && cs.display !== "none" && cs.visibility !== "hidden" && Number(cs.opacity || "1") > 0.05,
+      );
+      if (loaderVisible) {
+        const progVal = (loaderEl as HTMLProgressElement).value ?? "";
+        const w = loaderEl.getBoundingClientRect().width;
+        loaderState = `${progVal}:${Math.round(w)}`;
+      }
+    } catch {}
+  }
+
+  const loadingTextMatch =
+    text.length < 180 &&
+    /\b(loading|please wait|initializing|downloading|fetching|unpacking|preparing|starting|0%)\b/i.test(text);
+  const canvasSig = sampleCanvasSignature(doc);
+  const isBlankCanvas = canvasSig.includes(":0:");
+  const isBlankPage = !text && (!hasVisibleMedia || isBlankCanvas);
+
+  const stuckCandidate = isBlankPage || loaderVisible || loadingTextMatch || isBlankCanvas;
+  const signature = `${text}|${loaderVisible ? loaderState : "nl"}|${canvasSig}|${body.children.length}`;
+  return { stuckCandidate, signature };
+}
+
+function startStuckGameScreenWatcher(
+  iframe: HTMLIFrameElement,
+  tabId: number | null,
+  navSeq: string,
+): void {
+  const iframeExt = iframe as HTMLIFrameElement & Record<string, unknown>;
+  clearIframeLoadFailTimeout(iframe);
+
+  const tab = window.sunshineApp.tabs?.find((t) => t.iframe === iframe) || null;
+  const targetUrl = iframe.dataset.retryTargetUrl || iframe.src || "";
+  if (!isGameTabOrUrl(targetUrl, tab)) return;
+  if (iframe.dataset.timeoutFallback === "true") return;
+
+  let userInteracted = false;
+  const markInteracted = () => {
+    userInteracted = true;
+    clearIframeLoadFailTimeout(iframe);
+  };
+  try {
+    const win = iframe.contentWindow;
+    if (win) {
+      win.addEventListener("pointerdown", markInteracted, { once: true, passive: true });
+      win.addEventListener("keydown", markInteracted, { once: true, passive: true });
+      win.addEventListener("touchstart", markInteracted, { once: true, passive: true });
+    }
+  } catch {}
+
+  let lastSig = "";
+  let unchangedSince = Date.now();
+  const startedAt = Date.now();
+  const POLL_MS = 2500;
+  const MAX_WATCH_MS = 45000;
+
+  iframeExt.__stuckScreenInterval = window.setInterval(() => {
+    if (userInteracted || iframe.dataset.navSeq !== navSeq || iframe.dataset.timeoutFallback === "true") {
+      clearIframeLoadFailTimeout(iframe);
+      return;
+    }
+    if (Date.now() - startedAt > MAX_WATCH_MS) {
+      clearIframeLoadFailTimeout(iframe);
+      return;
+    }
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const { stuckCandidate, signature } = isFrameLookingStuckOrLoading(doc);
+      if (!stuckCandidate) {
+        // Game finished loading and is displaying real content — stop watching!
+        clearIframeLoadFailTimeout(iframe);
+        return;
+      }
+      if (signature !== lastSig) {
+        lastSig = signature;
+        unchangedSince = Date.now();
+        return;
+      }
+      if (Date.now() - unchangedSince >= IFRAME_LOAD_TIMEOUT_MS) {
+        triggerCookieTimeoutFallback(iframe, true, tabId);
+      }
+    } catch {
+      // Cross-origin frame — cannot inspect DOM, stop watcher
+      clearIframeLoadFailTimeout(iframe);
+    }
+  }, POLL_MS);
 }
 
 function buildCookieTimeoutFallbackHtml(isGame: boolean, tabId: number | null): string {
@@ -667,12 +815,7 @@ export function navigateIframeTo(
   iframeExt.__loadFailTimeout = window.setTimeout(() => {
     if (iframe.dataset.navSeq !== navSeq) return;
     if (iframe.parentElement?.classList.contains("loaded")) return;
-    iframe.dataset.timeoutFallback = "true";
-    iframe.dataset.proxyUnavailable = "true";
-    hideLoading(resolvedTabId ?? undefined);
-    window.sunshineApp.isLoading = false;
-    iframe.parentElement?.classList.add("loaded");
-    iframe.srcdoc = buildCookieTimeoutFallbackHtml(isGameTarget, resolvedTabId);
+    triggerCookieTimeoutFallback(iframe, isGameTarget, resolvedTabId);
   }, IFRAME_LOAD_TIMEOUT_MS);
   if (iframe.dataset.retryTimer) {
     window.clearTimeout(Number(iframe.dataset.retryTimer));
@@ -1293,6 +1436,10 @@ export function initializeIframe(
     iframe.parentElement?.classList.add("loaded");
 
     setupIframeContentListeners(iframe, historyManager, tabId);
+
+    if (iframe.dataset.timeoutFallback !== "true" && iframe.dataset.navSeq) {
+      startStuckGameScreenWatcher(iframe, tabId, iframe.dataset.navSeq);
+    }
   };
 
   iframe.addEventListener("error", onError);
