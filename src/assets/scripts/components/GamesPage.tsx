@@ -72,6 +72,7 @@ export default function GamesPage() {
   const chromebookMode = useChromebookMode();
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [pcGamesOnly, setPcGamesOnly] = useState(false);
 
   useEffect(() => {
     if (!chromebookMode) {
@@ -324,15 +325,23 @@ export default function GamesPage() {
     [hide],
   );
 
+  const pcGamesCount = useMemo(
+    () => allGames.reduce((acc, g) => acc + (g.sourceKey === "wasm.rip" ? 1 : 0), 0),
+    [allGames],
+  );
+
   const filteredGames = useMemo(() => {
+    const baseList = pcGamesOnly
+      ? allGames.filter((g) => g.sourceKey === "wasm.rip")
+      : allGames;
     const activeQuery = chromebookMode ? debouncedQuery : query;
-    if (!activeQuery) return allGames;
+    if (!activeQuery) return baseList;
     const q = activeQuery.toLowerCase().trim();
-    if (!q) return allGames;
-    return allGames.filter(
+    if (!q) return baseList;
+    return baseList.filter(
       (g) => (g._nameLc || "").includes(q) || (g._authorLc || "").includes(q),
     );
-  }, [allGames, query, debouncedQuery, chromebookMode]);
+  }, [allGames, pcGamesOnly, query, debouncedQuery, chromebookMode]);
 
   const [renderCount, setRenderCount] = useState(RENDER_BATCH);
   const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -368,7 +377,9 @@ export default function GamesPage() {
   );
 
   const placeholder = loaded
-    ? `search through ${allGames.length} games... :D`
+    ? pcGamesOnly
+      ? `search through ${pcGamesCount} pc games... :D`
+      : `search through ${allGames.length} games... :D`
     : "fetching games...";
 
   if (!visible) return null;
@@ -429,6 +440,23 @@ export default function GamesPage() {
             <span>cloudplay</span>
           </button>
         </div>
+        {(pcGamesCount > 0 || pcGamesOnly) && (
+          <button
+            type="button"
+            class={`games-filter-pill${pcGamesOnly ? " active" : ""}`}
+            aria-pressed={pcGamesOnly}
+            title={
+              pcGamesOnly
+                ? "Showing PC games only (click to show all games)"
+                : "Filter to PC games (wasm.rip)"
+            }
+            onClick={() => setPcGamesOnly((prev) => !prev)}
+          >
+            <i class="fa-solid fa-desktop"></i>
+            <span>pc games</span>
+            {loaded && <span class="games-filter-count">{pcGamesCount}</span>}
+          </button>
+        )}
       </div>
       <div class="game-grid-container">
         <div
