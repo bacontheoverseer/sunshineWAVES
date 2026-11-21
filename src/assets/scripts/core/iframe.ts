@@ -48,6 +48,231 @@ declare global {
 
 let loadingTimeout: ReturnType<typeof setTimeout> | null = null;
 
+const IFRAME_LOAD_TIMEOUT_MS = 15000;
+const GAME_SOURCE_HOST_PATTERNS = [
+  /\/api\/3kh0\//i,
+  /selenite\.cc/i,
+  /gn-math\.dev/i,
+  /freebuisness/i,
+  /velara\.cc/i,
+  /truffled\.lol/i,
+  /seraph-delta\.vercel\.app/i,
+  /wasm\.rip/i,
+  /glseries\.net/i,
+  /gitlab\.com\/3kh0/i,
+];
+
+function isGameTabOrUrl(rawUrl: string, tab?: sunshineTab | null): boolean {
+  if (tab?.fixedTitle) return true;
+  const decoded = decodeUrl(rawUrl) || rawUrl;
+  if (GAME_SOURCE_HOST_PATTERNS.some((re) => re.test(rawUrl) || re.test(decoded))) {
+    return true;
+  }
+  try {
+    const labelFn = (window as any).sunshineApp?.getGameDisplayLabel;
+    if (typeof labelFn === "function" && labelFn(decoded)) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function clearIframeLoadFailTimeout(iframe: HTMLIFrameElement): void {
+  const iframeExt = iframe as HTMLIFrameElement & Record<string, unknown>;
+  if (iframeExt.__loadFailTimeout) {
+    window.clearTimeout(iframeExt.__loadFailTimeout as number);
+    iframeExt.__loadFailTimeout = null;
+  }
+}
+
+function buildCookieTimeoutFallbackHtml(isGame: boolean, tabId: number | null): string {
+  const kind = isGame ? "game" : "website";
+  const sourceLabel = isGame ? "game source servers" : "website source servers";
+  const safeTabId = tabId ?? -1;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>couldn't load ${kind} — operation cookie</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" />
+  <style>
+    @font-face {
+      font-family: "Lexend";
+      src: url("/assets/fonts/Lexend-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      font-family: "Lexend", system-ui, -apple-system, sans-serif;
+      background-color: #0b0b0f;
+      background-image:
+        radial-gradient(circle at 22% 20%, rgba(250, 204, 21, 0.08), transparent 44%),
+        radial-gradient(circle at 80% 82%, rgba(217, 119, 6, 0.09), transparent 46%);
+      color: #f4f4f5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-transform: lowercase;
+      overflow: hidden;
+    }
+    .card {
+      width: min(460px, 90vw);
+      padding: 32px 28px 26px;
+      border-radius: 26px;
+      background: rgba(20, 20, 26, 0.86);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.58);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 13px;
+    }
+    .brand-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #a1a1aa;
+    }
+    .brand-pill i { color: #facc15; }
+    .icon-ring {
+      width: 68px;
+      height: 68px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(250, 204, 21, 0.12);
+      border: 1px solid rgba(250, 204, 21, 0.32);
+      color: #facc15;
+      font-size: 30px;
+      position: relative;
+      margin-top: 2px;
+    }
+    .icon-ring .sub-badge {
+      position: absolute;
+      right: -2px;
+      bottom: -2px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #18181f;
+      border: 1px solid rgba(248, 113, 113, 0.45);
+      color: #f87171;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+    }
+    h1 {
+      margin: 2px 0 0;
+      font-size: 19px;
+      font-weight: 700;
+      color: #f4f4f5;
+      letter-spacing: -0.01em;
+    }
+    p {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: #a1a1aa;
+      max-width: 360px;
+    }
+    .source-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11.5px;
+      color: #d4d4d8;
+    }
+    .source-note i { color: #fbbf24; font-size: 12px; }
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .pill-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 10px 18px;
+      border-radius: 999px;
+      border: none;
+      background: #f4f4f5;
+      color: #0b0b0f;
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.12s ease, opacity 0.15s ease;
+    }
+    .pill-btn:hover { transform: translateY(-1px); opacity: 0.92; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand-pill">
+      <i class="fa-solid fa-cookie-bite"></i>
+      <span>operation cookie</span>
+    </div>
+    <div class="icon-ring">
+      <i class="fa-solid fa-cookie-bite"></i>
+      <span class="sub-badge"><i class="fa-solid fa-triangle-exclamation"></i></span>
+    </div>
+    <h1>this ${kind} couldn't be loaded!</h1>
+    <p>this is a fault of the ${sourceLabel}, not operation cookie.</p>
+    <div class="source-note">
+      <i class="fa-solid fa-server"></i>
+      <span>upstream server timed out after 15 seconds</span>
+    </div>
+    <div class="actions">
+      <button type="button" class="pill-btn" onclick="window.parent.postMessage({ type: 'sunshine-retry-tab', tabId: ${safeTabId} }, '*')">
+        <i class="fa-solid fa-rotate-right"></i>
+        <span>try again</span>
+      </button>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+if (typeof window !== "undefined" && !(window as any).__sunshineRetryMsgBound) {
+  (window as any).__sunshineRetryMsgBound = true;
+  window.addEventListener("message", (event: MessageEvent) => {
+    const data = event.data as { type?: string; tabId?: number } | null;
+    if (!data || data.type !== "sunshine-retry-tab") return;
+    const tabs = window.sunshineApp?.tabs || [];
+    const targetTab =
+      tabs.find((t) => t.id === data.tabId) ||
+      tabs.find((t) => t.id === window.sunshineApp?.activeTabId);
+    const retryUrl = targetTab?.iframe?.dataset?.retryTargetUrl;
+    if (targetTab?.iframe && retryUrl) {
+      navigateIframeTo(targetTab.iframe, retryUrl, { isRecoveryRetry: true });
+    }
+  });
+}
+
 function getTabIdFromIframe(iframe: HTMLIFrameElement): number | null {
   if (!iframe) return null;
   const val = iframe.dataset?.tabId;
@@ -94,6 +319,7 @@ export function stopIframeLoading(iframe: HTMLIFrameElement): void {
   const tabId = getTabIdFromIframe(iframe);
   const iframeExt = iframe as HTMLIFrameElement & Record<string, unknown>;
 
+  clearIframeLoadFailTimeout(iframe);
   if (loadingTimeout) clearTimeout(loadingTimeout);
   if (iframeExt.__usableTimeout) {
     clearTimeout(iframeExt.__usableTimeout as ReturnType<typeof setTimeout>);
@@ -421,11 +647,14 @@ export function navigateIframeTo(
   }
 
   iframe.dataset.navigationStarted = "true";
+  iframe.dataset.retryTargetUrl = url;
+  delete iframe.dataset.timeoutFallback;
   iframe.removeAttribute("srcdoc");
   delete iframe.dataset.proxyUnavailable;
   delete iframe.dataset.manualUrl;
   delete iframe.dataset.pendingProxyUrl;
 
+  clearIframeLoadFailTimeout(iframe);
   if (iframeExt.__usableTimeout) {
     clearTimeout(iframeExt.__usableTimeout as ReturnType<typeof setTimeout>);
     iframeExt.__usableTimeout = null;
@@ -433,6 +662,18 @@ export function navigateIframeTo(
 
   const navSeq = String(Number(iframe.dataset.navSeq || "0") + 1);
   iframe.dataset.navSeq = navSeq;
+  const resolvedTabId = (tab?.id || getTabIdFromIframe(iframe)) ?? null;
+  const isGameTarget = isGameTabOrUrl(url, tab);
+  iframeExt.__loadFailTimeout = window.setTimeout(() => {
+    if (iframe.dataset.navSeq !== navSeq) return;
+    if (iframe.parentElement?.classList.contains("loaded")) return;
+    iframe.dataset.timeoutFallback = "true";
+    iframe.dataset.proxyUnavailable = "true";
+    hideLoading(resolvedTabId ?? undefined);
+    window.sunshineApp.isLoading = false;
+    iframe.parentElement?.classList.add("loaded");
+    iframe.srcdoc = buildCookieTimeoutFallbackHtml(isGameTarget, resolvedTabId);
+  }, IFRAME_LOAD_TIMEOUT_MS);
   if (iframe.dataset.retryTimer) {
     window.clearTimeout(Number(iframe.dataset.retryTimer));
     delete iframe.dataset.retryTimer;
@@ -860,7 +1101,9 @@ function setupIframeContentListeners(
     iframeWindow.addEventListener("beforeunload", beforeUnloadHandler);
 
     const domLoadedHandler = () => {
-      if (loadingTimeout) clearTimeout(loadingTimeout);
+      clearIframeLoadFailTimeout(iframe);
+      clearIframeLoadFailTimeout(iframe);
+  if (loadingTimeout) clearTimeout(loadingTimeout);
 
       try {
         const currentUrl = iframeWindow.location.href;
@@ -1004,7 +1247,9 @@ export function initializeIframe(
   const iframeExt = iframe as HTMLIFrameElement & Record<string, unknown>;
 
   const onError = (): void => {
-    if (loadingTimeout) clearTimeout(loadingTimeout);
+    clearIframeLoadFailTimeout(iframe);
+    clearIframeLoadFailTimeout(iframe);
+  if (loadingTimeout) clearTimeout(loadingTimeout);
     if (iframeExt.__usableTimeout) {
       clearTimeout(iframeExt.__usableTimeout as ReturnType<typeof setTimeout>);
       iframeExt.__usableTimeout = null;
@@ -1014,7 +1259,9 @@ export function initializeIframe(
   };
 
   const onLoad = (): void => {
-    if (loadingTimeout) clearTimeout(loadingTimeout);
+    clearIframeLoadFailTimeout(iframe);
+    clearIframeLoadFailTimeout(iframe);
+  if (loadingTimeout) clearTimeout(loadingTimeout);
     if (iframeExt.__usableTimeout) {
       clearTimeout(iframeExt.__usableTimeout as ReturnType<typeof setTimeout>);
       iframeExt.__usableTimeout = null;
