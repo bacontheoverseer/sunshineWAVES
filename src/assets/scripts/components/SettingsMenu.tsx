@@ -838,12 +838,8 @@ export default function SettingsMenu() {
               <p>klipy - chat gif search &amp; picker</p>
               <p>last.fm - now playing music status</p>
               <p>myinstants - soundboard audio clips</p>
-              <p>font awesome - interface icons</p>
               <p>titanium network - ultraviolet</p>
               <p>mercury workshop - scramjet, epoxy, libcurl &amp; wisp</p>
-              <p>preact &amp; vite - frontend framework &amp; bundler</p>
-              <p>fingerprintjs &amp; cloudflare turnstile - anti-spam protection</p>
-              <p>aiven postgresql - cloud database hosting</p>
             </div>
             <div class="settings-item">
               <label>you have reached the end!</label>
