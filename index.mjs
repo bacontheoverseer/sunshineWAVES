@@ -10398,6 +10398,27 @@ app.use("/api/ccported", async (req, res) => {
 });
 
 // EasyFun.gg Android cloud games catalog (cached in memory for 30m)
+const EASYFUN_FALLBACK_GAMES = [
+  { id: "roblox", name: "Roblox", playUrl: "https://www.easyfun.gg/cloud-games/roblox.html", cover: "https://res.ldrescdn.com/rms/ldplayer/process/img/251c47ffa26347b7860aedc9c02511211724903692.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "cookierun-kingdom-cloud-online", name: "CookieRun: Kingdom", playUrl: "https://www.easyfun.gg/cloud-games/cookierun-kingdom-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/h0q62mee82s-1757931773.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "brawl-stars", name: "Brawl Stars", playUrl: "https://www.easyfun.gg/cloud-games/brawl-stars.html", cover: "https://res.ldrescdn.com/rms/upload/easyfun/admin/o6kf58bo7vb-1757925491.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "genshin-impact", name: "Genshin Impact", playUrl: "https://www.easyfun.gg/cloud-games/genshin-impact.html", cover: "https://res.ldrescdn.com/rms/upload/easyfun/admin/5vohoce9bsm-1757925457.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "honkai-star-rail", name: "Honkai: Star Rail", playUrl: "https://www.easyfun.gg/cloud-games/honkai-star-rail.html", cover: "https://res.ldrescdn.com/rms/upload/easyfun/admin/wfc93tdzwv-1757925441.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "clash-of-clans", name: "Clash of Clans", playUrl: "https://www.easyfun.gg/cloud-games/clash-of-clans.html", cover: "https://res.ldrescdn.com/rms/upload/easyfun/admin/760u9rnjitw-1757925476.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "clash-royale-cloud-online", name: "Clash Royale", playUrl: "https://www.easyfun.gg/cloud-games/clash-royale-cloud-online.html", cover: "https://res.ldplayer.net/rms/ldplayer/process/img/41246ab53d5544168ac391832883550a1719158138.webp?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "among-us", name: "Among Us", playUrl: "https://www.easyfun.gg/cloud-games/among-us.html", cover: "https://res.ldrescdn.com/rms/ldplayer/process/img/5e941c7cf3ee4814954a446071ea255d1728448132.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "free-fire", name: "Free Fire", playUrl: "https://www.easyfun.gg/cloud-games/free-fire.html", cover: "https://res.ldrescdn.com/rms/ldplayer/process/img/b8e2aca38996414ab40a6960bcb9463b1728458849.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "free-fire-max-cloud-online", name: "Free Fire MAX", playUrl: "https://www.easyfun.gg/cloud-games/free-fire-max-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/7w7a86n8d4e-1757932101.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "squad-busters", name: "Squad Busters", playUrl: "https://www.easyfun.gg/cloud-games/squad-busters.html", cover: "https://res.ldrescdn.com/rms/upload/en/blx2ezb2vro-1757932256.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "solo-leveling-arise-cloud-online", name: "Solo Leveling:Arise", playUrl: "https://www.easyfun.gg/cloud-games/solo-leveling-arise-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/va2ubd8lh5-1757939462.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "asphalt-8-car-racing-game-cloud-online", name: "Asphalt 8: Airborne", playUrl: "https://www.easyfun.gg/cloud-games/asphalt-8-car-racing-game-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/bpqiauxrc3t-1757940251.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "eggy-party-trendy-party-game-cloud-online", name: "Eggy Party: Trendy Party Game", playUrl: "https://www.easyfun.gg/cloud-games/eggy-party-trendy-party-game-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/otxktpek10b-1754024972.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "soul-knight-cloud-online", name: "Soul Knight", playUrl: "https://www.easyfun.gg/cloud-games/soul-knight-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/311lv185ud-1747207976.png?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "purble-place-cloud-online", name: "Purble Place (original)", playUrl: "https://www.easyfun.gg/cloud-games/purble-place-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/lsbb34kt2s9-1757939381.webp?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "epic-seven-cloud-online", name: "Epic Seven", playUrl: "https://www.easyfun.gg/cloud-games/epic-seven-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/bzbl4rmfied-1757940172.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+  { id: "last-war-survival-game-cloud-online", name: "Last War:Survival Game", playUrl: "https://www.easyfun.gg/cloud-games/last-war-survival-game-cloud-online.html", cover: "https://res.ldrescdn.com/rms/upload/en/rnr7nbtrvr-1757939702.jpg?x-oss-process=image/format,webp/quality,Q_75/resize,w_384" },
+];
+
 let easyfunGamesCache = { data: null, fetchedAt: 0 };
 let easyfunGamesInFlight = null;
 const EASYFUN_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -10472,12 +10493,13 @@ app.get("/api/easyfun/games.json", async (_req, res) => {
   try {
     const games = await fetchEasyfunGamesCatalog();
     res.setHeader("Cache-Control", "public, max-age=900");
-    return res.json(games);
-  } catch (err) {
+    return res.json(games.length > 0 ? games : EASYFUN_FALLBACK_GAMES);
+  } catch {
+    res.setHeader("Cache-Control", "public, max-age=300");
     if (Array.isArray(easyfunGamesCache.data) && easyfunGamesCache.data.length > 0) {
       return res.json(easyfunGamesCache.data);
     }
-    return res.status(502).json({ error: err?.message || "Failed to fetch EasyFun catalog" });
+    return res.json(EASYFUN_FALLBACK_GAMES);
   }
 });
 
