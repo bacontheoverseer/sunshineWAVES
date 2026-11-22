@@ -41,6 +41,11 @@ interface ProfileCustomizerModalProps {
   initialBio: string;
   initialStatusText: string;
   saving: boolean;
+  onAutoSave?: (payload: {
+    bio: string;
+    statusText: string;
+    customization: ProfileCustomization;
+  }) => Promise<boolean>;
   onSave: (payload: {
     bio: string;
     statusText: string;
@@ -65,6 +70,7 @@ export default function ProfileCustomizerModal({
   initialBio,
   initialStatusText,
   saving,
+  onAutoSave,
   onSave,
   onClose,
 }: ProfileCustomizerModalProps) {
@@ -91,6 +97,11 @@ export default function ProfileCustomizerModal({
   const avatarFileRef = useRef<HTMLInputElement>(null);
   const bannerFileRef = useRef<HTMLInputElement>(null);
   const hasEditedRef = useRef(false);
+  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const lastSavedHashRef = useRef<string>(
+    JSON.stringify({ bio: initialBio, statusText: initialStatusText, custom: initialCustom })
+  );
 
   // Hydrate draft if parent finishes loading the saved server profile after mount
   useEffect(() => {
@@ -98,7 +109,58 @@ export default function ProfileCustomizerModal({
     setCustom(initialCustom);
     setBio(initialBio);
     setStatusText(initialStatusText);
+    lastSavedHashRef.current = JSON.stringify({
+      bio: initialBio,
+      statusText: initialStatusText,
+      custom: initialCustom,
+    });
   }, [initialCustom, initialBio, initialStatusText]);
+
+  // Debounced autosave whenever the user edits any profile field, decoration, effect, nameplate, or frame
+  useEffect(() => {
+    if (!onAutoSave || !hasEditedRef.current) return;
+    const nextHash = JSON.stringify({ bio, statusText, custom });
+    if (nextHash === lastSavedHashRef.current) return;
+
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    setAutoSaveState("saving");
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      const snapshotHash = nextHash;
+      void onAutoSave({ bio, statusText, customization: custom }).then((ok) => {
+        if (ok) {
+          lastSavedHashRef.current = snapshotHash;
+          setAutoSaveState("saved");
+        } else {
+          setAutoSaveState("error");
+        }
+      });
+    }, 600);
+
+    return () => {
+      if (autoSaveTimerRef.current !== null) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [bio, statusText, custom, onAutoSave]);
+
+  const handleCloseWithFlush = () => {
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    if (onAutoSave && hasEditedRef.current) {
+      const nextHash = JSON.stringify({ bio, statusText, custom });
+      if (nextHash !== lastSavedHashRef.current) {
+        lastSavedHashRef.current = nextHash;
+        void onAutoSave({ bio, statusText, customization: custom });
+      }
+    }
+    onClose();
+  };
 
   // Live-fetch Last.fm track preview whenever custom.lastfmUsername changes
   useEffect(() => {
@@ -239,7 +301,7 @@ export default function ProfileCustomizerModal({
     <div
       class="chat-profile-modal-backdrop"
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget) handleCloseWithFlush();
       }}
     >
       <div class="chat-customizer-card" onClick={(e) => e.stopPropagation()}>
@@ -249,6 +311,55 @@ export default function ProfileCustomizerModal({
             <span style={{ fontWeight: 700, fontSize: "14px", textTransform: "lowercase" }}>
               customize account profile
             </span>
+            {autoSaveState !== "idle" && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "5px",
+                  padding: "2px 9px",
+                  borderRadius: "999px",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  textTransform: "lowercase",
+                  background:
+                    autoSaveState === "error"
+                      ? "rgba(239, 68, 68, 0.16)"
+                      : autoSaveState === "saved"
+                        ? "rgba(74, 222, 128, 0.14)"
+                        : "var(--bg-surface-8)",
+                  color:
+                    autoSaveState === "error"
+                      ? "#f87171"
+                      : autoSaveState === "saved"
+                        ? "#4ade80"
+                        : "var(--text-muted)",
+                  border:
+                    autoSaveState === "error"
+                      ? "1px solid rgba(239, 68, 68, 0.3)"
+                      : autoSaveState === "saved"
+                        ? "1px solid rgba(74, 222, 128, 0.3)"
+                        : "1px solid var(--bg-surface-15)",
+                }}
+              >
+                <i
+                  class={
+                    autoSaveState === "saving"
+                      ? "fa-solid fa-spinner fa-spin"
+                      : autoSaveState === "saved"
+                        ? "fa-solid fa-check"
+                        : "fa-solid fa-triangle-exclamation"
+                  }
+                />
+                <span>
+                  {autoSaveState === "saving"
+                    ? "saving..."
+                    : autoSaveState === "saved"
+                      ? "saved"
+                      : "save failed"}
+                </span>
+              </span>
+            )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <button
@@ -267,7 +378,7 @@ export default function ProfileCustomizerModal({
             <button
               type="button"
               class="chat-header-btn"
-              onClick={onClose}
+              onClick={handleCloseWithFlush}
               title="Close customizer"
             >
               <i class="fa-solid fa-xmark" />

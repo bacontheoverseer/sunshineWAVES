@@ -1497,13 +1497,32 @@ export default function ChatModal() {
     [cloudUser]
   );
 
-  const saveProfilePayload = useCallback(
-    async (payload: {
+  const savingProfileRef = useRef(false);
+  const queuedProfileSaveRef = useRef<{
+    payload: {
       bio: string;
       statusText: string;
       customization?: ProfileCustomization;
-    }): Promise<boolean> => {
-      if (!cloudUser || savingProfile) return false;
+    };
+    silent: boolean;
+  } | null>(null);
+
+  const saveProfilePayload = useCallback(
+    async (
+      payload: {
+        bio: string;
+        statusText: string;
+        customization?: ProfileCustomization;
+      },
+      options: { silent?: boolean } = {}
+    ): Promise<boolean> => {
+      if (!cloudUser) return false;
+      const silent = Boolean(options.silent);
+      if (savingProfileRef.current) {
+        queuedProfileSaveRef.current = { payload, silent };
+        return true;
+      }
+      savingProfileRef.current = true;
       setSavingProfile(true);
       try {
         let token = "";
@@ -1555,21 +1574,37 @@ export default function ChatModal() {
             customization: savedCustom,
           });
         } catch {}
-        notifyToast("profile & animations saved!", "success");
+        if (!silent) {
+          notifyToast("profile & animations saved!", "success");
+        }
         return true;
       } catch {
         notifyToast("failed to save profile", "error");
         return false;
       } finally {
+        savingProfileRef.current = false;
         setSavingProfile(false);
+        const nextQueued = queuedProfileSaveRef.current;
+        if (nextQueued) {
+          queuedProfileSaveRef.current = null;
+          void saveProfilePayload(nextQueued.payload, { silent: nextQueued.silent });
+        }
       }
     },
-    [cloudUser, savingProfile, applyProfileUpdateLocally]
+    [cloudUser, editingCustom, applyProfileUpdateLocally]
   );
+
+  const inlineProfileEditedRef = useRef(false);
+  const inlineProfileSaveTimerRef = useRef<number | null>(null);
 
   const handleSaveMyProfile = useCallback(
     async (e?: Event) => {
       if (e) e.preventDefault();
+      if (inlineProfileSaveTimerRef.current !== null) {
+        window.clearTimeout(inlineProfileSaveTimerRef.current);
+        inlineProfileSaveTimerRef.current = null;
+      }
+      inlineProfileEditedRef.current = false;
       await saveProfilePayload({
         bio: editingBio,
         statusText: editingStatusText,
@@ -1578,6 +1613,31 @@ export default function ChatModal() {
     },
     [saveProfilePayload, editingBio, editingStatusText, editingCustom]
   );
+
+  useEffect(() => {
+    if (!cloudUser || !inlineProfileEditedRef.current) return;
+    if (inlineProfileSaveTimerRef.current !== null) {
+      window.clearTimeout(inlineProfileSaveTimerRef.current);
+    }
+    inlineProfileSaveTimerRef.current = window.setTimeout(() => {
+      inlineProfileSaveTimerRef.current = null;
+      inlineProfileEditedRef.current = false;
+      void saveProfilePayload(
+        {
+          bio: editingBio,
+          statusText: editingStatusText,
+          customization: editingCustom,
+        },
+        { silent: true }
+      );
+    }, 700);
+    return () => {
+      if (inlineProfileSaveTimerRef.current !== null) {
+        window.clearTimeout(inlineProfileSaveTimerRef.current);
+        inlineProfileSaveTimerRef.current = null;
+      }
+    };
+  }, [cloudUser, editingBio, editingStatusText, editingCustom, saveProfilePayload]);
 
   const handleOpenCustomizer = useCallback(async () => {
     if (!cloudUser) {
@@ -6815,9 +6875,10 @@ export default function ChatModal() {
                             placeholder="custom status (e.g. grinding slope)..."
                             maxLength={60}
                             value={editingStatusText}
-                            onInput={(e) =>
-                              setEditingStatusText((e.target as HTMLInputElement).value)
-                            }
+                            onInput={(e) => {
+                              inlineProfileEditedRef.current = true;
+                              setEditingStatusText((e.target as HTMLInputElement).value);
+                            }}
                           />
                           <textarea
                             class="chat-mod-input chat-profile-bio-textarea"
@@ -6825,9 +6886,10 @@ export default function ChatModal() {
                             maxLength={220}
                             rows={2}
                             value={editingBio}
-                            onInput={(e) =>
-                              setEditingBio((e.target as HTMLTextAreaElement).value)
-                            }
+                            onInput={(e) => {
+                              inlineProfileEditedRef.current = true;
+                              setEditingBio((e.target as HTMLTextAreaElement).value);
+                            }}
                           />
                           <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
                             <input
@@ -6837,6 +6899,7 @@ export default function ChatModal() {
                               maxLength={80}
                               value={editingCustom.lastfmUsername}
                               onInput={(e) => {
+                                inlineProfileEditedRef.current = true;
                                 const val = sanitizeLastfmUsername(
                                   (e.target as HTMLInputElement).value
                                 );
@@ -6851,12 +6914,13 @@ export default function ChatModal() {
                                 type="button"
                                 class="chat-profile-pill-btn"
                                 style={{ flexShrink: 0 }}
-                                onClick={() =>
+                                onClick={() => {
+                                  inlineProfileEditedRef.current = true;
                                   setEditingCustom((prev) => ({
                                     ...prev,
                                     lastfmUsername: "",
-                                  }))
-                                }
+                                  }));
+                                }}
                               >
                                 unlink
                               </button>
@@ -7292,6 +7356,7 @@ export default function ChatModal() {
             initialBio={editingBio}
             initialStatusText={editingStatusText}
             saving={savingProfile}
+            onAutoSave={(payload) => saveProfilePayload(payload, { silent: true })}
             onSave={async (payload) => {
               const ok = await saveProfilePayload(payload);
               if (ok) setShowCustomizer(false);
