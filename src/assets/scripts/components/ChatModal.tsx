@@ -1205,6 +1205,7 @@ export default function ChatModal() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const vadIntervalRef = useRef<number | null>(null);
   const activeVoiceRoomRef = useRef<string | null>(null);
@@ -1863,16 +1864,59 @@ export default function ChatModal() {
     [cloudUser]
   );
 
+  const flushPendingIceCandidates = useCallback(async (remoteClientId: string, pc: RTCPeerConnection) => {
+    const queued = pendingIceCandidatesRef.current.get(remoteClientId);
+    if (!queued || queued.length === 0) return;
+    pendingIceCandidatesRef.current.delete(remoteClientId);
+    for (const candidate of queued) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch {}
+    }
+  }, []);
+
+  const ensureRemoteAudioPlaying = useCallback((audioEl: HTMLAudioElement) => {
+    audioEl.play().catch(() => {
+      const retryPlay = () => {
+        for (const el of remoteAudioElementsRef.current.values()) {
+          if (!el.muted && el.paused) {
+            el.play().catch(() => {});
+          }
+        }
+        if (audioCtxRef.current?.state === "suspended") {
+          void audioCtxRef.current.resume().catch(() => {});
+        }
+        window.removeEventListener("pointerdown", retryPlay, true);
+        window.removeEventListener("keydown", retryPlay, true);
+      };
+      window.addEventListener("pointerdown", retryPlay, { capture: true, once: true });
+      window.addEventListener("keydown", retryPlay, { capture: true, once: true });
+    });
+  }, []);
+
   // Create or get RTCPeerConnection for a remote peer
   const getOrCreatePeerConnection = useCallback(
     (remoteClientId: string, remoteUsername: string, roomId: string, initiator: boolean) => {
       const existing = peerConnectionsRef.current.get(remoteClientId);
-      if (existing) return existing;
+      if (existing && existing.connectionState !== "failed" && existing.connectionState !== "closed") {
+        if (localStreamRef.current && existing.getSenders().length === 0) {
+          for (const track of localStreamRef.current.getTracks()) {
+            existing.addTrack(track, localStreamRef.current);
+          }
+        }
+        return existing;
+      }
+      if (existing) {
+        try { existing.close(); } catch {}
+        peerConnectionsRef.current.delete(remoteClientId);
+      }
 
       const pc = new RTCPeerConnection({
         iceServers: [
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
+          { urls: "stun:stun.cloudflare.com:3478" },
         ],
       });
 
@@ -1882,6 +1926,10 @@ export default function ChatModal() {
         for (const track of localStreamRef.current.getTracks()) {
           pc.addTrack(track, localStreamRef.current);
         }
+      } else {
+        try {
+          pc.addTransceiver("audio", { direction: "recvonly" });
+        } catch {}
       }
 
       pc.onicecandidate = (e) => {
@@ -1896,18 +1944,22 @@ export default function ChatModal() {
       };
 
       pc.ontrack = (e) => {
-        const stream = e.streams?.[0];
+        const stream = e.streams?.[0] || (e.track ? new MediaStream([e.track]) : null);
         if (!stream) return;
         let audioEl = remoteAudioElementsRef.current.get(remoteClientId);
         if (!audioEl) {
-          audioEl = new Audio();
+          audioEl = document.createElement("audio");
           audioEl.autoplay = true;
+          (audioEl as HTMLAudioElement & { playsInline: boolean }).playsInline = true;
+          audioEl.style.display = "none";
+          document.body.appendChild(audioEl);
           remoteAudioElementsRef.current.set(remoteClientId, audioEl);
         }
         audioEl.dataset.username = remoteUsername;
         audioEl.srcObject = stream;
+        audioEl.volume = Math.max(0, Math.min(1, peerVolumes[remoteUsername.toLowerCase()] ?? 1));
         audioEl.muted = isDeafenedRef.current || isUserBlocked(remoteUsername);
-        audioEl.play().catch(() => {});
+        ensureRemoteAudioPlaying(audioEl);
 
         // Set up remote VAD speaking detector
         try {
@@ -1916,6 +1968,7 @@ export default function ChatModal() {
             (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
           if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
           const ctx = audioCtxRef.current;
+          if (ctx.state === "suspended") void ctx.resume().catch(() => {});
           const src = ctx.createMediaStreamSource(stream);
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 256;
@@ -1953,7 +2006,7 @@ export default function ChatModal() {
 
       return pc;
     },
-    [sendVoiceSignal, isUserBlocked]
+    [sendVoiceSignal, isUserBlocked, peerVolumes, ensureRemoteAudioPlaying]
   );
 
   // Incoming voice event handler
@@ -2007,10 +2060,12 @@ export default function ChatModal() {
           pc.close();
           peerConnectionsRef.current.delete(fromClientId);
         }
+        pendingIceCandidatesRef.current.delete(fromClientId);
         const audio = remoteAudioElementsRef.current.get(fromClientId);
         if (audio) {
           audio.pause();
           audio.srcObject = null;
+          audio.remove();
           remoteAudioElementsRef.current.delete(fromClientId);
         }
       } else if (signalType === "VOICE_STATE") {
@@ -2057,7 +2112,13 @@ export default function ChatModal() {
       ) {
         const pc = getOrCreatePeerConnection(fromClientId, username || "guest", roomId, false);
         try {
+          const isPolite = myClientId < fromClientId;
+          if (pc.signalingState !== "stable") {
+            if (!isPolite) return;
+            await pc.setLocalDescription({ type: "rollback" });
+          }
           await pc.setRemoteDescription(new RTCSessionDescription(sdpOrCandidate));
+          await flushPendingIceCandidates(fromClientId, pc);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           sendVoiceSignal({
@@ -2073,9 +2134,10 @@ export default function ChatModal() {
         activeVoiceRoomRef.current === roomId
       ) {
         const pc = peerConnectionsRef.current.get(fromClientId);
-        if (pc) {
+        if (pc && pc.signalingState === "have-local-offer") {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(sdpOrCandidate));
+            await flushPendingIceCandidates(fromClientId, pc);
           } catch {}
         }
       } else if (
@@ -2084,14 +2146,22 @@ export default function ChatModal() {
         activeVoiceRoomRef.current === roomId
       ) {
         const pc = peerConnectionsRef.current.get(fromClientId);
-        if (pc && sdpOrCandidate) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(sdpOrCandidate));
-          } catch {}
+        if (sdpOrCandidate) {
+          if (pc && pc.remoteDescription) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(sdpOrCandidate));
+            } catch {}
+          } else {
+            const list = pendingIceCandidatesRef.current.get(fromClientId) || [];
+            if (list.length < 64) {
+              list.push(sdpOrCandidate);
+              pendingIceCandidatesRef.current.set(fromClientId, list);
+            }
+          }
         }
       }
     },
-    [getOrCreatePeerConnection, sendVoiceSignal]
+    [getOrCreatePeerConnection, sendVoiceSignal, flushPendingIceCandidates]
   );
 
   // Leave active voice channel
@@ -2117,14 +2187,17 @@ export default function ChatModal() {
       } catch {}
     }
     peerConnectionsRef.current.clear();
+    pendingIceCandidatesRef.current.clear();
 
     for (const audio of remoteAudioElementsRef.current.values()) {
       audio.pause();
       audio.srcObject = null;
+      audio.remove();
     }
     remoteAudioElementsRef.current.clear();
 
     const myClientId = getClientId();
+    activeVoiceRoomRef.current = null;
     setActiveVoiceRoom(null);
     setSpeakingMap((prev) => ({ ...prev, [myClientId]: false }));
     setVoiceRooms((prev) => ({
@@ -2231,6 +2304,7 @@ export default function ChatModal() {
         deafened: isDeafenedRef.current,
       };
 
+      activeVoiceRoomRef.current = roomId;
       setActiveVoiceRoom(roomId);
       setVoiceRooms((prev) => {
         const current = (prev[roomId] || []).filter((p) => p.clientId !== myClientId);
