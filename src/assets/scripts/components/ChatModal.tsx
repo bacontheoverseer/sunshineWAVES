@@ -3619,13 +3619,10 @@ export default function ChatModal() {
   const typingLabel = useMemo(() => {
     if (activeChannelTypers.length === 0) return "";
     if (activeChannelTypers.length === 1) return `${activeChannelTypers[0]} is typing...`;
-    if (activeChannelTypers.length === 2) {
-      return `${activeChannelTypers[0]} and ${activeChannelTypers[1]} are typing...`;
+    if (activeChannelTypers.length <= 3) {
+      return `${activeChannelTypers.join(", ")} are typing...`;
     }
-    if (activeChannelTypers.length === 3) {
-      return `${activeChannelTypers[0]}, ${activeChannelTypers[1]}, and ${activeChannelTypers[2]} are typing...`;
-    }
-    return "several people are typing...";
+    return `${activeChannelTypers.slice(0, 3).join(", ")} +${activeChannelTypers.length - 3} more are typing...`;
   }, [activeChannelTypers]);
 
   // Scroll to bottom when messages change or channel changes

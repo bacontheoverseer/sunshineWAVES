@@ -913,9 +913,10 @@
 .chat-typing-indicator {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 2px 14px 6px;
-  font-size: 12px;
+  gap: 6px;
+  padding: 0 14px 4px;
+  font-size: 11px;
+  line-height: 1.2;
   color: var(--text-muted);
   user-select: none;
   animation: chatTypingFadeIn 0.16s ease-out;
