@@ -239,23 +239,35 @@ export default function AdminPanel() {
     }
   }, [isOpen, isAuthenticated, fetchClients]);
 
-  const handleLogin = async (e: Event) => {
-    e.preventDefault();
+  const keyInputRef = useRef<HTMLInputElement>(null);
+  const unlockingRef = useRef(false);
+  const [unlocking, setUnlocking] = useState(false);
+
+  const handleLogin = async (e?: Event) => {
+    if (e) e.preventDefault();
+    if (unlockingRef.current) return;
     setAuthError("");
-    const key = keyInput.trim();
+    const rawVal = keyInputRef.current?.value ?? keyInput;
+    const key = String(rawVal || "").trim();
     if (!key) {
       setAuthError("enter your secret key");
       return;
     }
 
+    unlockingRef.current = true;
+    setUnlocking(true);
     try {
       const res = await fetch("/api/admin/verify", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-key": key,
+        },
         body: JSON.stringify({ adminSecret: key }),
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
         sessionStorage.setItem("sunshine_admin_key", key);
         setAdminKey(key);
         setAdminUsername(data.username || "bacon");
@@ -263,10 +275,16 @@ export default function AdminPanel() {
         setKeyInput("");
         toast("success", "admin unlocked");
       } else {
-        setAuthError(data.error?.toLowerCase() || "invalid secret key");
+        setAuthError(
+          (typeof data?.error === "string" && data.error.toLowerCase()) ||
+            (res.status === 429 ? "too many attempts — wait a moment" : "invalid secret key")
+        );
       }
     } catch {
       setAuthError("failed to reach server");
+    } finally {
+      unlockingRef.current = false;
+      setUnlocking(false);
     }
   };
 
@@ -601,11 +619,13 @@ export default function AdminPanel() {
           <p>enter your master secret key to unlock the admin panel.</p>
           <form onSubmit={handleLogin} class="input-container">
             <input
+              ref={keyInputRef}
               type="password"
               class="admin-input"
               placeholder="secret key"
               value={keyInput}
               onInput={(e) => setKeyInput((e.target as HTMLInputElement).value)}
+              onChange={(e) => setKeyInput((e.target as HTMLInputElement).value)}
               style={{ marginBottom: "10px" }}
               autoFocus
             />
@@ -614,8 +634,13 @@ export default function AdminPanel() {
                 {authError}
               </p>
             )}
-            <button type="submit" class="auth-action-btn">
-              unlock
+            <button
+              type="submit"
+              class="auth-action-btn"
+              disabled={unlocking}
+              onClick={(e) => void handleLogin(e)}
+            >
+              {unlocking ? "unlocking..." : "unlock"}
             </button>
           </form>
           <button class="admin-close-btn" onClick={() => setIsOpen(false)}>

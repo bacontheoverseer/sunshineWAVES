@@ -311,6 +311,31 @@ html.cookie-chaos-blur {
   font-weight: 400;
 }
 
+.admin-auth-popup .auth-action-btn {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  padding: 11px 16px;
+  border: none;
+  border-radius: 15px;
+  background-color: var(--btn-primary-bg, #ffffff);
+  color: var(--btn-primary-text, #111111);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.12s ease, opacity 0.12s ease;
+}
+
+.admin-auth-popup .auth-action-btn:hover:not(:disabled) {
+  background-color: var(--btn-primary-bg-hover, #e5e5e5);
+  transform: scale(1.02);
+}
+
+.admin-auth-popup .auth-action-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 .admin-menu h2 {
   color: var(--text-primary);
   margin-bottom: 15px;

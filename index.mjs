@@ -1299,8 +1299,8 @@ app.get("/api/stuff", (_req, res) => {
 });
 
 // --- Sunshine Live Client & Chaos Admin Engine ---
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "cookie_admin_chaos_master_key_99";
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "bacon";
+const ADMIN_SECRET = (process.env.ADMIN_SECRET || "cookie_admin_chaos_master_key_99").trim();
+const ADMIN_USERNAME = (process.env.ADMIN_USERNAME || "bacon").trim();
 const OWNER_USERNAMES = new Set(
   (process.env.OWNER_USERNAMES || "bacontheoverseer,bacon")
     .split(",")
@@ -5374,7 +5374,7 @@ setInterval(() => {
 app.post("/api/admin/verify", (req, res) => {
   const authHeader = req.headers.authorization;
   const bearerKey = authHeader && authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
-  const key = req.headers["x-admin-key"] || bearerKey || (req.body && req.body.adminSecret);
+  const key = String(req.headers["x-admin-key"] || bearerKey || (req.body && req.body.adminSecret) || "").trim();
   if (!key || key !== ADMIN_SECRET) {
     return res.status(401).json({ success: false, error: "Invalid Admin Secret" });
   }
