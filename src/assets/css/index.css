@@ -13,7 +13,7 @@ html {
 
 body {
     background-color: var(--bg-body);
-    background-image: url(/background.jpg);
+    background-image: url(/thanksgivingbackground.avif);
     background-size: cover;
     background-position: center;
     background-repeat: no-repeat;
@@ -1916,11 +1916,6 @@ html.dark-mode body {
     background-image: none;
 }
 
-html.dark-mode body.games-view,
-html.dark-mode body.apps-view,
-html.dark-mode body.studio-view,
-html.dark-mode body.shop-view,
-html.dark-mode body.master-view,
 html.dark-mode body.browser-view {
     background-color: var(--bg-body, #050507);
     background-image: none;
@@ -1936,11 +1931,6 @@ html.dark-mode .site-bg-layer {
     background-color: #161311;
 }
 
-html.dark-mode body.games-view .site-bg-layer,
-html.dark-mode body.apps-view .site-bg-layer,
-html.dark-mode body.studio-view .site-bg-layer,
-html.dark-mode body.shop-view .site-bg-layer,
-html.dark-mode body.master-view .site-bg-layer,
 html.dark-mode body.browser-view .site-bg-layer {
     display: none;
 }
@@ -1949,7 +1939,7 @@ html.dark-mode .site-bg-layer::before {
     content: "";
     position: absolute;
     inset: -6px;
-    background-image: url(/background.jpg);
+    background-image: url(/thanksgivingbackground.avif);
     background-size: cover;
     background-position: center;
     background-repeat: no-repeat;
