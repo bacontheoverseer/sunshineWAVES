@@ -287,12 +287,12 @@ export function getActiveUser(): string {
 
 export function getCookieCoins(): number {
   try {
-    const raw = batchedLocalStorageGet(COINS_STORAGE_KEY);
+    const raw = localStorage.getItem(COINS_STORAGE_KEY);
     if (raw !== null) {
       const n = parseInt(raw, 10);
       if (!Number.isNaN(n)) return Math.max(0, n);
     }
-    batchedLocalStorageSet(COINS_STORAGE_KEY, "150");
+    localStorage.setItem(COINS_STORAGE_KEY, "150");
     return 150;
   } catch {
     return 150;
@@ -302,7 +302,7 @@ export function getCookieCoins(): number {
 export function setCookieCoins(nextBalance: number): number {
   const clean = Math.max(0, Math.floor(nextBalance));
   try {
-    batchedLocalStorageSet(COINS_STORAGE_KEY, String(clean));
+    localStorage.setItem(COINS_STORAGE_KEY, String(clean));
   } catch {}
   window.dispatchEvent(new CustomEvent("cookie-coins-updated", { detail: { balance: clean } }));
   return clean;

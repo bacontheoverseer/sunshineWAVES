@@ -64,7 +64,14 @@ export default function TopBar() {
       void syncProfile(initialUser, true);
     }
 
-    const onCoins = () => setCoins(getCookieCoins());
+    const onCoins = (e?: Event) => {
+      const detailBal = (e as CustomEvent<{ balance?: number }> | undefined)?.detail?.balance;
+      if (typeof detailBal === "number" && Number.isFinite(detailBal)) {
+        setCoins(Math.max(0, Math.floor(detailBal)));
+      } else {
+        setCoins(getCookieCoins());
+      }
+    };
     const onMasterChanged = () => setMasterActive(isCookieMasterActive());
     const onAuthChanged = (e: Event) => {
       const detail = (e as CustomEvent<{ username?: unknown } | null>).detail;
@@ -75,9 +82,11 @@ export default function TopBar() {
             ? detail.username.trim()
             : readAuthUsername();
       setUsername(nextUser);
+      setCoins(getCookieCoins());
       void syncProfile(nextUser, true);
     };
     const onCloudRestored = () => {
+      setCoins(getCookieCoins());
       setMasterActive(isCookieMasterActive());
       const nextUser = readAuthUsername();
       setUsername(nextUser);

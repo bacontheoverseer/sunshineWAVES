@@ -5953,7 +5953,7 @@ app.post("/api/chat/gift", async (req, res) => {
     }
 
     const lastGiftAt = chatGiftLastSentAt.get(senderKey) || 0;
-    if (Date.now() - lastGiftAt < 3000) {
+    if (!isOwnerSender && Date.now() - lastGiftAt < 3000) {
       return res.status(429).json({ success: false, error: "Please wait a moment before sending another gift" });
     }
     chatGiftLastSentAt.set(senderKey, Date.now());
@@ -5963,7 +5963,7 @@ app.post("/api/chat/gift", async (req, res) => {
     if (!recipientKey) {
       return res.status(400).json({ success: false, error: "Please choose a recipient username" });
     }
-    if (recipientKey === senderKey) {
+    if (!isOwnerSender && recipientKey === senderKey) {
       return res.status(400).json({ success: false, error: "You cannot send a gift to yourself" });
     }
 
@@ -6054,8 +6054,15 @@ app.post("/api/chat/gift", async (req, res) => {
 
     // Default: Cookie Coins gift
     const amount = Math.floor(Number(req.body?.amount) || 0);
-    if (!Number.isFinite(amount) || amount < 10 || amount > 1000000) {
-      return res.status(400).json({ success: false, error: "Gift amount must be between 10 and 1,000,000 coins" });
+    const minAmount = isOwnerSender ? 1 : 10;
+    const maxAmount = isOwnerSender ? 1000000000 : 1000000;
+    if (!Number.isFinite(amount) || amount < minAmount || amount > maxAmount) {
+      return res.status(400).json({
+        success: false,
+        error: isOwnerSender
+          ? "Gift amount must be at least 1 coin"
+          : "Gift amount must be between 10 and 1,000,000 coins",
+      });
     }
 
     const delivery = deliverCoinGrant({

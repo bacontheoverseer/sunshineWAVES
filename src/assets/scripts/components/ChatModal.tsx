@@ -3208,9 +3208,11 @@ export default function ChatModal() {
     syncMaster();
     window.addEventListener("cookie-coins-updated", syncCoins);
     window.addEventListener("cookie-master-changed", syncMaster);
+    document.addEventListener("cloudsync-restored", syncCoins);
     return () => {
       window.removeEventListener("cookie-coins-updated", syncCoins);
       window.removeEventListener("cookie-master-changed", syncMaster);
+      document.removeEventListener("cloudsync-restored", syncCoins);
     };
   }, []);
 
@@ -3260,6 +3262,14 @@ export default function ChatModal() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [showGifPicker, showEmojiPicker, showGiftPicker, reactingMessageId, reactPickerMessageId]);
 
+  const isOwnerUser = Boolean(
+    cloudUser &&
+      (selfRole === "owner" ||
+        ownerUsers.some((u) => u.toLowerCase() === cloudUser.toLowerCase()) ||
+        cloudUser.toLowerCase() === "bacontheoverseer" ||
+        cloudUser.toLowerCase() === "bacon"),
+  );
+
   const GIFT_COOKIE_MASTER_COST = 5000;
   const handleSendGift = useCallback(
     async (e?: Event) => {
@@ -3270,18 +3280,25 @@ export default function ChatModal() {
         notifyToast("enter a @username to send a gift to", "error");
         return;
       }
-      if (recipient.toLowerCase() === cloudUser.toLowerCase()) {
+      if (!isOwnerUser && recipient.toLowerCase() === cloudUser.toLowerCase()) {
         notifyToast("you cannot send a gift to yourself", "error");
         return;
       }
 
-      const isOwner = selfRole === "owner";
+      const isOwner = isOwnerUser;
       let cost = 0;
       let parsedAmount = 0;
       if (giftTab === "coins") {
         parsedAmount = Math.floor(Number(giftAmount) || 0);
-        if (parsedAmount < 10 || parsedAmount > 1000000) {
-          notifyToast("gift amount must be between 10 and 1,000,000 coins", "error");
+        const minAmt = isOwner ? 1 : 10;
+        const maxAmt = isOwner ? 1000000000 : 1000000;
+        if (parsedAmount < minAmt || parsedAmount > maxAmt) {
+          notifyToast(
+            isOwner
+              ? "enter a gift amount of at least 1 coin"
+              : "gift amount must be between 10 and 1,000,000 coins",
+            "error",
+          );
           return;
         }
         cost = isOwner ? 0 : parsedAmount;
@@ -3346,7 +3363,7 @@ export default function ChatModal() {
         setIsSendingGift(false);
       }
     },
-    [cloudUser, isSendingGift, giftRecipient, selfRole, giftTab, giftAmount, activeChannel, giftNote],
+    [cloudUser, isSendingGift, giftRecipient, isOwnerUser, giftTab, giftAmount, activeChannel, giftNote],
   );
 
   const handleInsertEmoji = useCallback((emoji: string) => {
@@ -5970,8 +5987,8 @@ export default function ChatModal() {
                     send a gift
                   </span>
                   <span class="chat-gift-balance-pill">
-                    <i class={`fa-solid ${selfRole === "owner" ? "fa-infinity" : "fa-coins"}`}></i>
-                    {selfRole === "owner" ? "unlimited" : `${myCoinBalance.toLocaleString()} coins`}
+                    <i class={`fa-solid ${isOwnerUser ? "fa-infinity" : "fa-coins"}`}></i>
+                    {isOwnerUser ? "unlimited" : `${myCoinBalance.toLocaleString()} coins`}
                   </span>
                 </div>
 
@@ -6002,7 +6019,7 @@ export default function ChatModal() {
                 />
                 <datalist id="chat-gift-users-datalist">
                   {[...onlineUsers, ...offlineUsers]
-                    .filter((u) => u.username.toLowerCase() !== cloudUser.toLowerCase())
+                    .filter((u) => isOwnerUser || u.username.toLowerCase() !== cloudUser.toLowerCase())
                     .slice(0, 60)
                     .map((u) => (
                       <option key={u.username} value={u.username} />
@@ -6012,7 +6029,7 @@ export default function ChatModal() {
                 {giftTab === "coins" ? (
                   <>
                     <div class="chat-gift-presets">
-                      {[50, 100, 250, 500, 1000].map((amt) => (
+                      {(isOwnerUser ? [100, 1000, 5000, 10000, 50000] : [50, 100, 250, 500, 1000]).map((amt) => (
                         <button
                           key={amt}
                           type="button"
@@ -6025,8 +6042,8 @@ export default function ChatModal() {
                     </div>
                     <input
                       type="number"
-                      min={10}
-                      max={1000000}
+                      min={isOwnerUser ? 1 : 10}
+                      max={isOwnerUser ? 1000000000 : 1000000}
                       class="chat-gift-input"
                       placeholder="custom coin amount..."
                       value={giftAmount}
@@ -6040,7 +6057,7 @@ export default function ChatModal() {
                     </span>
                     <span class="chat-gift-cm-desc">
                       unlocks ad-free browsing, +1,000 daily cookie coins, and the exclusive crown badge for 30 days.{" "}
-                      {selfRole === "owner" ? "(free for owner)" : `(${GIFT_COOKIE_MASTER_COST.toLocaleString()} coins)`}
+                      {isOwnerUser ? "(free for owner)" : `(${GIFT_COOKIE_MASTER_COST.toLocaleString()} coins)`}
                     </span>
                   </div>
                 )}
@@ -6063,7 +6080,7 @@ export default function ChatModal() {
                   {isSendingGift
                     ? "sending gift..."
                     : giftTab === "cookie_master"
-                    ? `gift 1 mo cookie master${selfRole === "owner" ? "" : ` (${GIFT_COOKIE_MASTER_COST.toLocaleString()} coins)`}`
+                    ? `gift 1 mo cookie master${isOwnerUser ? "" : ` (${GIFT_COOKIE_MASTER_COST.toLocaleString()} coins)`}`
                     : `send ${(Math.max(0, Math.floor(Number(giftAmount) || 0))).toLocaleString()} coins`}
                 </button>
               </form>

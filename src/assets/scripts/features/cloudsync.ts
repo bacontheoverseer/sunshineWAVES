@@ -762,6 +762,15 @@ export class CloudSync {
             window.bypassPreventClosing = true;
             window.location.reload();
           } else {
+            try {
+              const restoredCoins = Math.max(
+                0,
+                parseInt(localStorage.getItem("cookie_coins_balance_v1") || "150", 10) || 0,
+              );
+              window.dispatchEvent(
+                new CustomEvent("cookie-coins-updated", { detail: { balance: restoredCoins } }),
+              );
+            } catch {}
             document.dispatchEvent(new CustomEvent("cloudsync-restored"));
             this.updateStatus("synced", "success");
           }
