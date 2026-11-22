@@ -8240,6 +8240,68 @@ function broadcastChatPayload(channel, eventPayload, extraUsernames = []) {
   broadcastToClients(eventPayload, "all");
 }
 
+const chatTypingRateLimit = new Map(); // usernameLower -> lastBroadcastMs (strictly in-memory, zero DB writes)
+
+app.post("/api/chat/typing", (req, res) => {
+  try {
+    const cookieToken = req.cookies?.token;
+    const headerToken =
+      req.headers["x-cloudsync-token"] ||
+      (req.headers.authorization?.startsWith("Bearer ")
+        ? req.headers.authorization.slice(7).trim()
+        : null);
+    const claims = verifyCloudSyncJwt(headerToken) || verifyCloudSyncJwt(cookieToken);
+    const username = String(claims?.username || "").trim();
+    if (!username || isReservedSystemUsername(username)) {
+      return res.status(200).json({ success: true });
+    }
+
+    const authorKey = username.toLowerCase();
+    const channel = String(req.body?.channel || "").trim().slice(0, 120);
+    const isTyping = Boolean(req.body?.isTyping);
+    if (!channel) {
+      return res.status(200).json({ success: true });
+    }
+
+    if (
+      !canAccessChatChannel(channel, authorKey) ||
+      isAccountShadowbanned(authorKey) ||
+      getActiveTimeout(authorKey)
+    ) {
+      return res.status(200).json({ success: true });
+    }
+
+    const now = Date.now();
+    if (isTyping) {
+      const lastAt = chatTypingRateLimit.get(authorKey) || 0;
+      if (now - lastAt < 1200) {
+        return res.status(200).json({ success: true });
+      }
+      chatTypingRateLimit.set(authorKey, now);
+      if (chatTypingRateLimit.size > 2000) {
+        for (const [k, ts] of chatTypingRateLimit.entries()) {
+          if (now - ts > 15000) chatTypingRateLimit.delete(k);
+        }
+      }
+    } else {
+      chatTypingRateLimit.delete(authorKey);
+    }
+
+    broadcastChatPayload(channel, {
+      type: "chat-event",
+      event: "USER_TYPING",
+      channel,
+      username,
+      isTyping,
+      timestamp: now,
+    });
+
+    return res.status(200).json({ success: true });
+  } catch {
+    return res.status(200).json({ success: true });
+  }
+});
+
 app.post("/api/chat/send", async (req, res) => {
   await ensureChatMetaReadyAsync();
   try {

@@ -1009,6 +1009,10 @@ export default function ChatModal() {
   const [isOpen, setIsOpen] = useState(false);
   const [activeChannel, setActiveChannel] = useState("general");
   const [inputText, setInputText] = useState("");
+  const [typingByChannel, setTypingByChannel] = useState<Record<string, Record<string, number>>>({});
+  const lastTypingSentAtRef = useRef<number>(0);
+  const typingStopTimerRef = useRef<number | null>(null);
+  const lastTypingChannelRef = useRef<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -1726,6 +1730,23 @@ export default function ChatModal() {
       const isAlreadySeen = seenMessageIdsRef.current.has(incoming.id);
       const myLower = (cloudUser || "guest").toLowerCase();
       const authorLower = (incoming.author || "").toLowerCase();
+
+      if (incoming.channel && authorLower) {
+        setTypingByChannel((prev) => {
+          const curCh = prev[incoming.channel];
+          if (!curCh) return prev;
+          const matchingKey = Object.keys(curCh).find((k) => k.toLowerCase() === authorLower);
+          if (!matchingKey) return prev;
+          const nextCh = { ...curCh };
+          delete nextCh[matchingKey];
+          if (Object.keys(nextCh).length === 0) {
+            const next = { ...prev };
+            delete next[incoming.channel];
+            return next;
+          }
+          return { ...prev, [incoming.channel]: nextCh };
+        });
+      }
 
       // If it's a DM, verify current user is one of the 2 participants
       if (incoming.channel.startsWith("dm:")) {
@@ -2891,6 +2912,34 @@ export default function ChatModal() {
           });
           setDmPeers((prev) => prev.filter((p) => p.toLowerCase() !== target));
         }
+      } else if (evtKind === "USER_TYPING" && detail.channel && detail.username) {
+        const ch = String(detail.channel);
+        const typer = String(detail.username).trim();
+        if (!typer) return;
+        if (cloudUser && typer.toLowerCase() === cloudUser.toLowerCase()) return;
+        if (blockedUsersRef.current.includes(typer.toLowerCase())) return;
+        const isTypingNow = Boolean(detail.isTyping);
+        setTypingByChannel((prev) => {
+          const curCh = prev[ch] || {};
+          if (!isTypingNow) {
+            if (!(typer in curCh)) return prev;
+            const nextCh = { ...curCh };
+            delete nextCh[typer];
+            if (Object.keys(nextCh).length === 0) {
+              const next = { ...prev };
+              delete next[ch];
+              return next;
+            }
+            return { ...prev, [ch]: nextCh };
+          }
+          return {
+            ...prev,
+            [ch]: {
+              ...curCh,
+              [typer]: Date.now() + 5000,
+            },
+          };
+        });
       } else if (evtKind === "STAFF_UPDATED") {
         if (Array.isArray(detail.staffMods)) setStaffMods(detail.staffMods);
         if (Array.isArray(detail.ownerUsers)) setOwnerUsers(detail.ownerUsers);
@@ -3462,6 +3511,122 @@ export default function ChatModal() {
       setInputText((prev) => (prev + emoji).slice(0, 500));
     }
   }, []);
+
+  const sendTypingSignal = useCallback(
+    (channel: string, isTyping: boolean) => {
+      if (!cloudUser || !channel) return;
+      if (isTyping) {
+        const now = Date.now();
+        if (lastTypingChannelRef.current === channel && now - lastTypingSentAtRef.current < 2400) {
+          return;
+        }
+        lastTypingSentAtRef.current = now;
+        lastTypingChannelRef.current = channel;
+      } else {
+        if (typingStopTimerRef.current !== null) {
+          window.clearTimeout(typingStopTimerRef.current);
+          typingStopTimerRef.current = null;
+        }
+        if (lastTypingChannelRef.current === channel) {
+          lastTypingChannelRef.current = null;
+          lastTypingSentAtRef.current = 0;
+        }
+      }
+      let token = "";
+      try {
+        token = localStorage.getItem("auth_token") || "";
+      } catch {}
+      void fetch("/api/chat/typing", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}`, "x-cloudsync-token": token } : {}),
+        },
+        body: JSON.stringify({ channel, isTyping }),
+      }).catch(() => {});
+    },
+    [cloudUser],
+  );
+
+  const handleTypingActivity = useCallback(
+    (nextValue: string) => {
+      if (!cloudUser || !isOpen) return;
+      const trimmed = nextValue.trim();
+      if (!trimmed) {
+        if (lastTypingChannelRef.current === activeChannel) {
+          sendTypingSignal(activeChannel, false);
+        }
+        return;
+      }
+      sendTypingSignal(activeChannel, true);
+      if (typingStopTimerRef.current !== null) {
+        window.clearTimeout(typingStopTimerRef.current);
+      }
+      const ch = activeChannel;
+      typingStopTimerRef.current = window.setTimeout(() => {
+        typingStopTimerRef.current = null;
+        sendTypingSignal(ch, false);
+      }, 3500);
+    },
+    [cloudUser, isOpen, activeChannel, sendTypingSignal],
+  );
+
+  useEffect(() => {
+    const prevCh = lastTypingChannelRef.current;
+    if (prevCh && (!isOpen || prevCh !== activeChannel)) {
+      sendTypingSignal(prevCh, false);
+    }
+  }, [isOpen, activeChannel, sendTypingSignal]);
+
+  useEffect(() => {
+    if (Object.keys(typingByChannel).length === 0) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setTypingByChannel((prev) => {
+        let changed = false;
+        const next: Record<string, Record<string, number>> = {};
+        for (const [ch, users] of Object.entries(prev)) {
+          const kept: Record<string, number> = {};
+          for (const [u, exp] of Object.entries(users)) {
+            if (exp > now) {
+              kept[u] = exp;
+            } else {
+              changed = true;
+            }
+          }
+          if (Object.keys(kept).length > 0) {
+            next[ch] = kept;
+          } else {
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [typingByChannel]);
+
+  const activeChannelTypers = useMemo(() => {
+    const map = typingByChannel[activeChannel];
+    if (!map) return [];
+    const now = Date.now();
+    return Object.entries(map)
+      .filter(([, exp]) => exp > now)
+      .map(([u]) => u);
+  }, [typingByChannel, activeChannel]);
+
+  const typingLabel = useMemo(() => {
+    if (activeChannelTypers.length === 0) return "";
+    if (activeChannelTypers.length === 1) return `${activeChannelTypers[0]} is typing...`;
+    if (activeChannelTypers.length === 2) {
+      return `${activeChannelTypers[0]} and ${activeChannelTypers[1]} are typing...`;
+    }
+    if (activeChannelTypers.length === 3) {
+      return `${activeChannelTypers[0]}, ${activeChannelTypers[1]}, and ${activeChannelTypers[2]} are typing...`;
+    }
+    return "several people are typing...";
+  }, [activeChannelTypers]);
 
   // Scroll to bottom when messages change or channel changes
   useEffect(() => {
@@ -5921,7 +6086,22 @@ export default function ChatModal() {
                     void stageChatImageFile(file);
                   }}
                 />
-                <form class="chat-input-pill" onSubmit={handleSendMessage}>
+                {typingLabel && (
+                  <div class="chat-typing-indicator" aria-live="polite">
+                    <span class="chat-typing-dots" aria-hidden="true">
+                      <span></span>
+                      <span></span>
+                      <span></span>
+                    </span>
+                    <span class="chat-typing-text">{typingLabel}</span>
+                  </div>
+                )}
+                <form class="chat-input-pill" onSubmit={(e) => {
+                  if (lastTypingChannelRef.current === activeChannel) {
+                    sendTypingSignal(activeChannel, false);
+                  }
+                  void handleSendMessage(e);
+                }}>
                   <input
                     ref={chatInputRef}
                     type="text"
@@ -5934,7 +6114,11 @@ export default function ChatModal() {
                         : `message #${activeChannelDef.name}...`
                     }
                     value={inputText}
-                    onInput={(e) => setInputText((e.target as HTMLInputElement).value)}
+                    onInput={(e) => {
+                      const val = (e.target as HTMLInputElement).value;
+                      setInputText(val);
+                      handleTypingActivity(val);
+                    }}
                     onPaste={(e) => {
                       const items = e.clipboardData?.items;
                       if (!items) return;
