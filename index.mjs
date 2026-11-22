@@ -10397,6 +10397,106 @@ app.use("/api/ccported", async (req, res) => {
   }
 });
 
+// Official now.gg cloud games catalog (cached in memory for 30m)
+let nowggGamesCache = { data: null, fetchedAt: 0 };
+let nowggGamesInFlight = null;
+const NOWGG_CACHE_TTL_MS = 30 * 60 * 1000;
+
+async function fetchNowggGamesCatalog() {
+  if (
+    Array.isArray(nowggGamesCache.data) &&
+    nowggGamesCache.data.length > 0 &&
+    Date.now() - nowggGamesCache.fetchedAt < NOWGG_CACHE_TTL_MS
+  ) {
+    return nowggGamesCache.data;
+  }
+  if (nowggGamesInFlight) return nowggGamesInFlight;
+
+  nowggGamesInFlight = (async () => {
+    const r = await fetch("https://now.gg/", {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!r.ok) {
+      throw new Error(`now.gg responded ${r.status}`);
+    }
+    const html = await r.text();
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+    if (!nextDataMatch?.[1]) {
+      throw new Error("now.gg catalog payload not found");
+    }
+    const parsed = JSON.parse(nextDataMatch[1]);
+    const seen = new Set();
+    const out = [];
+
+    function walk(node) {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+        return;
+      }
+      const appId = String(node.appId || "").trim();
+      const appName = String(node.appName || "").trim();
+      const playUrl = String(node.playUrl || "").trim();
+      if (
+        appId &&
+        appId !== "portal" &&
+        appName &&
+        playUrl &&
+        /^https?:\/\/now\.gg\/play\//i.test(playUrl) &&
+        !seen.has(appId)
+      ) {
+        seen.add(appId);
+        const tile = String(node.media?.tile || "").trim();
+        const icon = String(node.media?.icon || "").trim();
+        const cover =
+          tile && !tile.includes("/default/images/Game_Tile.jpg")
+            ? tile
+            : icon || tile || "";
+        out.push({
+          id: appId,
+          name: appName,
+          genre: String(node.appGenre || "").trim(),
+          playUrl,
+          cover,
+          appType: String(node.appType || "Android").trim(),
+        });
+      }
+      for (const val of Object.values(node)) {
+        if (val && typeof val === "object") walk(val);
+      }
+    }
+
+    walk(parsed);
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    if (out.length > 0) {
+      nowggGamesCache = { data: out, fetchedAt: Date.now() };
+    }
+    return out;
+  })().finally(() => {
+    nowggGamesInFlight = null;
+  });
+
+  return nowggGamesInFlight;
+}
+
+app.get("/api/nowgg/games.json", async (_req, res) => {
+  try {
+    const games = await fetchNowggGamesCatalog();
+    res.setHeader("Cache-Control", "public, max-age=900");
+    return res.json(games);
+  } catch (err) {
+    if (Array.isArray(nowggGamesCache.data) && nowggGamesCache.data.length > 0) {
+      return res.json(nowggGamesCache.data);
+    }
+    return res.status(502).json({ error: err?.message || "Failed to fetch now.gg catalog" });
+  }
+});
+
 app.get("/api/games/leaderboard", (req, res) => {
   const gameKey = ((req.query.game || "") + "").trim().toLowerCase();
   if (!gameKey || isWebsiteNotGameServer(gameKey)) {

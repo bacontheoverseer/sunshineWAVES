@@ -26,6 +26,7 @@ interface SourceConfig {
   luminsdk: { sdk: string };
   alexr: { games: string; base: string };
   ccported: { games: string; cdnBase: string };
+  nowgg: { games: string };
 }
 
 type SourceKey = keyof SourceConfig;
@@ -108,6 +109,15 @@ interface CcportedGame {
   category?: string;
 }
 
+interface NowGgGame {
+  id: string;
+  name: string;
+  genre?: string;
+  playUrl: string;
+  cover?: string;
+  appType?: string;
+}
+
 const SOURCE_CONFIG: SourceConfig = {
   selenite: {
     games: "/!!/" + encodeMochiUrl("https://selenite.cc/resources/games.json") + "/",
@@ -153,6 +163,9 @@ const SOURCE_CONFIG: SourceConfig = {
     games: "/api/ccported/games.json",
     cdnBase: "https://cdn.jsdelivr.net/gh/ccported/games@main/",
   },
+  nowgg: {
+    games: "/api/nowgg/games.json",
+  },
 };
 
 const ALL_SOURCE_KEYS: SourceKey[] = [
@@ -167,6 +180,7 @@ const ALL_SOURCE_KEYS: SourceKey[] = [
   "luminsdk",
   "alexr",
   "ccported",
+  "nowgg",
 ];
 
 export function isCombineGameSourcesEnabled(): boolean {
@@ -194,11 +208,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v9";
+const GAMES_DISK_CACHE = "sunshine-games-v10";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v9-${scope}`;
+  return `sunshine-game-cache-v10-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -626,6 +640,32 @@ function mapCcportedGames(data: unknown): GameEntry[] {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function mapNowGgGames(data: unknown): GameEntry[] {
+  const games = Array.isArray(data) ? (data as NowGgGame[]) : [];
+  const seen = new Set<string>();
+  const out: GameEntry[] = [];
+  for (const game of games) {
+    const id = String(game?.id || "").trim();
+    const name = String(game?.name || "").trim();
+    const playUrl = String(game?.playUrl || "").trim();
+    if (!id || !name || !playUrl || seen.has(id)) continue;
+    seen.add(id);
+    const rawCover = String(game?.cover || "").trim();
+    const coverUrl = rawCover ? `/!cover!/${encodeMochiUrl(rawCover)}/` : "";
+    out.push({
+      id,
+      name,
+      author: game?.genre ? String(game.genre).trim() : "cloud",
+      coverUrl,
+      gameUrl: playUrl,
+      isExternal: false,
+      featured: false,
+      sourceKey: "nowgg",
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -669,6 +709,7 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
     luminsdk: () => fetchAllLuminGames().then(mapLuminGames),
     alexr: () => fetchWithTimeout(SOURCE_CONFIG.alexr.games).then(ok).then(mapAlexrGames),
     ccported: () => fetchWithTimeout(SOURCE_CONFIG.ccported.games, 15000).then(ok).then(mapCcportedGames),
+    nowgg: () => fetchWithTimeout(SOURCE_CONFIG.nowgg.games, 15000).then(ok).then(mapNowGgGames),
   };
 
   const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {
@@ -685,7 +726,10 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
         let changed = false;
         for (const g of batch) {
           const normName = String(g.name || "").trim().toLowerCase();
-          const dedupKey = normName || `${g.sourceKey}:${g.gameUrl}`;
+          const dedupKey =
+            g.sourceKey === "nowgg"
+              ? `nowgg:${g.id}`
+              : normName || `${g.sourceKey}:${g.gameUrl}`;
           const existing = byDedupKey.get(dedupKey);
           if (!existing) {
             byDedupKey.set(dedupKey, g);

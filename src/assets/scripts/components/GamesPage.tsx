@@ -110,6 +110,7 @@ export default function GamesPage() {
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [pcGamesOnly, setPcGamesOnly] = useState(false);
+  const [cloudGamesOnly, setCloudGamesOnly] = useState(false);
 
   useEffect(() => {
     if (!chromebookMode) {
@@ -375,10 +376,17 @@ export default function GamesPage() {
     [allGames],
   );
 
+  const cloudGamesCount = useMemo(
+    () => allGames.reduce((acc, g) => acc + (g.sourceKey === "nowgg" ? 1 : 0), 0),
+    [allGames],
+  );
+
   const filteredGames = useMemo(() => {
     const baseList = pcGamesOnly
       ? allGames.filter((g) => g.sourceKey === "wasm.rip")
-      : allGames;
+      : cloudGamesOnly
+        ? allGames.filter((g) => g.sourceKey === "nowgg")
+        : allGames;
     const activeQuery = chromebookMode ? debouncedQuery : query;
     if (!activeQuery) return baseList;
     const q = activeQuery.toLowerCase().trim();
@@ -386,7 +394,7 @@ export default function GamesPage() {
     return baseList.filter(
       (g) => (g._nameLc || "").includes(q) || (g._authorLc || "").includes(q),
     );
-  }, [allGames, pcGamesOnly, query, debouncedQuery, chromebookMode]);
+  }, [allGames, pcGamesOnly, cloudGamesOnly, query, debouncedQuery, chromebookMode]);
 
   const [renderCount, setRenderCount] = useState(RENDER_BATCH);
   const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -424,7 +432,9 @@ export default function GamesPage() {
   const placeholder = loaded
     ? pcGamesOnly
       ? `search through ${pcGamesCount} pc games... :D`
-      : `search through ${allGames.length} games... :D`
+      : cloudGamesOnly
+        ? `search through ${cloudGamesCount} cloud games... :D`
+        : `search through ${allGames.length} games... :D`
     : "fetching games...";
 
   if (!visible) return null;
@@ -436,6 +446,31 @@ export default function GamesPage() {
       aria-hidden={!visible}
     >
       <div class="games-topbar">
+        {(cloudGamesCount > 0 || cloudGamesOnly) && (
+          <button
+            type="button"
+            class={`games-filter-pill${cloudGamesOnly ? " active" : ""}`}
+            aria-pressed={cloudGamesOnly}
+            title={
+              cloudGamesOnly
+                ? "Showing cloud games only (click to show all games)"
+                : "Filter to now.gg cloud games"
+            }
+            onClick={() => {
+              setCloudGamesOnly((prev) => {
+                const next = !prev;
+                if (next) setPcGamesOnly(false);
+                return next;
+              });
+            }}
+          >
+            <i class="fa-solid fa-cloud"></i>
+            <span>cloud</span>
+            {cloudGamesCount > 0 && (
+              <span class="games-filter-count">{cloudGamesCount}</span>
+            )}
+          </button>
+        )}
         <div class="search-bar games-search-bar" ref={searchBarRef}>
           <div class="light"></div>
           <div class="light-border"></div>
@@ -495,7 +530,13 @@ export default function GamesPage() {
                 ? "Showing PC games only (click to show all games)"
                 : "Filter to PC games (wasm.rip)"
             }
-            onClick={() => setPcGamesOnly((prev) => !prev)}
+            onClick={() => {
+              setPcGamesOnly((prev) => {
+                const next = !prev;
+                if (next) setCloudGamesOnly(false);
+                return next;
+              });
+            }}
           >
             <i class="fa-solid fa-desktop"></i>
             <span>pc games</span>
