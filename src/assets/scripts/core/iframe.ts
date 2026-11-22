@@ -62,6 +62,8 @@ const GAME_SOURCE_HOST_PATTERNS = [
   /gitlab\.com\/3kh0/i,
   /lumin/i,
   /dskjfoisjfsjio\.github\.io/i,
+  /\/api\/ccported\//i,
+  /ccported/i,
 ];
 
 function isGameTabOrUrl(rawUrl: string, tab?: sunshineTab | null): boolean {

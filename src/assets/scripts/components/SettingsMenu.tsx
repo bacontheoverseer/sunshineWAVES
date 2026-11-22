@@ -443,6 +443,7 @@ export default function SettingsMenu() {
     "3kh0",
     "luminsdk",
     "alexr",
+    "ccported",
   ];
   const allThemes = [
     "default",
@@ -838,6 +839,7 @@ export default function SettingsMenu() {
               <p>3kh0 - game source</p>
               <p>luminsdk - game source</p>
               <p>alexr games - game source</p>
+              <p>ccported - game source</p>
               <p>discord - profile decorations, effects, frames &amp; nameplates</p>
               <p>klipy - chat gif search &amp; picker</p>
               <p>last.fm - now playing music status</p>

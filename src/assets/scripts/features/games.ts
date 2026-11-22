@@ -25,6 +25,7 @@ interface SourceConfig {
   "3kh0": { games: string; gitlabRawBase: string };
   luminsdk: { sdk: string };
   alexr: { games: string; base: string };
+  ccported: { games: string; cdnBase: string };
 }
 
 type SourceKey = keyof SourceConfig;
@@ -100,6 +101,13 @@ interface AlexrGame {
   description?: string;
 }
 
+interface CcportedGame {
+  id: string;
+  name: string;
+  thumb?: string;
+  category?: string;
+}
+
 const SOURCE_CONFIG: SourceConfig = {
   selenite: {
     games: "/!!/" + encodeMochiUrl("https://selenite.cc/resources/games.json") + "/",
@@ -141,6 +149,10 @@ const SOURCE_CONFIG: SourceConfig = {
     games: "/!!/" + encodeMochiUrl("https://dskjfoisjfsjio.github.io/games.json") + "/",
     base: "https://dskjfoisjfsjio.github.io/",
   },
+  ccported: {
+    games: "/api/ccported/games.json",
+    cdnBase: "https://cdn.jsdelivr.net/gh/ccported/games@main/",
+  },
 };
 
 const ALL_SOURCE_KEYS: SourceKey[] = [
@@ -154,6 +166,7 @@ const ALL_SOURCE_KEYS: SourceKey[] = [
   "3kh0",
   "luminsdk",
   "alexr",
+  "ccported",
 ];
 
 export function isCombineGameSourcesEnabled(): boolean {
@@ -181,11 +194,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v8";
+const GAMES_DISK_CACHE = "sunshine-games-v9";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v8-${scope}`;
+  return `sunshine-game-cache-v9-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -584,6 +597,35 @@ function mapAlexrGames(data: unknown): GameEntry[] {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function mapCcportedGames(data: unknown): GameEntry[] {
+  const games = Array.isArray(data) ? (data as CcportedGame[]) : [];
+  const cdnBase = SOURCE_CONFIG.ccported.cdnBase;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const seen = new Set<string>();
+  const out: GameEntry[] = [];
+  for (const game of games) {
+    const id = String(game?.id || "").trim();
+    const name = String(game?.name || "").trim();
+    if (!id || !name || seen.has(id)) continue;
+    seen.add(id);
+    const thumbRel = String(game?.thumb || "/thumb.jpg").trim();
+    const thumbPath = thumbRel.startsWith("/") ? thumbRel : `/${thumbRel}`;
+    const coverUrl = `/!cover!/${encodeMochiUrl(`${cdnBase}${id}${thumbPath}`)}/`;
+    const gameUrl = `${origin}/api/ccported/${encodeURIComponent(id)}/index.html`;
+    out.push({
+      id,
+      name,
+      author: game?.category ? String(game.category).trim() : undefined,
+      coverUrl,
+      gameUrl,
+      isExternal: false,
+      featured: false,
+      sourceKey: "ccported",
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -626,6 +668,7 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
     "3kh0": () => fetchWithTimeout(SOURCE_CONFIG["3kh0"].games).then(ok).then(mapThreeKhoGames),
     luminsdk: () => fetchAllLuminGames().then(mapLuminGames),
     alexr: () => fetchWithTimeout(SOURCE_CONFIG.alexr.games).then(ok).then(mapAlexrGames),
+    ccported: () => fetchWithTimeout(SOURCE_CONFIG.ccported.games, 15000).then(ok).then(mapCcportedGames),
   };
 
   const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {

@@ -10265,6 +10265,138 @@ app.use("/api/3kh0", async (req, res) => {
   }
 });
 
+// CCPorted games catalog (cached in memory for 6h) & MIME-fixing asset proxy
+let ccportedGamesCache = { data: null, fetchedAt: 0 };
+let ccportedGamesInFlight = null;
+const CCPORTED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function fetchCcportedGamesCatalog() {
+  if (
+    Array.isArray(ccportedGamesCache.data) &&
+    ccportedGamesCache.data.length > 0 &&
+    Date.now() - ccportedGamesCache.fetchedAt < CCPORTED_CACHE_TTL_MS
+  ) {
+    return ccportedGamesCache.data;
+  }
+  if (ccportedGamesInFlight) return ccportedGamesInFlight;
+
+  ccportedGamesInFlight = (async () => {
+    const dirRes = await fetch("https://api.github.com/repos/ccported/games/contents", {
+      headers: {
+        "User-Agent": "OperationCookie/1.0",
+        Accept: "application/vnd.github+json",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!dirRes.ok) {
+      throw new Error(`GitHub contents error: ${dirRes.status}`);
+    }
+    const items = await dirRes.json();
+    const dirs = Array.isArray(items)
+      ? items
+          .filter((x) => x && x.type === "dir" && typeof x.name === "string" && x.name.startsWith("game_"))
+          .map((x) => x.name)
+      : [];
+
+    const out = [];
+    const BATCH = 18;
+    for (let i = 0; i < dirs.length; i += BATCH) {
+      const slice = dirs.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        slice.map(async (dir) => {
+          const metaUrl = `https://cdn.jsdelivr.net/gh/ccported/games@main/${encodeURIComponent(dir)}/ccported_game_data.json`;
+          const r = await fetch(metaUrl, { signal: AbortSignal.timeout(6000) });
+          if (!r.ok) return null;
+          const meta = await r.json();
+          const name = String(meta?.name || "").trim();
+          if (!name) return null;
+          const thumbPath = String(meta?.thumb_path || "/thumb.jpg").trim();
+          const tags = Array.isArray(meta?.tags) ? meta.tags.map((t) => String(t).trim()).filter(Boolean) : [];
+          return {
+            id: dir,
+            name,
+            thumb: thumbPath.startsWith("/") ? thumbPath : `/${thumbPath}`,
+            category: tags[0] || "",
+          };
+        })
+      );
+      for (const res of results) {
+        if (res.status === "fulfilled" && res.value) {
+          out.push(res.value);
+        }
+      }
+    }
+
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    if (out.length > 0) {
+      ccportedGamesCache = { data: out, fetchedAt: Date.now() };
+    }
+    return out;
+  })().finally(() => {
+    ccportedGamesInFlight = null;
+  });
+
+  return ccportedGamesInFlight;
+}
+
+app.get("/api/ccported/games.json", async (_req, res) => {
+  try {
+    const games = await fetchCcportedGamesCatalog();
+    res.setHeader("Cache-Control", "public, max-age=1800");
+    return res.json(games);
+  } catch (err) {
+    if (Array.isArray(ccportedGamesCache.data) && ccportedGamesCache.data.length > 0) {
+      return res.json(ccportedGamesCache.data);
+    }
+    return res.status(502).json({ error: err?.message || "Failed to fetch CCPorted catalog" });
+  }
+});
+
+app.use("/api/ccported", async (req, res) => {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return res.status(405).end();
+  }
+  const rawPath = String(req.path || "").replace(/^\/+/, "");
+  if (!rawPath || rawPath.includes("..") || rawPath.includes("\\")) {
+    return res.status(400).send("Invalid asset path");
+  }
+  const finalPath = rawPath.endsWith("/") ? `${rawPath}index.html` : rawPath;
+  const cdnUrl = `https://cdn.jsdelivr.net/gh/ccported/games@main/${finalPath}`;
+  const rawFallbackUrl = `https://raw.githubusercontent.com/ccported/games/main/${finalPath}`;
+  try {
+    let upstream = await fetch(cdnUrl, {
+      method: req.method,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; OperationCookie/1.0)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!upstream.ok) {
+      upstream = await fetch(rawFallbackUrl, {
+        method: req.method,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; OperationCookie/1.0)" },
+        signal: AbortSignal.timeout(15000),
+      });
+    }
+    if (!upstream.ok) {
+      return res.status(upstream.status).send("Asset not found");
+    }
+    const ext = path.extname(finalPath).toLowerCase();
+    const mime =
+      THREEKHO_MIME_BY_EXT[ext] ||
+      upstream.headers.get("content-type") ||
+      "application/octet-stream";
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    if (req.method === "HEAD") {
+      return res.status(200).end();
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    return res.status(200).send(buf);
+  } catch (err) {
+    return res.status(502).send(err?.message || "Failed to fetch CCPorted asset");
+  }
+});
+
 app.get("/api/games/leaderboard", (req, res) => {
   const gameKey = ((req.query.game || "") + "").trim().toLowerCase();
   if (!gameKey || isWebsiteNotGameServer(gameKey)) {
