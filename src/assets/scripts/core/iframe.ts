@@ -61,6 +61,7 @@ const GAME_SOURCE_HOST_PATTERNS = [
   /glseries\.net/i,
   /gitlab\.com\/3kh0/i,
   /lumin/i,
+  /dskjfoisjfsjio\.github\.io/i,
 ];
 
 function isGameTabOrUrl(rawUrl: string, tab?: sunshineTab | null): boolean {

@@ -24,6 +24,7 @@ interface SourceConfig {
   tglsc: { games: string; base: string };
   "3kh0": { games: string; gitlabRawBase: string };
   luminsdk: { sdk: string };
+  alexr: { games: string; base: string };
 }
 
 type SourceKey = keyof SourceConfig;
@@ -90,6 +91,15 @@ interface ThreeKhoGame {
   title: string;
 }
 
+interface AlexrGame {
+  title?: string;
+  name?: string;
+  img?: string;
+  path?: string;
+  category?: string;
+  description?: string;
+}
+
 const SOURCE_CONFIG: SourceConfig = {
   selenite: {
     games: "/!!/" + encodeMochiUrl("https://selenite.cc/resources/games.json") + "/",
@@ -127,6 +137,10 @@ const SOURCE_CONFIG: SourceConfig = {
   luminsdk: {
     sdk: "https://cdn.jsdelivr.net/gh/luminsdk/script@latest/lumin.min.js",
   },
+  alexr: {
+    games: "/!!/" + encodeMochiUrl("https://dskjfoisjfsjio.github.io/games.json") + "/",
+    base: "https://dskjfoisjfsjio.github.io/",
+  },
 };
 
 const ALL_SOURCE_KEYS: SourceKey[] = [
@@ -139,6 +153,7 @@ const ALL_SOURCE_KEYS: SourceKey[] = [
   "tglsc",
   "3kh0",
   "luminsdk",
+  "alexr",
 ];
 
 export function isCombineGameSourcesEnabled(): boolean {
@@ -166,11 +181,11 @@ function getActiveCacheScope(): CacheScopeKey {
   return isCombineGameSourcesEnabled() ? "all" : getSourceKey();
 }
 
-const GAMES_DISK_CACHE = "sunshine-games-v7";
+const GAMES_DISK_CACHE = "sunshine-games-v8";
 const GAMES_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function getCacheKey(scope: CacheScopeKey = getActiveCacheScope()): string {
-  return `sunshine-game-cache-v7-${scope}`;
+  return `sunshine-game-cache-v8-${scope}`;
 }
 
 function getPersistentCacheRequestUrl(scope: CacheScopeKey): string {
@@ -530,6 +545,45 @@ function mapLuminGames(games: LuminRawGame[]): GameEntry[] {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function mapAlexrGames(data: unknown): GameEntry[] {
+  const games = Array.isArray(data) ? (data as AlexrGame[]) : [];
+  const base = SOURCE_CONFIG.alexr.base;
+  const seen = new Set<string>();
+  const out: GameEntry[] = [];
+  for (const game of games) {
+    const title = String(game?.title || game?.name || "").trim();
+    const rawPath = String(game?.path || "").trim();
+    if (!title || !rawPath) continue;
+    let gameUrl = "";
+    try {
+      gameUrl = new URL(rawPath, base).href;
+    } catch {
+      continue;
+    }
+    if (seen.has(gameUrl)) continue;
+    seen.add(gameUrl);
+    let coverUrl = "";
+    const rawImg = String(game?.img || "").trim();
+    if (rawImg) {
+      try {
+        const resolvedImg = new URL(rawImg, base).href;
+        coverUrl = `/!cover!/${encodeMochiUrl(resolvedImg)}/`;
+      } catch {}
+    }
+    out.push({
+      id: rawPath || title,
+      name: title,
+      author: game?.category ? String(game.category).trim() : undefined,
+      coverUrl,
+      gameUrl,
+      isExternal: false,
+      featured: false,
+      sourceKey: "alexr",
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -571,6 +625,7 @@ export function fetchGameData(onProgress?: (games: GameEntry[]) => void): Promis
     tglsc: () => fetchWithTimeout(SOURCE_CONFIG.tglsc.games).then(ok).then(mapTglscGames),
     "3kh0": () => fetchWithTimeout(SOURCE_CONFIG["3kh0"].games).then(ok).then(mapThreeKhoGames),
     luminsdk: () => fetchAllLuminGames().then(mapLuminGames),
+    alexr: () => fetchWithTimeout(SOURCE_CONFIG.alexr.games).then(ok).then(mapAlexrGames),
   };
 
   const fetchFresh = async (isRetry = false): Promise<GameEntry[]> => {
