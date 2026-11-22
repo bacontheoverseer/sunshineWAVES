@@ -1957,7 +1957,7 @@ export default function ChatModal() {
         }
         audioEl.dataset.username = remoteUsername;
         audioEl.srcObject = stream;
-        audioEl.volume = Math.max(0, Math.min(1, peerVolumes[remoteUsername.toLowerCase()] ?? 1));
+        audioEl.volume = Math.max(0, Math.min(1, userVolumes[remoteUsername.toLowerCase()] ?? 1));
         audioEl.muted = isDeafenedRef.current || isUserBlocked(remoteUsername);
         ensureRemoteAudioPlaying(audioEl);
 
@@ -2006,7 +2006,7 @@ export default function ChatModal() {
 
       return pc;
     },
-    [sendVoiceSignal, isUserBlocked, peerVolumes, ensureRemoteAudioPlaying]
+    [sendVoiceSignal, isUserBlocked, userVolumes, ensureRemoteAudioPlaying]
   );
 
   // Incoming voice event handler
