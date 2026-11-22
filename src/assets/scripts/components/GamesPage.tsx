@@ -377,7 +377,7 @@ export default function GamesPage() {
   );
 
   const cloudGamesCount = useMemo(
-    () => allGames.reduce((acc, g) => acc + (g.sourceKey === "nowgg" ? 1 : 0), 0),
+    () => allGames.reduce((acc, g) => acc + (g.sourceKey === "easyfun" ? 1 : 0), 0),
     [allGames],
   );
 
@@ -385,7 +385,7 @@ export default function GamesPage() {
     const baseList = pcGamesOnly
       ? allGames.filter((g) => g.sourceKey === "wasm.rip")
       : cloudGamesOnly
-        ? allGames.filter((g) => g.sourceKey === "nowgg")
+        ? allGames.filter((g) => g.sourceKey === "easyfun")
         : allGames;
     const activeQuery = chromebookMode ? debouncedQuery : query;
     if (!activeQuery) return baseList;
@@ -454,7 +454,7 @@ export default function GamesPage() {
             title={
               cloudGamesOnly
                 ? "Showing cloud games only (click to show all games)"
-                : "Filter to now.gg cloud games"
+                : "Filter to EasyFun.gg cloud games"
             }
             onClick={() => {
               setCloudGamesOnly((prev) => {

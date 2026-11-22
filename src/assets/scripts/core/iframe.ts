@@ -64,7 +64,7 @@ const GAME_SOURCE_HOST_PATTERNS = [
   /dskjfoisjfsjio\.github\.io/i,
   /\/api\/ccported\//i,
   /ccported/i,
-  /now\.gg/i,
+  /easyfun\.gg/i,
 ];
 
 function isGameTabOrUrl(rawUrl: string, tab?: sunshineTab | null): boolean {

@@ -196,9 +196,24 @@ export async function handleSearch(
     }
     navigateIframeTo(activeTab.iframe, getProxyUrl(processedURL));
   } else {
-    const finalUrlToLoad = searchURL.includes("/assets/gs/")
-      ? new URL(searchURL, window.location.origin).href
-      : await getUrl(searchURL);
+    const finalUrlToLoad =
+      searchURL.includes("/assets/gs/")
+        ? new URL(searchURL, window.location.origin).href
+        : /^https:\/\/(www\.)?easyfun\.gg\/cloud-games\//i.test(searchURL)
+          ? searchURL
+          : await getUrl(searchURL);
+
+    if (/^https:\/\/(www\.)?easyfun\.gg\/cloud-games\//i.test(searchURL)) {
+      const allowAttrs = activeTab.iframe.getAttribute("allow") || "";
+      const requiredAllow = ["autoplay", "fullscreen", "pointer-lock", "gamepad", "clipboard-read", "clipboard-write"];
+      const mergedAllow = Array.from(
+        new Set([
+          ...allowAttrs.split(";").map((s) => s.trim()).filter(Boolean),
+          ...requiredAllow,
+        ]),
+      ).join("; ");
+      activeTab.iframe.setAttribute("allow", mergedAllow);
+    }
 
     navigateIframeTo(activeTab.iframe, finalUrlToLoad);
   }

@@ -10397,23 +10397,23 @@ app.use("/api/ccported", async (req, res) => {
   }
 });
 
-// Official now.gg cloud games catalog (cached in memory for 30m)
-let nowggGamesCache = { data: null, fetchedAt: 0 };
-let nowggGamesInFlight = null;
-const NOWGG_CACHE_TTL_MS = 30 * 60 * 1000;
+// EasyFun.gg Android cloud games catalog (cached in memory for 30m)
+let easyfunGamesCache = { data: null, fetchedAt: 0 };
+let easyfunGamesInFlight = null;
+const EASYFUN_CACHE_TTL_MS = 30 * 60 * 1000;
 
-async function fetchNowggGamesCatalog() {
+async function fetchEasyfunGamesCatalog() {
   if (
-    Array.isArray(nowggGamesCache.data) &&
-    nowggGamesCache.data.length > 0 &&
-    Date.now() - nowggGamesCache.fetchedAt < NOWGG_CACHE_TTL_MS
+    Array.isArray(easyfunGamesCache.data) &&
+    easyfunGamesCache.data.length > 0 &&
+    Date.now() - easyfunGamesCache.fetchedAt < EASYFUN_CACHE_TTL_MS
   ) {
-    return nowggGamesCache.data;
+    return easyfunGamesCache.data;
   }
-  if (nowggGamesInFlight) return nowggGamesInFlight;
+  if (easyfunGamesInFlight) return easyfunGamesInFlight;
 
-  nowggGamesInFlight = (async () => {
-    const r = await fetch("https://now.gg/", {
+  easyfunGamesInFlight = (async () => {
+    const r = await fetch("https://www.easyfun.gg/cloud-games.html", {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -10422,78 +10422,62 @@ async function fetchNowggGamesCatalog() {
       signal: AbortSignal.timeout(12000),
     });
     if (!r.ok) {
-      throw new Error(`now.gg responded ${r.status}`);
+      throw new Error(`easyfun.gg responded ${r.status}`);
     }
     const html = await r.text();
-    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
-    if (!nextDataMatch?.[1]) {
-      throw new Error("now.gg catalog payload not found");
-    }
-    const parsed = JSON.parse(nextDataMatch[1]);
-    const seen = new Set();
-    const out = [];
-
-    function walk(node) {
-      if (!node || typeof node !== "object") return;
-      if (Array.isArray(node)) {
-        for (const item of node) walk(item);
-        return;
-      }
-      const appId = String(node.appId || "").trim();
-      const appName = String(node.appName || "").trim();
-      const playUrl = String(node.playUrl || "").trim();
-      if (
-        appId &&
-        appId !== "portal" &&
-        appName &&
-        playUrl &&
-        /^https?:\/\/now\.gg\/play\//i.test(playUrl) &&
-        !seen.has(appId)
-      ) {
-        seen.add(appId);
-        const tile = String(node.media?.tile || "").trim();
-        const icon = String(node.media?.icon || "").trim();
-        const cover =
-          tile && !tile.includes("/default/images/Game_Tile.jpg")
-            ? tile
-            : icon || tile || "";
-        out.push({
-          id: appId,
-          name: appName,
-          genre: String(node.appGenre || "").trim(),
-          playUrl,
+    const cardRe = /<a[^>]+href="(\/cloud-games\/[^"]+\.html)"[^>]*>([\s\S]*?)<\/a>/gi;
+    const byHref = new Map();
+    let m;
+    while ((m = cardRe.exec(html)) !== null) {
+      const href = m[1];
+      const inner = m[2];
+      const rawSrc = inner.match(/\bsrc="(https:\/\/[^"]+)"/i)?.[1] || "";
+      const alt = (inner.match(/\balt="([^"]+)"/i)?.[1] || "").replace(/\s+online$/i, "").trim();
+      const heading = (
+        inner.match(/<(?:h[1-6]|p|span|div)[^>]*>([^<]{2,64})<\/(?:h[1-6]|p|span|div)>/i)?.[1] || ""
+      ).trim();
+      const name = heading || alt;
+      if (!name) continue;
+      const isHero = inner.includes("1200/400") || inner.includes('width="1200"');
+      const cover = rawSrc.replace(/resize,w_\d+/i, "resize,w_384");
+      const slug = href.replace(/^\/cloud-games\//, "").replace(/\.html$/i, "");
+      const prev = byHref.get(href);
+      if (!prev || (prev.isHero && !isHero) || (!prev.cover && cover)) {
+        byHref.set(href, {
+          id: slug,
+          name,
+          playUrl: `https://www.easyfun.gg${href}`,
           cover,
-          appType: String(node.appType || "Android").trim(),
+          isHero,
         });
       }
-      for (const val of Object.values(node)) {
-        if (val && typeof val === "object") walk(val);
-      }
     }
 
-    walk(parsed);
-    out.sort((a, b) => a.name.localeCompare(b.name));
+    const out = Array.from(byHref.values())
+      .map(({ id, name, playUrl, cover }) => ({ id, name, playUrl, cover }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
     if (out.length > 0) {
-      nowggGamesCache = { data: out, fetchedAt: Date.now() };
+      easyfunGamesCache = { data: out, fetchedAt: Date.now() };
     }
     return out;
   })().finally(() => {
-    nowggGamesInFlight = null;
+    easyfunGamesInFlight = null;
   });
 
-  return nowggGamesInFlight;
+  return easyfunGamesInFlight;
 }
 
-app.get("/api/nowgg/games.json", async (_req, res) => {
+app.get("/api/easyfun/games.json", async (_req, res) => {
   try {
-    const games = await fetchNowggGamesCatalog();
+    const games = await fetchEasyfunGamesCatalog();
     res.setHeader("Cache-Control", "public, max-age=900");
     return res.json(games);
   } catch (err) {
-    if (Array.isArray(nowggGamesCache.data) && nowggGamesCache.data.length > 0) {
-      return res.json(nowggGamesCache.data);
+    if (Array.isArray(easyfunGamesCache.data) && easyfunGamesCache.data.length > 0) {
+      return res.json(easyfunGamesCache.data);
     }
-    return res.status(502).json({ error: err?.message || "Failed to fetch now.gg catalog" });
+    return res.status(502).json({ error: err?.message || "Failed to fetch EasyFun catalog" });
   }
 });
 
