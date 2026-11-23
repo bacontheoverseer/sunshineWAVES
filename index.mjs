@@ -1337,6 +1337,7 @@ const DEFAULT_CHAT_CHANNELS = [
   { id: "help", name: "help", icon: "fa-hashtag", categoryId: "support", categoryLabel: "support", visibility: "all", writeAccess: "all" },
 ];
 const chatChannels = DEFAULT_CHAT_CHANNELS.map((c) => ({ ...c }));
+const chatBackgrounds = new Map(); // channelId -> image/gif URL (/api/chat/media/... or https://)
 const staffActionLogs = []; // Array<{ id, timestamp, action, actor, actorRole, targetUsername, channel, details }>
 const staffUserNotes = new Map(); // usernameLower -> Array<{ id, targetUsername, author, authorRole, note, category, createdAt }>
 const deletedStaffNoteIds = new Set(); // Set<noteId>
@@ -1473,6 +1474,7 @@ const CHAT_META_KV_KEYS = [
   "chat_timeouts_v1",
   "chat_groups_v1",
   "chat_channels_v1",
+  "chat_backgrounds_v1",
   "chat_history_v1",
   "staff_action_logs_v1",
   "staff_user_notes_v1",
@@ -1638,6 +1640,9 @@ const VALID_CARD_THEMES = new Set([
   "obsidian", "midnight-glass", "crimson-noir", "emerald-cyber", "sakura-velvet", "royal-gold",
 ]);
 const VALID_BIO_STYLES = new Set(["frosted", "minimal", "neon-border", "accent-tint"]);
+const VALID_MSG_PILL_STYLES = new Set([
+  "default", "midnight", "frosted", "tinted", "neon", "rose", "emerald", "gold", "sunset", "cyber",
+]);
 const VALID_PRESENCE_STATUS = new Set(["online", "idle", "dnd"]);
 const VALID_AVATAR_EMOJIS = new Set([
   "", "🍪", "👑", "⚡", "🔥", "🎮", "👾", "💎", "🌟", "🚀", "🦊", "🐱", "🌙", "🎧", "💀", "🌸",
@@ -1705,6 +1710,7 @@ function sanitizeProfileCustomizationServer(raw) {
     profileEffect: VALID_PROFILE_EFFECTS.has(src.profileEffect) ? src.profileEffect : "none",
     cardTheme: VALID_CARD_THEMES.has(src.cardTheme) ? src.cardTheme : "obsidian",
     bioStyle: VALID_BIO_STYLES.has(src.bioStyle) ? src.bioStyle : "frosted",
+    msgPillStyle: VALID_MSG_PILL_STYLES.has(src.msgPillStyle) ? src.msgPillStyle : "default",
     presenceStatus: VALID_PRESENCE_STATUS.has(src.presenceStatus) ? src.presenceStatus : "online",
   };
 }
@@ -1719,6 +1725,7 @@ const DEFAULT_CUSTOM_SENTINELS = {
   profileEffect: "none",
   cardTheme: "obsidian",
   bioStyle: "frosted",
+  msgPillStyle: "default",
   presenceStatus: "online",
 };
 
@@ -2242,6 +2249,16 @@ function applyChatMetaKvMap(kvMap) {
       }
     }
   }
+  const storedBackgrounds = kvMap.chat_backgrounds_v1;
+  if (storedBackgrounds && typeof storedBackgrounds === "object") {
+    for (const [chId, rawUrl] of Object.entries(storedBackgrounds)) {
+      const cleanCh = String(chId || "").trim().slice(0, 120);
+      const cleanUrl = typeof rawUrl === "string" ? rawUrl.trim().slice(0, 1200) : "";
+      if (cleanCh && cleanUrl) {
+        chatBackgrounds.set(cleanCh, cleanUrl);
+      }
+    }
+  }
   const sGames = kvMap[STUDIO_GAMES_KV_KEY];
   if (Array.isArray(sGames)) {
     const mergedGames = mergeStudioGamesLists(publishedStudioGames, sGames);
@@ -2351,6 +2368,7 @@ function ensureChatMetaLoaded() {
     chat_history_v1: kvGetJson("chat_history_v1", []),
     chat_groups_v1: kvGetJson("chat_groups_v1", {}),
     chat_channels_v1: kvGetJson("chat_channels_v1", []),
+    chat_backgrounds_v1: kvGetJson("chat_backgrounds_v1", {}),
     staff_action_logs_v1: kvGetJson("staff_action_logs_v1", []),
     staff_user_notes_v1: kvGetJson("staff_user_notes_v1", {}),
     staff_user_notes_deleted_v1: kvGetJson("staff_user_notes_deleted_v1", []),
@@ -3319,6 +3337,18 @@ function persistChatGroups() {
 
 function persistChatChannels() {
   kvSetJson("chat_channels_v1", chatChannels.slice(0, 100));
+}
+
+function persistChatBackgrounds() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of chatBackgrounds.entries()) {
+    if (k && v) {
+      out[k] = v;
+      if (++count >= 500) break;
+    }
+  }
+  kvSetJson("chat_backgrounds_v1", out);
 }
 
 function isStaffRoleUser(usernameOrLower) {
@@ -7877,6 +7907,13 @@ app.get("/api/chat/state", async (req, res) => {
     activeVoice[roomId] = Array.from(peers.values());
   }
 
+  const visibleBackgrounds = {};
+  for (const [chId, bgUrl] of chatBackgrounds.entries()) {
+    if (bgUrl && canAccessChatChannel(chId, verifiedUserKey)) {
+      visibleBackgrounds[chId] = bgUrl;
+    }
+  }
+
   const presence = getPresenceSnapshot();
   const selfRole = authUser ? getUserChatRole(authUser.username) : "member";
   const selfTimeout = authUser ? getActiveTimeout(authUser.username) : null;
@@ -7890,6 +7927,7 @@ app.get("/api/chat/state", async (req, res) => {
     usersLoaded: presence.usersLoaded,
     totalUsersCount: presence.totalUsersCount,
     channels: getVisibleChatChannels(verifiedUserKey),
+    chatBackgrounds: visibleBackgrounds,
     groups: userGroups,
     voiceRooms: activeVoice,
     onlineUsers: presence.onlineUsers,
@@ -9171,11 +9209,72 @@ app.post("/api/chat/channels/edit", async (req, res) => {
   if (body.writeAccess === "staff" || body.writeAccess === "all") {
     existing.writeAccess = body.writeAccess;
   }
+  if (typeof body.backgroundUrl === "string") {
+    const rawBg = body.backgroundUrl.trim();
+    if (!rawBg) {
+      chatBackgrounds.delete(existing.id);
+      persistChatBackgrounds();
+      broadcastChatPayload(existing.id, { type: "chat-event", event: "CHAT_BG_UPDATED", channel: existing.id, backgroundUrl: "" });
+    } else if (isAllowedChatImageUrl(rawBg)) {
+      chatBackgrounds.set(existing.id, rawBg);
+      persistChatBackgrounds();
+      broadcastChatPayload(existing.id, { type: "chat-event", event: "CHAT_BG_UPDATED", channel: existing.id, backgroundUrl: rawBg });
+    }
+  }
   existing.updatedAt = Date.now();
   existing.updatedBy = authUser.username;
   persistChatChannels();
   broadcastToClients({ type: "chat-event", event: "CHANNELS_UPDATED" }, "all");
-  res.json({ success: true, channel: existing });
+  res.json({ success: true, channel: existing, backgroundUrl: chatBackgrounds.get(existing.id) || "" });
+});
+
+app.post("/api/chat/background", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const authUser = await getAuthenticatedCloudSyncUser(req);
+  if (!authUser) {
+    return res.status(401).json({ success: false, error: "Sign in to edit chat backgrounds" });
+  }
+  const channel = String(req.body?.channel || "").trim();
+  const rawBg = typeof req.body?.backgroundUrl === "string" ? req.body.backgroundUrl.trim() : "";
+  if (!channel) {
+    return res.status(400).json({ success: false, error: "Missing channel" });
+  }
+
+  const userKey = authUser.username.toLowerCase();
+  if (channel.startsWith("dm:")) {
+    if (!canAccessChatChannel(channel, userKey)) {
+      return res.status(403).json({ success: false, error: "You are not a participant in this DM" });
+    }
+  } else if (channel.startsWith("group:")) {
+    if (!canAccessChatChannel(channel, userKey)) {
+      return res.status(403).json({ success: false, error: "You are not a member of this group chat" });
+    }
+  } else {
+    if (!isStaffRoleUser(authUser.username)) {
+      return res.status(403).json({ success: false, error: "Only owners and mods can edit main channel backgrounds" });
+    }
+    if (!getChatChannelConfig(channel)) {
+      return res.status(404).json({ success: false, error: "Channel not found" });
+    }
+  }
+
+  if (rawBg && !isAllowedChatImageUrl(rawBg)) {
+    return res.status(400).json({ success: false, error: "Invalid background image or GIF URL" });
+  }
+
+  if (rawBg) {
+    chatBackgrounds.set(channel, rawBg);
+  } else {
+    chatBackgrounds.delete(channel);
+  }
+  persistChatBackgrounds();
+  broadcastChatPayload(channel, {
+    type: "chat-event",
+    event: "CHAT_BG_UPDATED",
+    channel,
+    backgroundUrl: rawBg,
+  });
+  res.json({ success: true, channel, backgroundUrl: rawBg });
 });
 
 app.post("/api/chat/channels/delete", async (req, res) => {

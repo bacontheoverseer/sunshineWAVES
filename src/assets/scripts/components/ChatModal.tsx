@@ -590,7 +590,10 @@ const ChatMessageRow = memo(function ChatMessageRow({
             }}
           />
         )}
-        <div class="chat-entry-content">
+        <div
+          class={`chat-entry-content chat-entry-pill msg-pill-${msgCustom?.msgPillStyle || "default"}`}
+          style={{ "--pill-accent": msgCustom?.avatarColor || safeFallbackColor } as any}
+        >
           {!isGrouped && (
             <div class="chat-entry-header">
               <span
@@ -1178,6 +1181,7 @@ export default function ChatModal() {
   const hydratedLocalCustomForRef = useRef<string | null>(null);
   const [chatGroups, setChatGroups] = useState<ChatGroupDef[]>([]);
   const [chatChannels, setChatChannels] = useState<ChatChannelDef[]>(DEFAULT_CHAT_CHANNELS);
+  const [chatBackgrounds, setChatBackgrounds] = useState<Record<string, string>>({});
   const [channelEditorOpen, setChannelEditorOpen] = useState(false);
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
   const [chName, setChName] = useState("");
@@ -1185,6 +1189,13 @@ export default function ChatModal() {
   const [chIcon, setChIcon] = useState("fa-hashtag");
   const [chVisibility, setChVisibility] = useState<"all" | "staff">("all");
   const [chWriteAccess, setChWriteAccess] = useState<"all" | "staff">("all");
+  const [chBgUrl, setChBgUrl] = useState("");
+  const [uploadingChBg, setUploadingChBg] = useState(false);
+  const chBgFileInputRef = useRef<HTMLInputElement>(null);
+  const [bgEditorChannel, setBgEditorChannel] = useState<string | null>(null);
+  const [bgEditorDraftUrl, setBgEditorDraftUrl] = useState("");
+  const [savingBgEditor, setSavingBgEditor] = useState(false);
+  const bgEditorFileInputRef = useRef<HTMLInputElement>(null);
   const [savingChannel, setSavingChannel] = useState(false);
   const fetchChatStateRef = useRef<((force?: boolean) => void) | null>(null);
   const [groupModalMode, setGroupModalMode] = useState<"create" | "members" | null>(null);
@@ -2575,6 +2586,9 @@ export default function ChatModal() {
           if (Array.isArray(data.channels)) {
             setChatChannels(data.channels);
           }
+          if (data.chatBackgrounds && typeof data.chatBackgrounds === "object") {
+            setChatBackgrounds(data.chatBackgrounds);
+          }
           if (typeof data.totalUsersCount === "number" && Number.isFinite(data.totalUsersCount)) {
             setServerTotalUsersCount(data.totalUsersCount);
           }
@@ -3043,6 +3057,15 @@ export default function ChatModal() {
         fetchChatStateRef.current?.(true);
       } else if (evtKind === "CHANNELS_UPDATED") {
         fetchChatStateRef.current?.(true);
+      } else if (evtKind === "CHAT_BG_UPDATED" && detail.channel) {
+        const targetCh = String(detail.channel);
+        const nextUrl = typeof detail.backgroundUrl === "string" ? detail.backgroundUrl : "";
+        setChatBackgrounds((prev) => {
+          const copy = { ...prev };
+          if (nextUrl) copy[targetCh] = nextUrl;
+          else delete copy[targetCh];
+          return copy;
+        });
       } else if (evtKind === "GOAT_UPDATED") {
         if (Array.isArray(detail.goatUsers)) setGoatUsers(detail.goatUsers);
       } else if (evtKind === "PROFILE_UPDATED" && detail.username) {
@@ -4820,6 +4843,54 @@ export default function ChatModal() {
     }
   }, [activeChannel, visibleChannels]);
 
+  const uploadBackgroundFile = useCallback(async (file?: File | null): Promise<string | null> => {
+    if (!file) return null;
+    if (!cloudUser) {
+      notifyToast("sign in to cloudsync to upload backgrounds", "error");
+      return null;
+    }
+    const compressed = await compressImageFile(file, {
+      maxWidth: 1600,
+      maxHeight: 1200,
+      maxGifBytes: 1200 * 1024,
+      quality: 0.85,
+    });
+    const uploaded = await uploadChatImage(compressed.dataUrl, compressed.name);
+    return uploaded.imageUrl;
+  }, [cloudUser]);
+
+  const saveChatBackground = useCallback(
+    async (channelId: string, backgroundUrl: string): Promise<boolean> => {
+      if (!cloudUser) return false;
+      let token = "";
+      try {
+        token = localStorage.getItem("auth_token") || "";
+      } catch {}
+      const res = await fetch("/api/chat/background", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ channel: channelId, backgroundUrl }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notifyToast(data?.error || "could not update chat background", "error");
+        return false;
+      }
+      setChatBackgrounds((prev) => {
+        const copy = { ...prev };
+        if (backgroundUrl) copy[channelId] = backgroundUrl;
+        else delete copy[channelId];
+        return copy;
+      });
+      return true;
+    },
+    [cloudUser]
+  );
+
   const openCreateChannelModal = useCallback(() => {
     setEditingChannelId(null);
     setChName("");
@@ -4827,18 +4898,23 @@ export default function ChatModal() {
     setChIcon("fa-hashtag");
     setChVisibility("all");
     setChWriteAccess("all");
+    setChBgUrl("");
     setChannelEditorOpen(true);
   }, []);
 
-  const openEditChannelModal = useCallback((ch: ChatChannelDef) => {
-    setEditingChannelId(ch.id);
-    setChName(ch.name);
-    setChCategory(ch.categoryLabel || ch.categoryId || "social");
-    setChIcon(ch.icon || "fa-hashtag");
-    setChVisibility(ch.visibility === "staff" ? "staff" : "all");
-    setChWriteAccess(ch.writeAccess === "staff" ? "staff" : "all");
-    setChannelEditorOpen(true);
-  }, []);
+  const openEditChannelModal = useCallback(
+    (ch: ChatChannelDef) => {
+      setEditingChannelId(ch.id);
+      setChName(ch.name);
+      setChCategory(ch.categoryLabel || ch.categoryId || "social");
+      setChIcon(ch.icon || "fa-hashtag");
+      setChVisibility(ch.visibility === "staff" ? "staff" : "all");
+      setChWriteAccess(ch.writeAccess === "staff" ? "staff" : "all");
+      setChBgUrl(chatBackgrounds[ch.id] || "");
+      setChannelEditorOpen(true);
+    },
+    [chatBackgrounds]
+  );
 
   const handleSaveChannel = useCallback(
     async (e: Event) => {
@@ -4872,12 +4948,23 @@ export default function ChatModal() {
             icon: chIcon,
             visibility: chVisibility,
             writeAccess: chWriteAccess,
+            ...(editingChannelId ? { backgroundUrl: chBgUrl } : {}),
           }),
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data?.success) {
           notifyToast(data?.error || "could not save channel", "error");
           return;
+        }
+        if (editingChannelId) {
+          setChatBackgrounds((prev) => {
+            const copy = { ...prev };
+            if (chBgUrl) copy[editingChannelId] = chBgUrl;
+            else delete copy[editingChannelId];
+            return copy;
+          });
+        } else if (data.channel?.id && chBgUrl) {
+          await saveChatBackground(data.channel.id, chBgUrl);
         }
         setChannelEditorOpen(false);
         fetchChatStateRef.current?.(true);
@@ -4903,7 +4990,9 @@ export default function ChatModal() {
       chIcon,
       chVisibility,
       chWriteAccess,
+      chBgUrl,
       editingChannelId,
+      saveChatBackground,
     ]
   );
 
@@ -5487,7 +5576,9 @@ export default function ChatModal() {
 
         {/* ── COLUMN 2: Center Chat Feed, Voice Stage & Input ── */}
         <div
-          class={`chat-main${dragOverChat ? " is-drag-over" : ""}`}
+          class={`chat-main${dragOverChat ? " is-drag-over" : ""}${
+            chatBackgrounds[activeChannel] ? " has-chat-bg" : ""
+          }`}
           onDragOver={(e) => {
             if (!cloudUser) return;
             if (e.dataTransfer?.types?.includes("Files")) {
@@ -5512,6 +5603,16 @@ export default function ChatModal() {
             }
           }}
         >
+          {chatBackgrounds[activeChannel] && (
+            <>
+              <div
+                class="chat-main-bg-layer"
+                style={{ backgroundImage: `url("${chatBackgrounds[activeChannel]}")` }}
+                aria-hidden="true"
+              />
+              <div class="chat-main-bg-scrim" aria-hidden="true" />
+            </>
+          )}
           {/* Header */}
           <div class="chat-main-header">
             <div class="chat-main-header-left">
@@ -5547,6 +5648,18 @@ export default function ChatModal() {
                   >
                     <i class="fa-solid fa-id-card"></i>
                     <span>profile</span>
+                  </button>
+                  <button
+                    type="button"
+                    class={`chat-header-btn ${chatBackgrounds[activeChannel] ? "voice-active" : ""}`}
+                    title="Set or remove DM chat background (image or GIF)"
+                    onClick={() => {
+                      setBgEditorChannel(activeChannel);
+                      setBgEditorDraftUrl(chatBackgrounds[activeChannel] || "");
+                    }}
+                  >
+                    <i class="fa-solid fa-image"></i>
+                    <span>background</span>
                   </button>
                   <button
                     type="button"
@@ -5600,6 +5713,18 @@ export default function ChatModal() {
                   >
                     <i class="fa-solid fa-users"></i>
                     <span>members ({activeChannelDef.groupDef.members.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    class={`chat-header-btn ${chatBackgrounds[activeChannel] ? "voice-active" : ""}`}
+                    title="Set or remove group chat background (image or GIF)"
+                    onClick={() => {
+                      setBgEditorChannel(activeChannel);
+                      setBgEditorDraftUrl(chatBackgrounds[activeChannel] || "");
+                    }}
+                  >
+                    <i class="fa-solid fa-image"></i>
+                    <span>background</span>
                   </button>
                   {(activeChannelDef.groupDef.creator.toLowerCase() === cloudUser.toLowerCase() ||
                     selfRole === "owner") && (
@@ -7558,6 +7683,71 @@ export default function ChatModal() {
                   </label>
                 </div>
 
+                {/* Channel Background Image / GIF Picker */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <span style={{ fontSize: "12px", color: "var(--color-sublabel)" }}>
+                    chat background (image or gif)
+                  </span>
+                  <input
+                    ref={chBgFileInputRef}
+                    type="file"
+                    accept="image/*,.gif"
+                    style={{ display: "none" }}
+                    onChange={async (e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      (e.target as HTMLInputElement).value = "";
+                      if (!file) return;
+                      setUploadingChBg(true);
+                      try {
+                        const url = await uploadBackgroundFile(file);
+                        if (url) {
+                          setChBgUrl(url);
+                          notifyToast("background uploaded — click save to apply", "success");
+                        }
+                      } catch (err: any) {
+                        notifyToast(err?.message || "failed to upload background", "error");
+                      } finally {
+                        setUploadingChBg(false);
+                      }
+                    }}
+                  />
+                  {chBgUrl ? (
+                    <div class="chat-bg-preview-box" style={{ backgroundImage: `url("${chBgUrl}")` }}>
+                      <div class="chat-bg-preview-scrim" />
+                      <div class="chat-entry-pill msg-pill-default" style={{ position: "relative", zIndex: 1, fontSize: "11px" }}>
+                        <strong style={{ color: "#fff" }}>preview</strong> · messages sit on rounded pills
+                      </div>
+                    </div>
+                  ) : (
+                    <div class="chat-bg-preview-empty">
+                      <i class="fa-solid fa-panorama"></i>
+                      <span>no background set</span>
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      class="chat-header-btn"
+                      disabled={uploadingChBg || savingChannel}
+                      onClick={() => chBgFileInputRef.current?.click()}
+                    >
+                      <i class={`fa-solid ${uploadingChBg ? "fa-spinner fa-spin" : "fa-upload"}`}></i>
+                      <span>{uploadingChBg ? "uploading..." : chBgUrl ? "change image / gif" : "upload image / gif"}</span>
+                    </button>
+                    {chBgUrl && (
+                      <button
+                        type="button"
+                        class="chat-header-btn danger"
+                        disabled={uploadingChBg || savingChannel}
+                        onClick={() => setChBgUrl("")}
+                      >
+                        <i class="fa-solid fa-xmark"></i>
+                        <span>remove</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginTop: "6px" }}>
                   {editingChannelId && editingChannelId !== "general" ? (
                     <button
@@ -7592,6 +7782,136 @@ export default function ChatModal() {
                   </div>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* ── DM / GROUP CHAT BACKGROUND MODAL ── */}
+        {bgEditorChannel && cloudUser && (
+          <div
+            class="chat-profile-overlay"
+            onClick={() => !savingBgEditor && setBgEditorChannel(null)}
+          >
+            <div
+              class="chat-profile-card"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: "430px",
+                width: "92vw",
+                padding: "18px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "14px",
+                background: "var(--modal-bg, rgba(14, 14, 18, 0.96))",
+                border: "1px solid var(--bg-surface-10, rgba(255,255,255,0.12))",
+                borderRadius: "16px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 700, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <i class="fa-solid fa-image"></i>
+                  <span>chat background</span>
+                </h3>
+                <button
+                  type="button"
+                  class="chat-header-btn"
+                  disabled={savingBgEditor}
+                  onClick={() => setBgEditorChannel(null)}
+                >
+                  <i class="fa-solid fa-xmark"></i>
+                </button>
+              </div>
+
+              <div style={{ fontSize: "12px", color: "var(--color-sublabel)" }}>
+                pick an image or gif to use as the background for this chat. everyone in this chat will see it.
+              </div>
+
+              <input
+                ref={bgEditorFileInputRef}
+                type="file"
+                accept="image/*,.gif"
+                style={{ display: "none" }}
+                onChange={async (e) => {
+                  const file = (e.target as HTMLInputElement).files?.[0];
+                  (e.target as HTMLInputElement).value = "";
+                  if (!file) return;
+                  setSavingBgEditor(true);
+                  try {
+                    const url = await uploadBackgroundFile(file);
+                    if (url) {
+                      setBgEditorDraftUrl(url);
+                      notifyToast("background ready — click save to apply", "success");
+                    }
+                  } catch (err: any) {
+                    notifyToast(err?.message || "failed to upload background", "error");
+                  } finally {
+                    setSavingBgEditor(false);
+                  }
+                }}
+              />
+
+              {bgEditorDraftUrl ? (
+                <div class="chat-bg-preview-box" style={{ backgroundImage: `url("${bgEditorDraftUrl}")`, height: "140px" }}>
+                  <div class="chat-bg-preview-scrim" />
+                  <div
+                    class={`chat-entry-pill msg-pill-${userMetaMap.get(cloudUser.toLowerCase())?.customization?.msgPillStyle || "default"}`}
+                    style={{ position: "relative", zIndex: 1, fontSize: "12px", "--pill-accent": userMetaMap.get(cloudUser.toLowerCase())?.customization?.avatarColor || "#6366f1" } as any}
+                  >
+                    <strong style={{ color: "#fff" }}>{cloudUser}</strong> · looking crisp over the background
+                  </div>
+                </div>
+              ) : (
+                <div class="chat-bg-preview-empty" style={{ height: "120px" }}>
+                  <i class="fa-solid fa-panorama"></i>
+                  <span>no background set</span>
+                </div>
+              )}
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button
+                    type="button"
+                    class="chat-header-btn"
+                    disabled={savingBgEditor}
+                    onClick={() => bgEditorFileInputRef.current?.click()}
+                  >
+                    <i class={`fa-solid ${savingBgEditor ? "fa-spinner fa-spin" : "fa-upload"}`}></i>
+                    <span>{bgEditorDraftUrl ? "change image / gif" : "upload image / gif"}</span>
+                  </button>
+                  {bgEditorDraftUrl && (
+                    <button
+                      type="button"
+                      class="chat-header-btn danger"
+                      disabled={savingBgEditor}
+                      onClick={() => setBgEditorDraftUrl("")}
+                    >
+                      <i class="fa-solid fa-trash-can"></i>
+                      <span>remove</span>
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  class="apps-custom-btn"
+                  disabled={savingBgEditor}
+                  onClick={async () => {
+                    if (!bgEditorChannel) return;
+                    setSavingBgEditor(true);
+                    try {
+                      const ok = await saveChatBackground(bgEditorChannel, bgEditorDraftUrl);
+                      if (ok) {
+                        notifyToast(bgEditorDraftUrl ? "chat background updated" : "chat background removed", "success");
+                        setBgEditorChannel(null);
+                      }
+                    } finally {
+                      setSavingBgEditor(false);
+                    }
+                  }}
+                >
+                  {savingBgEditor ? "saving..." : "save"}
+                </button>
+              </div>
             </div>
           </div>
         )}

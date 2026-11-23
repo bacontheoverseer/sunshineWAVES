@@ -67,6 +67,18 @@ export type CardThemeId =
 
 export type BioStyleId = "frosted" | "minimal" | "neon-border" | "accent-tint";
 
+export type MsgPillStyleId =
+  | "default"
+  | "midnight"
+  | "frosted"
+  | "tinted"
+  | "neon"
+  | "rose"
+  | "emerald"
+  | "gold"
+  | "sunset"
+  | "cyber";
+
 export type ChatRole = "owner" | "mod" | "member";
 
 export interface LastfmTrackInfo {
@@ -115,6 +127,7 @@ export interface ProfileCustomization {
   profileEffect: ProfileEffectId;
   cardTheme: CardThemeId;
   bioStyle: BioStyleId;
+  msgPillStyle: MsgPillStyleId;
   presenceStatus: "online" | "idle" | "dnd";
 }
 
@@ -209,6 +222,19 @@ export const BIO_STYLES: StyleOption<BioStyleId>[] = [
   { id: "minimal", label: "minimal" },
   { id: "neon-border", label: "accent border" },
   { id: "accent-tint", label: "tinted glass" },
+];
+
+export const MSG_PILL_STYLES: StyleOption<MsgPillStyleId>[] = [
+  { id: "default", label: "dark glass", previewColor: "#181822" },
+  { id: "midnight", label: "midnight", previewColor: "#1e1b4b" },
+  { id: "frosted", label: "ice frost", previewColor: "#334155" },
+  { id: "tinted", label: "accent tint", previewColor: "#6366f1" },
+  { id: "neon", label: "cyber neon", previewColor: "#06b6d4" },
+  { id: "rose", label: "sakura rose", previewColor: "#ec4899" },
+  { id: "emerald", label: "emerald mist", previewColor: "#10b981" },
+  { id: "gold", label: "royal gold", previewColor: "#f59e0b" },
+  { id: "sunset", label: "sunset glow", previewColor: "#f97316" },
+  { id: "cyber", label: "matrix cyber", previewColor: "#22c55e" },
 ];
 
 export const COLOR_SWATCHES = [
@@ -372,6 +398,7 @@ export function getDefaultCustomization(username = ""): ProfileCustomization {
     profileEffect: "none",
     cardTheme: "obsidian",
     bioStyle: "frosted",
+    msgPillStyle: "default",
     presenceStatus: "online",
   };
 }
@@ -425,6 +452,7 @@ export function sanitizeCustomization(
     profileEffect: pickId(obj.profileEffect, PROFILE_EFFECTS, "none"),
     cardTheme: pickId(obj.cardTheme, CARD_THEMES, "obsidian"),
     bioStyle: pickId(obj.bioStyle, BIO_STYLES, "frosted"),
+    msgPillStyle: pickId(obj.msgPillStyle, MSG_PILL_STYLES, "default"),
     presenceStatus,
   };
 }

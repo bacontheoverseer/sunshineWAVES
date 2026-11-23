@@ -5541,3 +5541,178 @@ html.chromebook-mode .chat-media-toggle-btn {
   cursor: zoom-in;
   display: block;
 }
+
+/* ─────────────────────────────────────────────────────────────
+   CHAT BACKGROUNDS & THEMEABLE MESSAGE PILLS
+   ───────────────────────────────────────────────────────────── */
+.chat-main-bg-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+.chat-main-bg-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(8, 8, 14, 0.42) 0%,
+    rgba(8, 8, 14, 0.3) 50%,
+    rgba(8, 8, 14, 0.5) 100%
+  );
+  pointer-events: none;
+}
+
+.chat-main.has-chat-bg > *:not(.chat-main-bg-layer):not(.chat-main-bg-scrim) {
+  position: relative;
+  z-index: 1;
+}
+
+.chat-main.has-chat-bg .chat-main-header {
+  background-color: rgba(12, 12, 18, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.chat-main.has-chat-bg .chat-input-area {
+  background: linear-gradient(180deg, transparent, rgba(10, 10, 16, 0.62));
+}
+
+.chat-main.has-chat-bg .chat-entry:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.chat-main.has-chat-bg .chat-date-divider span {
+  background: rgba(14, 14, 22, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+  padding: 2px 10px;
+  border-radius: 999px;
+}
+
+.chat-entry-pill {
+  flex: 0 1 auto !important;
+  width: fit-content;
+  max-width: min(100%, 760px);
+  padding: 7px 13px;
+  border-radius: 14px;
+  background: rgba(18, 18, 26, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chat-entry.is-grouped {
+  margin-top: -6px;
+}
+
+.chat-entry.is-grouped .chat-entry-pill {
+  padding: 5px 13px;
+}
+
+.chat-main.has-chat-bg .chat-entry-pill {
+  background: rgba(14, 14, 22, 0.82);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.34);
+}
+
+/* Message Pill Themes */
+.chat-entry-pill.msg-pill-default {
+  background: rgba(18, 18, 26, 0.78);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+.chat-entry-pill.msg-pill-midnight {
+  background: linear-gradient(135deg, rgba(19, 24, 54, 0.86), rgba(15, 18, 38, 0.88));
+  border-color: rgba(129, 140, 248, 0.28);
+  box-shadow: 0 3px 12px rgba(15, 23, 62, 0.35);
+}
+
+.chat-entry-pill.msg-pill-frosted {
+  background: rgba(38, 46, 62, 0.72);
+  border-color: rgba(226, 232, 240, 0.24);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.chat-entry-pill.msg-pill-tinted {
+  background: color-mix(in srgb, var(--pill-accent, #6366f1) 24%, rgba(14, 14, 22, 0.86));
+  border-color: color-mix(in srgb, var(--pill-accent, #6366f1) 48%, rgba(255, 255, 255, 0.14));
+}
+
+.chat-entry-pill.msg-pill-neon {
+  background: linear-gradient(135deg, rgba(8, 24, 38, 0.86), rgba(26, 14, 46, 0.86));
+  border-color: rgba(34, 211, 238, 0.42);
+  box-shadow: 0 0 14px rgba(34, 211, 238, 0.16), 0 3px 12px rgba(0, 0, 0, 0.32);
+}
+
+.chat-entry-pill.msg-pill-rose {
+  background: linear-gradient(135deg, rgba(46, 16, 34, 0.86), rgba(32, 14, 28, 0.88));
+  border-color: rgba(244, 114, 182, 0.36);
+  box-shadow: 0 3px 12px rgba(190, 24, 93, 0.2);
+}
+
+.chat-entry-pill.msg-pill-emerald {
+  background: linear-gradient(135deg, rgba(10, 34, 28, 0.86), rgba(10, 24, 24, 0.88));
+  border-color: rgba(52, 211, 153, 0.34);
+  box-shadow: 0 3px 12px rgba(6, 95, 70, 0.22);
+}
+
+.chat-entry-pill.msg-pill-gold {
+  background: linear-gradient(135deg, rgba(42, 30, 12, 0.88), rgba(28, 20, 12, 0.88));
+  border-color: rgba(250, 204, 21, 0.38);
+  box-shadow: 0 3px 12px rgba(180, 83, 9, 0.22);
+}
+
+.chat-entry-pill.msg-pill-sunset {
+  background: linear-gradient(135deg, rgba(54, 22, 24, 0.86), rgba(36, 18, 48, 0.86));
+  border-color: rgba(251, 146, 60, 0.38);
+  box-shadow: 0 3px 12px rgba(234, 88, 12, 0.2);
+}
+
+.chat-entry-pill.msg-pill-cyber {
+  background: rgba(8, 22, 14, 0.88);
+  border-color: rgba(34, 197, 94, 0.44);
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.16), 0 3px 10px rgba(0, 0, 0, 0.34);
+}
+
+/* Background Picker Preview Box */
+.chat-bg-preview-box {
+  position: relative;
+  height: 96px;
+  border-radius: 12px;
+  background-size: cover;
+  background-position: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  padding: 10px;
+}
+
+.chat-bg-preview-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 8, 14, 0.32);
+  pointer-events: none;
+}
+
+.chat-bg-preview-empty {
+  height: 76px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--color-sublabel);
+}

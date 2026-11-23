@@ -10,6 +10,7 @@ import {
   CUSTOM_TAG_PRESETS,
   ChatRole,
   LastfmProfileState,
+  MSG_PILL_STYLES,
   NAME_FONTS,
   NAME_STYLES,
   ProfileCustomization,
@@ -999,6 +1000,36 @@ export default function ProfileCustomizerModal({
                     ))}
                   </div>
                 </div>
+
+                <div>
+                  <div class="chat-profile-section-title" style={{ marginBottom: "5px" }}>
+                    <i class="fa-solid fa-comment-dots" style={{ marginRight: "5px" }} />
+                    chat message pill theme
+                  </div>
+                  <div class="chat-customizer-grid">
+                    {MSG_PILL_STYLES.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        class={`chat-style-chip ${custom.msgPillStyle === opt.id ? "active" : ""}`}
+                        onClick={() => updateField("msgPillStyle", opt.id)}
+                        style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+                      >
+                        <span
+                          style={{
+                            width: "9px",
+                            height: "9px",
+                            borderRadius: "999px",
+                            background: opt.id === "tinted" ? (custom.avatarColor || "#6366f1") : (opt.previewColor || "#181822"),
+                            border: "1px solid rgba(255,255,255,0.28)",
+                            flexShrink: 0,
+                          }}
+                        />
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1141,7 +1172,10 @@ export default function ProfileCustomizerModal({
                   custom={custom}
                   className="chat-entry-avatar"
                 />
-                <div class="chat-entry-content">
+                <div
+                  class={`chat-entry-content chat-entry-pill msg-pill-${custom.msgPillStyle || "default"}`}
+                  style={{ "--pill-accent": custom.avatarColor || "#6366f1" } as any}
+                >
                   <div class="chat-entry-header">
                     <span class={`chat-entry-author ${getNameClasses(custom)}`}>
                       {displayLabel}
@@ -1150,7 +1184,7 @@ export default function ProfileCustomizerModal({
                     <GoatBadge isGoat={isGoat} />
                     <span class="chat-entry-time">just now</span>
                   </div>
-                  <div class="chat-entry-text">new animated profile look in #general ✨</div>
+                  <div class="chat-entry-text">new animated profile look in #general</div>
                 </div>
               </div>
             </div>
