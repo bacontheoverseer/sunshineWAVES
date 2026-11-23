@@ -702,8 +702,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 class="chat-entry-gif"
                 src={getKlipyProxySrc(msg.gifUrl)}
                 alt={msg.gifTitle || "GIF"}
+                title="Click to view full size"
                 loading="lazy"
                 decoding="async"
+                style={{ cursor: "zoom-in" }}
+                onClick={() => {
+                  const gifSrc = getKlipyProxySrc(msg.gifUrl);
+                  if (gifSrc) onOpenImageLightbox(gifSrc, msg.gifTitle || "gif");
+                }}
               />
             </div>
           )}
