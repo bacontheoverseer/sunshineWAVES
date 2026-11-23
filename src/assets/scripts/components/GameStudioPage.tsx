@@ -63,6 +63,7 @@ export interface StudioGameProject {
   isCustomHtml?: boolean;
   customHtmlContent?: string;
   likes: number;
+  likedBy?: string[];
   plays: number;
   createdAt: string;
 }
@@ -604,6 +605,15 @@ export default function GameStudioPage() {
   const [playingCustomHtmlGame, setPlayingCustomHtmlGame] = useState<StudioGameProject | null>(
     null
   );
+  const likingGamesRef = useRef<Set<string>>(new Set());
+  const [likedGameIds, setLikedGameIds] = useState<Set<string>>(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("studio_liked_games_v1") || "[]");
+      return new Set(Array.isArray(raw) ? raw.map((x) => String(x)) : []);
+    } catch {
+      return new Set();
+    }
+  });
 
   // Custom index.html upload state (1,000 Cookie Coins)
   const [htmlTitle, setHtmlTitle] = useState("");
@@ -2678,6 +2688,61 @@ export default function GameStudioPage() {
     store.notify();
   };
 
+  const handleToggleLikeGame = async (g: StudioGameProject) => {
+    if (likingGamesRef.current.has(g.id)) return;
+    likingGamesRef.current.add(g.id);
+    try {
+      let token = "";
+      try {
+        token = localStorage.getItem("auth_token") || "";
+      } catch {}
+      const res = await fetch(`/api/studio/games/${encodeURIComponent(g.id)}/stat`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}`, "x-cloudsync-token": token } : {}),
+        },
+        body: JSON.stringify({ field: "likes" }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notifyToast(data?.error || "could not update like right now", "error");
+        return;
+      }
+      const nowLiked = Boolean(data.liked);
+      setLikedGameIds((prev) => {
+        const next = new Set(prev);
+        if (nowLiked) next.add(g.id);
+        else next.delete(g.id);
+        try {
+          localStorage.setItem("studio_liked_games_v1", JSON.stringify(Array.from(next)));
+        } catch {}
+        return next;
+      });
+      if (data.game) {
+        setCommunityGames((prev) =>
+          prev.map((item) =>
+            item.id === g.id
+              ? {
+                  ...item,
+                  likes: Number(data.game.likes ?? item.likes ?? 0),
+                  likedBy: Array.isArray(data.game.likedBy) ? data.game.likedBy : item.likedBy,
+                }
+              : item
+          )
+        );
+      }
+      if (Number(data.rewardCoins) > 0) {
+        addCookieCoins(Number(data.rewardCoins), `liked ${g.title}`);
+      }
+    } catch {
+      notifyToast("failed to update like", "error");
+    } finally {
+      likingGamesRef.current.delete(g.id);
+    }
+  };
+
   const openLeaderboardOrSpace = (
     gameName: string,
     tab: "leaderboard" | "space" | "cloudplay"
@@ -2804,7 +2869,7 @@ export default function GameStudioPage() {
             }}
           >
             <i class="fa-solid fa-file-code"></i>
-            <span>upload index.html (1,000 🍪)</span>
+            <span>upload index.html (1,000 <i class="fa-solid fa-cookie-bite"></i>)</span>
           </button>
 
           <button
@@ -3050,34 +3115,32 @@ export default function GameStudioPage() {
                         >
                           <i class="fa-solid fa-code-branch"></i>
                         </button>
-                        <button
-                          type="button"
-                          class="studio-tool-btn"
-                          title="Like game"
-                          onClick={() => {
-                            setCommunityGames((prev) =>
-                              prev.map((item) =>
-                                item.id === g.id
-                                  ? { ...item, likes: (item.likes || 0) + 1 }
-                                  : item
-                              )
-                            );
-                            addCookieCoins(2, `liked ${g.title}`);
-                            fetch(`/api/studio/games/${encodeURIComponent(g.id)}/stat`, {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ field: "likes" }),
-                            }).catch(() => {});
-                          }}
-                        >
-                          <i class="fa-solid fa-heart" style={{ color: "#f43f5e" }}></i>
-                        </button>
+                        {(() => {
+                          const myActorKey = `u:${getActiveAuthor().toLowerCase()}`;
+                          const isLiked =
+                            (Array.isArray(g.likedBy) && g.likedBy.includes(myActorKey)) ||
+                            likedGameIds.has(g.id);
+                          return (
+                            <button
+                              type="button"
+                              class={`studio-tool-btn${isLiked ? " studio-like-btn-active" : ""}`}
+                              title={isLiked ? "Unlike game" : "Like game"}
+                              aria-pressed={isLiked}
+                              onClick={() => void handleToggleLikeGame(g)}
+                            >
+                              <i
+                                class={`${isLiked ? "fa-solid" : "fa-regular"} fa-heart`}
+                                style={{ color: isLiked ? "#f43f5e" : "var(--text-muted)" }}
+                              ></i>
+                            </button>
+                          );
+                        })()}
                       </div>
 
-                      <div class="studio-game-actions">
-                        {serverSyncLoaded &&
-                          !serverGameIds.has(g.id) &&
-                          g.author.toLowerCase() === getActiveAuthor().toLowerCase() && (
+                      {serverSyncLoaded &&
+                        !serverGameIds.has(g.id) &&
+                        g.author.toLowerCase() === getActiveAuthor().toLowerCase() && (
+                          <div class="studio-game-actions">
                             <button
                               type="button"
                               class="studio-tool-btn"
@@ -3088,29 +3151,32 @@ export default function GameStudioPage() {
                               <i class="fa-solid fa-cloud-arrow-up"></i>
                               <span>republish globally</span>
                             </button>
-                          )}
+                          </div>
+                        )}
+
+                      <div class="studio-game-actions-secondary">
                         <button
                           type="button"
-                          class="studio-tool-btn"
-                          style={{ flex: 1, justifyContent: "center" }}
+                          class="studio-tool-btn studio-card-mini-btn"
+                          title="Leaderboard"
                           onClick={() => openLeaderboardOrSpace(g.title, "leaderboard")}
                         >
                           <i class="fa-solid fa-trophy"></i>
-                          <span>leaderboard</span>
+                          <span>ranks</span>
                         </button>
                         <button
                           type="button"
-                          class="studio-tool-btn"
-                          style={{ flex: 1, justifyContent: "center" }}
+                          class="studio-tool-btn studio-card-mini-btn"
+                          title="Game Space (Chat & Voice)"
                           onClick={() => openLeaderboardOrSpace(g.title, "space")}
                         >
                           <i class="fa-solid fa-users-rectangle"></i>
-                          <span>game space</span>
+                          <span>space</span>
                         </button>
                         <button
                           type="button"
-                          class="studio-tool-btn"
-                          style={{ flex: 1, justifyContent: "center" }}
+                          class="studio-tool-btn studio-card-mini-btn"
+                          title="CloudPlay (2-Player Co-op)"
                           onClick={() => openLeaderboardOrSpace(g.title, "cloudplay")}
                         >
                           <i class="fa-solid fa-tower-broadcast" style={{ color: "#4ade80" }}></i>

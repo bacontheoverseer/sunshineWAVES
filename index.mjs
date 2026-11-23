@@ -10018,14 +10018,49 @@ app.post("/api/studio/games/:id/stat", async (req, res) => {
   const { id } = req.params;
   const { field } = req.body || {};
   const found = publishedStudioGames.find((g) => g.id === id);
-  if (found) {
-    if (field === "likes") found.likes = (found.likes || 0) + 1;
-    if (field === "plays") found.plays = (found.plays || 0) + 1;
-    found.updatedAt = new Date().toISOString();
-    localKvSetJson(STUDIO_GAMES_KV_KEY, publishedStudioGames);
-    scheduleSupabaseKvSync(STUDIO_GAMES_KV_KEY);
+  if (!found) {
+    return res.status(404).json({ success: false, game: null, error: "Game not found" });
   }
-  res.json({ success: true, game: found || null });
+
+  let liked = false;
+  let rewardCoins = 0;
+
+  if (field === "likes") {
+    const authUser = await getAuthenticatedCloudSyncUser(req).catch(() => null);
+    const reqIp = String(req.headers["cf-connecting-ip"] || req.ip || "").trim();
+    const actorKey = authUser?.username
+      ? `u:${authUser.username.toLowerCase()}`
+      : reqIp
+        ? `ip:${reqIp}`
+        : "";
+    if (!actorKey) {
+      return res.status(401).json({ success: false, error: "Sign in to like games" });
+    }
+    if (!Array.isArray(found.likedBy)) found.likedBy = [];
+    if (!Array.isArray(found.rewardedLikesBy)) found.rewardedLikesBy = [];
+
+    const existingIdx = found.likedBy.indexOf(actorKey);
+    if (existingIdx >= 0) {
+      found.likedBy.splice(existingIdx, 1);
+      found.likes = Math.max(0, (Number(found.likes) || 0) - 1);
+      liked = false;
+    } else {
+      found.likedBy.push(actorKey);
+      found.likes = Math.max(found.likedBy.length, (Number(found.likes) || 0) + 1);
+      liked = true;
+      if (!found.rewardedLikesBy.includes(actorKey)) {
+        found.rewardedLikesBy.push(actorKey);
+        rewardCoins = 2;
+      }
+    }
+  } else if (field === "plays") {
+    found.plays = (found.plays || 0) + 1;
+  }
+
+  found.updatedAt = new Date().toISOString();
+  localKvSetJson(STUDIO_GAMES_KV_KEY, publishedStudioGames);
+  scheduleSupabaseKvSync(STUDIO_GAMES_KV_KEY);
+  return res.json({ success: true, game: found, liked, rewardCoins });
 });
 
 // Serve custom uploaded index.html studio game with CloudSync Player Tracking SDK bridge
