@@ -8,13 +8,17 @@ const { Pool } = pg;
 const rawUrl = (process.env.AIVEN_DATABASE_URL || "").trim();
 export const isAivenConfigured = Boolean(rawUrl);
 
+const POOL_DEFAULTS = {
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+  statement_timeout: 15000,
+  query_timeout: 15000,
+};
+
 function buildPoolConfig(connectionUrl) {
   if (!connectionUrl) {
-    return {
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    };
+    return { ...POOL_DEFAULTS };
   }
   try {
     const parsed = new URL(connectionUrl);
@@ -24,17 +28,13 @@ function buildPoolConfig(connectionUrl) {
       user: decodeURIComponent(parsed.username),
       password: decodeURIComponent(parsed.password),
       database: parsed.pathname.replace(/^\//, "") || "defaultdb",
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      ...POOL_DEFAULTS,
       ssl: { rejectUnauthorized: false },
     };
   } catch {
     return {
       connectionString: connectionUrl,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      ...POOL_DEFAULTS,
       ssl: { rejectUnauthorized: false },
     };
   }

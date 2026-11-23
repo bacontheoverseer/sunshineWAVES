@@ -2085,22 +2085,41 @@ async function recoverMissingProfilesFromSupabaseSyncAsync() {
     if (candidates.length === 0) return 0;
 
     let recovered = 0;
-    const batchSize = 15;
-    const maxBatches = 4; // Up to 60 missing profiles per startup to protect Supabase Disk IO
-    for (let i = 0; i < candidates.length && i < batchSize * maxBatches; i += batchSize) {
+    const uncachedCandidates = [];
+    for (const c of candidates) {
+      const cachedBlob = cloudSyncBlobCache.get(Number(c.id));
+      if (cachedBlob && cachedBlob.payload_json) {
+        if (recoverUserProfileFromSyncPayload(c.username, cachedBlob.payload_json, cachedBlob.updated_at || "")) {
+          recovered++;
+        }
+      } else {
+        uncachedCandidates.push(c);
+      }
+    }
+
+    const batchSize = 5; // Small chunks so Postgres never allocates large concurrent TOAST buffers
+    const maxBatches = 8; // Up to 40 uncached missing profiles per startup
+    for (let i = 0; i < uncachedCandidates.length && i < batchSize * maxBatches; i += batchSize) {
       if (isSupabaseDegraded()) break;
-      const batch = candidates.slice(i, i + batchSize);
+      const batch = uncachedCandidates.slice(i, i + batchSize);
       const idToUser = new Map(batch.map((c) => [c.id, c.username]));
       const batchIds = batch.map((c) => Number(c.id));
       const res = await aivenDb
         .query(
-          "SELECT user_id, payload_json, updated_at FROM public.cloudsync_sync WHERE user_id = ANY($1::bigint[])",
+          "SELECT user_id, payload_json, updated_at FROM public.cloudsync_sync WHERE user_id = ANY($1::bigint[]) LIMIT 5",
           [batchIds]
         )
         .catch(() => null);
       if (!res || !Array.isArray(res.rows)) break;
       for (const row of res.rows) {
-        const uname = idToUser.get(Number(row?.user_id));
+        const uid = Number(row?.user_id);
+        const uname = idToUser.get(uid);
+        if (row?.payload_json && uid > 0) {
+          cloudSyncBlobCache.set(uid, {
+            payload_json: String(row.payload_json),
+            updated_at: row.updated_at ? String(row.updated_at) : null,
+          });
+        }
         if (uname && row?.payload_json) {
           if (recoverUserProfileFromSyncPayload(uname, row.payload_json, row.updated_at || "")) {
             recovered++;
@@ -2901,7 +2920,7 @@ async function banUserAndDevice(
         }
         if (clauses.length > 0) {
           const altRes = await aivenDb.query(
-            `SELECT id, username, token_version FROM public.cloudsync_users WHERE ${clauses.join(" OR ")}`,
+            `SELECT id, username, token_version FROM public.cloudsync_users WHERE ${clauses.join(" OR ")} LIMIT 50`,
             params
           );
           for (const r of altRes.rows || []) {
@@ -3081,16 +3100,27 @@ async function ensureChatMetaReadyAsync() {
         let remoteKv = {};
         if (supabaseHasAppKvTable !== false && !isSupabaseDegraded()) {
           try {
-            const res = await aivenDb.query("SELECT k, v FROM public.app_kv WHERE k NOT LIKE 'chat_media_%'");
+            // Paginate app_kv in small keyset chunks (LIMIT 50) to avoid giant Postgres result buffers on boot
+            const KV_BOOT_CHUNK = 50;
+            let lastKey = "";
+            for (let page = 0; page < 40; page++) {
+              const res = await aivenDb.query(
+                "SELECT k, v FROM public.app_kv WHERE k NOT LIKE 'chat_media_%' AND k > $1 ORDER BY k ASC LIMIT $2",
+                [lastKey, KV_BOOT_CHUNK]
+              );
+              const rows = res.rows || [];
+              for (const row of rows) {
+                if (row?.k && !String(row.k).startsWith("chat_media_") && typeof row.v === "string") {
+                  try {
+                    remoteKv[row.k] = JSON.parse(row.v);
+                  } catch {}
+                }
+                if (row?.k) lastKey = String(row.k);
+              }
+              if (rows.length < KV_BOOT_CHUNK) break;
+            }
             supabaseHasAppKvTable = true;
             fetchSucceeded = true;
-            for (const row of res.rows || []) {
-              if (row?.k && !String(row.k).startsWith("chat_media_") && typeof row.v === "string") {
-                try {
-                  remoteKv[row.k] = JSON.parse(row.v);
-                } catch {}
-              }
-            }
           } catch (err) {
             if (err?.code === "42P01") {
               supabaseHasAppKvTable = false;
@@ -3146,21 +3176,48 @@ async function ensureChatMetaReadyAsync() {
           supabaseMetaHydrated = true;
           studioGamesRemoteSyncedAt = Date.now();
           studioStudiosRemoteSyncedAt = Date.now();
-          // Hydrate banned_devices & shadowbanned/device signatures directly from Aiven SQL tables
+          // Hydrate banned_devices, user signatures, and active subscriptions sequentially in LIMIT 50 chunks
+          // to keep Postgres RAM and concurrent connection usage minimal on boot
           try {
-            const [bdRes, userSigRes, cmSubsRes] = await Promise.all([
-              aivenDb.query(
-                "SELECT id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at FROM public.banned_devices ORDER BY id DESC LIMIT 1000"
-              ),
-              aivenDb.query(
-                "SELECT username, last_fingerprint_id, last_storage_token, is_shadowbanned FROM public.cloudsync_users WHERE is_shadowbanned = TRUE OR last_fingerprint_id <> '' OR last_storage_token <> ''"
-              ),
-              aivenDb
+            const BOOT_PAGE_SIZE = 50;
+            const bdRows = [];
+            for (let offset = 0; offset < 1000; offset += BOOT_PAGE_SIZE) {
+              const r = await aivenDb.query(
+                "SELECT id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at FROM public.banned_devices ORDER BY id DESC LIMIT $1 OFFSET $2",
+                [BOOT_PAGE_SIZE, offset]
+              );
+              const batch = r.rows || [];
+              bdRows.push(...batch);
+              if (batch.length < BOOT_PAGE_SIZE) break;
+            }
+
+            const userSigRows = [];
+            for (let offset = 0; offset < 2000; offset += BOOT_PAGE_SIZE) {
+              const r = await aivenDb.query(
+                "SELECT username, last_fingerprint_id, last_storage_token, is_shadowbanned FROM public.cloudsync_users WHERE is_shadowbanned = TRUE OR last_fingerprint_id <> '' OR last_storage_token <> '' ORDER BY id DESC LIMIT $1 OFFSET $2",
+                [BOOT_PAGE_SIZE, offset]
+              );
+              const batch = r.rows || [];
+              userSigRows.push(...batch);
+              if (batch.length < BOOT_PAGE_SIZE) break;
+            }
+
+            const cmSubRows = [];
+            for (let offset = 0; offset < 500; offset += BOOT_PAGE_SIZE) {
+              const r = await aivenDb
                 .query(
-                  "SELECT subscription_id, checkout_session_id, invoice_id, customer_id, email_lower, user_name_lower, custom_username_lower, claimed_username_lower, price_id, product_id, tier_name, status, managed_payments, customer_portal_url, amount, verified_at, expires_at, cancelled_at FROM public.stripe_subscriptions WHERE expires_at > NOW() ORDER BY expires_at DESC LIMIT 500"
+                  "SELECT subscription_id, checkout_session_id, invoice_id, customer_id, email_lower, user_name_lower, custom_username_lower, claimed_username_lower, price_id, product_id, tier_name, status, managed_payments, customer_portal_url, amount, verified_at, expires_at, cancelled_at FROM public.stripe_subscriptions WHERE expires_at > NOW() ORDER BY expires_at DESC LIMIT $1 OFFSET $2",
+                  [BOOT_PAGE_SIZE, offset]
                 )
-                .catch(() => ({ rows: [] })),
-            ]);
+                .catch(() => ({ rows: [] }));
+              const batch = r.rows || [];
+              cmSubRows.push(...batch);
+              if (batch.length < BOOT_PAGE_SIZE) break;
+            }
+
+            const bdRes = { rows: bdRows };
+            const userSigRes = { rows: userSigRows };
+            const cmSubsRes = { rows: cmSubRows };
             if (Array.isArray(cmSubsRes?.rows) && cmSubsRes.rows.length > 0) {
               const existingSubs = loadStripeSubscriptions();
               const byId = new Map(existingSubs.map((s) => [s.subscriptionId, s]));
