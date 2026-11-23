@@ -8359,6 +8359,299 @@ app.post("/api/chat/typing", (req, res) => {
   }
 });
 
+const PARTNER_BLOCKED_RE =
+  /\b(pornhub|xvideos|xnxx|xhamster|redtube|youporn|brazzers|onlyfans|chaturbate|stripchat|cam4|bongacams|livejasmin|myfreecams|spankbang|eporner|rule34|nhentai|hanime|hentaihaven|e621|gelbooru|danbooru|fakku|hitomi|erome|fapello|coomer|kemono|bestgore|liveleak|kaotic|crazyshit|theync|grabify|iplogger|2no\.co|blasze|canarytokens|yip\.su|porn|nsfw|hentai|xxx|nude|nudes|sexting|camgirl|escort|milf|bdsm|fetish|gore|beheading|suicide|selfharm)\b/i;
+
+function checkPartnerContentSafety(textOrUrl) {
+  const s = String(textOrUrl || "").trim();
+  if (!s) return { blocked: false, reason: "" };
+  if (PARTNER_BLOCKED_RE.test(s)) {
+    return { blocked: true, reason: "Blocked by safety filter (inappropriate or unsafe content)" };
+  }
+  return { blocked: false, reason: "" };
+}
+
+let spotifyTokenCache = { token: "", expiresAt: 0 };
+
+async function getSpotifyAppToken() {
+  const clientId = String(process.env.SPOTIFY_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.SPOTIFY_CLIENT_SECRET || "").trim();
+  if (!clientId || !clientSecret) return "";
+  if (spotifyTokenCache.token && Date.now() < spotifyTokenCache.expiresAt - 30000) {
+    return spotifyTokenCache.token;
+  }
+  const creds = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  const res = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${creds}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+    signal: AbortSignal.timeout(7000),
+  });
+  if (!res.ok) return "";
+  const data = await res.json().catch(() => null);
+  if (!data?.access_token) return "";
+  spotifyTokenCache = {
+    token: String(data.access_token),
+    expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000,
+  };
+  return spotifyTokenCache.token;
+}
+
+async function searchItunesSnippets(query, limit = 10) {
+  const url = `https://itunes.apple.com/search?media=music&entity=song&limit=${Math.min(12, Math.max(1, limit))}&term=${encodeURIComponent(query)}`;
+  const r = await fetch(url, { signal: AbortSignal.timeout(7000) });
+  if (!r.ok) return [];
+  const data = await r.json().catch(() => null);
+  const items = Array.isArray(data?.results) ? data.results : [];
+  return items
+    .filter((t) => t && t.trackName && t.previewUrl)
+    .map((t) => ({
+      id: `itunes_${t.trackId || Math.random().toString(36).slice(2, 8)}`,
+      title: String(t.trackName || "").trim().slice(0, 100),
+      artist: String(t.artistName || "Unknown Artist").trim().slice(0, 80),
+      album: String(t.collectionName || "").trim().slice(0, 100),
+      artworkUrl: String(t.artworkUrl100 || "").replace("100x100bb", "300x300bb"),
+      previewUrl: String(t.previewUrl || ""),
+      spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(`${t.trackName} ${t.artistName}`)}`,
+      durationSec: 30,
+    }));
+}
+
+app.get("/api/chat/partners/music", async (req, res) => {
+  try {
+    const q = String(req.query?.q || "").trim().slice(0, 160);
+    if (!q) {
+      return res.json({ success: true, tracks: [] });
+    }
+
+    // Direct Spotify track URL via free Spotify oEmbed + 30s preview lookup
+    if (/^https?:\/\/open\.spotify\.com\/track\/[a-zA-Z0-9]+/i.test(q)) {
+      const oembedRes = await fetch(
+        `https://open.spotify.com/oembed?url=${encodeURIComponent(q)}`,
+        { signal: AbortSignal.timeout(6000) }
+      ).catch(() => null);
+      if (oembedRes && oembedRes.ok) {
+        const meta = await oembedRes.json().catch(() => null);
+        const title = String(meta?.title || "Spotify Track").trim().slice(0, 100);
+        const previews = await searchItunesSnippets(title, 1).catch(() => []);
+        const match = previews[0];
+        return res.json({
+          success: true,
+          tracks: [
+            {
+              id: `sp_${Date.now()}`,
+              title: match?.title || title,
+              artist: match?.artist || "Spotify",
+              album: match?.album || "",
+              artworkUrl: String(meta?.thumbnail_url || match?.artworkUrl || ""),
+              previewUrl: match?.previewUrl || "",
+              spotifyUrl: q,
+              durationSec: 30,
+            },
+          ],
+        });
+      }
+    }
+
+    // Try Spotify Web API if credentials are configured
+    const spToken = await getSpotifyAppToken().catch(() => "");
+    if (spToken) {
+      const spRes = await fetch(
+        `https://api.spotify.com/v1/search?type=track&limit=8&q=${encodeURIComponent(q)}`,
+        {
+          headers: { Authorization: `Bearer ${spToken}` },
+          signal: AbortSignal.timeout(7000),
+        }
+      ).catch(() => null);
+      if (spRes && spRes.ok) {
+        const spData = await spRes.json().catch(() => null);
+        const rawTracks = Array.isArray(spData?.tracks?.items) ? spData.tracks.items : [];
+        const tracks = await Promise.all(
+          rawTracks.map(async (t) => {
+            const title = String(t?.name || "").trim().slice(0, 100);
+            const artist = Array.isArray(t?.artists)
+              ? t.artists.map((a) => a?.name).filter(Boolean).join(", ").slice(0, 80)
+              : "Unknown Artist";
+            let previewUrl = String(t?.preview_url || "").trim();
+            if (!previewUrl && title) {
+              const fallback = await searchItunesSnippets(`${title} ${artist}`, 1).catch(() => []);
+              previewUrl = fallback[0]?.previewUrl || "";
+            }
+            return {
+              id: `sp_${t.id}`,
+              title,
+              artist,
+              album: String(t?.album?.name || "").trim().slice(0, 100),
+              artworkUrl: String(t?.album?.images?.[1]?.url || t?.album?.images?.[0]?.url || ""),
+              previewUrl,
+              spotifyUrl: String(t?.external_urls?.spotify || ""),
+              durationSec: 30,
+            };
+          })
+        );
+        const usable = tracks.filter((t) => t.title && (t.previewUrl || t.spotifyUrl));
+        if (usable.length > 0) {
+          return res.json({ success: true, tracks: usable });
+        }
+      }
+    }
+
+    // Zero-key free music snippet search (30s playable previews + album art + Spotify link)
+    const tracks = await searchItunesSnippets(q, 10);
+    return res.json({ success: true, tracks });
+  } catch (err) {
+    return res.status(502).json({ success: false, tracks: [], error: err?.message || "Music search failed" });
+  }
+});
+
+app.post("/api/chat/partners/embed-preview", async (req, res) => {
+  try {
+    let rawUrl = String(req.body?.url || "").trim();
+    if (!rawUrl) {
+      return res.status(400).json({ success: false, error: "Enter a URL to embed" });
+    }
+    if (!/^https?:\/\//i.test(rawUrl)) {
+      rawUrl = `https://${rawUrl}`;
+    }
+    if (!isSafeExternalHttpUrl(rawUrl)) {
+      return res.status(400).json({ success: false, error: "Only safe public HTTPS/HTTP URLs are allowed" });
+    }
+    const safety = checkPartnerContentSafety(rawUrl);
+    if (safety.blocked) {
+      return res.status(403).json({ success: false, error: safety.reason });
+    }
+
+    const parsedUrl = new URL(rawUrl);
+    const domain = parsedUrl.hostname.replace(/^www\./i, "");
+    let title = domain;
+    let description = "";
+    let imageUrl = "";
+    let siteName = domain;
+
+    try {
+      const pageRes = await fetch(rawUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; OperationCookieEmbed/1.0)",
+          Accept: "text/html,application/xhtml+xml",
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(6000),
+      });
+      if (pageRes.ok) {
+        const ct = String(pageRes.headers.get("content-type") || "").toLowerCase();
+        if (ct.includes("text/html")) {
+          const html = (await pageRes.text()).slice(0, 120000);
+          const pickMeta = (prop) => {
+            const re1 = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, "i");
+            const re2 = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`, "i");
+            return (html.match(re1)?.[1] || html.match(re2)?.[1] || "").trim();
+          };
+          const ogTitle = pickMeta("og:title") || pickMeta("twitter:title") || (html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || "").trim();
+          const ogDesc = pickMeta("og:description") || pickMeta("twitter:description") || pickMeta("description");
+          const ogImg = pickMeta("og:image") || pickMeta("twitter:image");
+          const ogSite = pickMeta("og:site_name");
+          if (ogTitle) title = ogTitle.replace(/\s+/g, " ").slice(0, 120);
+          if (ogDesc) description = ogDesc.replace(/\s+/g, " ").slice(0, 220);
+          if (ogSite) siteName = ogSite.replace(/\s+/g, " ").slice(0, 60);
+          if (ogImg) {
+            try {
+              const resolved = new URL(ogImg, parsedUrl.href).href;
+              if (isSafeExternalHttpUrl(resolved)) imageUrl = resolved;
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+
+    const metaSafety = checkPartnerContentSafety(`${title} ${description} ${siteName}`);
+    if (metaSafety.blocked) {
+      return res.status(403).json({ success: false, error: metaSafety.reason });
+    }
+    const modCheck = await moderateTextWithOpenAI(`${title} ${description}`);
+    if (modCheck.blocked) {
+      return res.status(403).json({ success: false, error: modCheck.reason || "Blocked by safety filter" });
+    }
+
+    return res.json({
+      success: true,
+      embed: {
+        url: parsedUrl.href,
+        title,
+        description,
+        imageUrl,
+        siteName,
+        domain,
+      },
+    });
+  } catch (err) {
+    return res.status(400).json({ success: false, error: err?.message || "Invalid URL" });
+  }
+});
+
+function sanitizePartnerCard(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const type = String(raw.type || "").trim().toLowerCase();
+  if (type === "music") {
+    const title = String(raw.title || "").trim().slice(0, 120);
+    const artist = String(raw.artist || "").trim().slice(0, 80);
+    const previewUrl = String(raw.previewUrl || "").trim().slice(0, 500);
+    const spotifyUrl = String(raw.spotifyUrl || "").trim().slice(0, 500);
+    const artworkUrl = String(raw.artworkUrl || "").trim().slice(0, 500);
+    if (!title || (!previewUrl && !spotifyUrl)) return null;
+    if (previewUrl && !isSafeExternalHttpUrl(previewUrl)) return null;
+    if (spotifyUrl && !isSafeExternalHttpUrl(spotifyUrl)) return null;
+    return {
+      type: "music",
+      title,
+      artist: artist || "Unknown Artist",
+      album: String(raw.album || "").trim().slice(0, 100),
+      artworkUrl: artworkUrl && isSafeExternalHttpUrl(artworkUrl) ? artworkUrl : "",
+      previewUrl,
+      spotifyUrl,
+      durationSec: 30,
+    };
+  }
+  if (type === "embed") {
+    const url = String(raw.url || "").trim().slice(0, 500);
+    if (!url || !isSafeExternalHttpUrl(url)) return null;
+    let domain = "";
+    try {
+      domain = new URL(url).hostname.replace(/^www\./i, "");
+    } catch {
+      return null;
+    }
+    const title = String(raw.title || domain).trim().slice(0, 120);
+    const description = String(raw.description || "").trim().slice(0, 220);
+    const siteName = String(raw.siteName || domain).trim().slice(0, 60);
+    const imageUrl = String(raw.imageUrl || "").trim().slice(0, 500);
+    if (checkPartnerContentSafety(`${url} ${title} ${description} ${siteName}`).blocked) {
+      return { _blocked: true };
+    }
+    return {
+      type: "embed",
+      url,
+      title,
+      description,
+      siteName,
+      domain,
+      imageUrl: imageUrl && isSafeExternalHttpUrl(imageUrl) ? imageUrl : "",
+    };
+  }
+  if (type === "drawing") {
+    const imageUrl = String(raw.imageUrl || "").trim().slice(0, 500);
+    if (!imageUrl || !isAllowedChatImageUrl(imageUrl)) return null;
+    return {
+      type: "drawing",
+      imageUrl,
+      title: String(raw.title || "sketch").trim().slice(0, 80),
+    };
+  }
+  return null;
+}
+
 app.post("/api/chat/send", async (req, res) => {
   await ensureChatMetaReadyAsync();
   try {
@@ -8369,6 +8662,14 @@ app.post("/api/chat/send", async (req, res) => {
     const hasValidGif = Boolean(rawGifUrl && isAllowedKlipyMediaUrl(rawGifUrl));
     const rawImageUrl = typeof message?.imageUrl === "string" ? message.imageUrl.trim() : "";
     const hasValidImage = Boolean(rawImageUrl && isAllowedChatImageUrl(rawImageUrl));
+    const parsedPartnerCard = sanitizePartnerCard(message?.partnerCard);
+    if (parsedPartnerCard?._blocked) {
+      return res.status(403).json({
+        success: false,
+        error: "Embed blocked by safety filter (inappropriate or unsafe content)",
+      });
+    }
+    const cleanPartnerCard = parsedPartnerCard || null;
 
     if (rawGifUrl && !hasValidGif) {
       return res.status(400).json({ success: false, error: "Only valid KLIPY HTTPS GIF URLs are allowed" });
@@ -8376,7 +8677,7 @@ app.post("/api/chat/send", async (req, res) => {
     if (rawImageUrl && !hasValidImage) {
       return res.status(400).json({ success: false, error: "Invalid chat image URL" });
     }
-    if (!message || !message.author || !message.channel || (!cleanText && !hasValidGif && !hasValidImage)) {
+    if (!message || !message.author || !message.channel || (!cleanText && !hasValidGif && !hasValidImage && !cleanPartnerCard)) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
@@ -8477,6 +8778,7 @@ app.post("/api/chat/send", async (req, res) => {
             imageName: typeof message?.imageName === "string" ? message.imageName.trim().slice(0, 80) : "image",
           }
         : {}),
+      ...(cleanPartnerCard ? { partnerCard: cleanPartnerCard } : {}),
       ...(cleanReplyTo ? { replyTo: cleanReplyTo } : {}),
       channel: String(message.channel).trim().slice(0, 120),
     };

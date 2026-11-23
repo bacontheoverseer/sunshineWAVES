@@ -57,6 +57,10 @@ import {
   getNameClasses,
 } from "./ProfileVisuals.tsx";
 import ChatCameraModal from "./ChatCameraModal.tsx";
+import ChatPartnersPopover, {
+  ChatPartnerCard,
+  type ChatPartnerCardPayload,
+} from "./ChatPartnersPopover.tsx";
 import {
   type CompressedImageResult,
   compressImageFile,
@@ -89,6 +93,7 @@ interface ChatMessage {
   customization?: ProfileCustomization | null;
   text: string;
   gift?: ChatGiftPayload | null;
+  partnerCard?: ChatPartnerCardPayload | null;
   gifUrl?: string;
   gifTitle?: string;
   imageUrl?: string;
@@ -450,6 +455,7 @@ interface ChatMessageRowProps {
   onToggleBlockUser: (username: string) => void;
   onDeleteMessage: (msg: ChatMessage) => void;
   onOpenImageLightbox: (url: string, name?: string | undefined) => void;
+  onCloseChat: () => void;
 }
 
 function buildChatImageSrc(rawUrl: string | undefined, retryCount: number): string {
@@ -497,6 +503,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onToggleBlockUser,
   onDeleteMessage,
   onOpenImageLightbox,
+  onCloseChat,
 }: ChatMessageRowProps) {
   const replyRef = msg.replyTo || null;
   const [imgBroken, setImgBroken] = useState(false);
@@ -695,6 +702,13 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 )}
               </div>
             </div>
+          )}
+          {msg.partnerCard && (
+            <ChatPartnerCard
+              card={msg.partnerCard}
+              onOpenImageLightbox={onOpenImageLightbox}
+              onCloseChat={onCloseChat}
+            />
           )}
           {isAllowedKlipyUrl(msg.gifUrl) && (
             <div class="chat-entry-gif-wrap">
@@ -1023,6 +1037,8 @@ export default function ChatModal() {
   const [showGifPicker, setShowGifPicker] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGiftPicker, setShowGiftPicker] = useState(false);
+  const [showPartnersPopover, setShowPartnersPopover] = useState(false);
+  const partnersPopoverRef = useRef<HTMLDivElement>(null);
   const [giftTab, setGiftTab] = useState<"coins" | "cookie_master">("coins");
   const [giftRecipient, setGiftRecipient] = useState("");
   const [giftAmount, setGiftAmount] = useState("100");
@@ -2862,6 +2878,7 @@ export default function ChatModal() {
   useEffect(() => {
     if (!isOpen) {
       setShowCameraModal(false);
+      setShowPartnersPopover(false);
       setLightboxImage(null);
       setDragOverChat(false);
     }
@@ -3433,6 +3450,13 @@ export default function ChatModal() {
         setShowGiftPicker(false);
       }
       if (
+        showPartnersPopover &&
+        !partnersPopoverRef.current?.contains(target) &&
+        !target.closest(".chat-partners-toggle-btn")
+      ) {
+        setShowPartnersPopover(false);
+      }
+      if (
         reactingMessageId &&
         !target.closest(".chat-quick-react-bar") &&
         !target.closest(".chat-react-toggle-btn")
@@ -3449,7 +3473,7 @@ export default function ChatModal() {
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [showGifPicker, showEmojiPicker, showGiftPicker, reactingMessageId, reactPickerMessageId]);
+  }, [showGifPicker, showEmojiPicker, showGiftPicker, showPartnersPopover, reactingMessageId, reactPickerMessageId]);
 
   const isOwnerUser = Boolean(
     cloudUser &&
@@ -3738,13 +3762,14 @@ export default function ChatModal() {
   const sendChatMessage = async (
     rawText: string,
     gif?: { url: string; title?: string },
-    imageOverride?: CompressedImageResult | null
+    imageOverride?: CompressedImageResult | null,
+    partnerCard?: ChatPartnerCardPayload | null
   ) => {
     if (!cloudUser || isSending) return;
     const text = rawText.trim();
     const validGif = gif && isAllowedKlipyUrl(gif.url) ? gif : undefined;
     const imageToSend = imageOverride !== undefined ? imageOverride : pendingImage;
-    if (!text && !validGif && !imageToSend) return;
+    if (!text && !validGif && !imageToSend && !partnerCard) return;
 
     // Prevent sending DM to a user you have blocked
     if (activeChannel.startsWith("dm:")) {
@@ -3815,6 +3840,7 @@ export default function ChatModal() {
               imageName: uploadedImageMeta.imageName,
             }
           : {}),
+        ...(partnerCard ? { partnerCard } : {}),
         ...(activeReply
           ? {
               replyTo: {
@@ -6007,6 +6033,7 @@ export default function ChatModal() {
                     onToggleBlockUser={toggleBlockUser}
                     onDeleteMessage={handleDeleteMessage}
                     onOpenImageLightbox={handleOpenImageLightbox}
+                    onCloseChat={() => setIsOpen(false)}
                   />
                 );
               })
@@ -6165,6 +6192,21 @@ export default function ChatModal() {
                   }
                   void handleSendMessage(e);
                 }}>
+                  <button
+                    type="button"
+                    class={`chat-media-toggle-btn chat-partners-toggle-btn${showPartnersPopover ? " active" : ""}`}
+                    title="Partners (Music snippets, Embeds, Draw & Camera)"
+                    aria-label="Open partners"
+                    disabled={isSending}
+                    onClick={() => {
+                      setShowGifPicker(false);
+                      setShowEmojiPicker(false);
+                      setShowGiftPicker(false);
+                      setShowPartnersPopover((v) => !v);
+                    }}
+                  >
+                    <i class="fa-solid fa-link"></i>
+                  </button>
                   <input
                     ref={chatInputRef}
                     type="text"
@@ -6210,27 +6252,13 @@ export default function ChatModal() {
                   </button>
                   <button
                     type="button"
-                    class={`chat-media-toggle-btn${showCameraModal ? " active" : ""}`}
-                    title="Take photo with in-site camera"
-                    aria-label="Open camera"
-                    disabled={isSending}
-                    onClick={() => {
-                      setShowGifPicker(false);
-                      setShowEmojiPicker(false);
-                      setShowGiftPicker(false);
-                      setShowCameraModal(true);
-                    }}
-                  >
-                    <i class="fa-solid fa-camera"></i>
-                  </button>
-                  <button
-                    type="button"
                     class={`chat-emoji-toggle-btn${showEmojiPicker ? " active" : ""}`}
                     title="Pick an emoji"
                     aria-label="Open emoji picker"
                     onClick={() => {
                       setShowGifPicker(false);
                       setShowGiftPicker(false);
+                      setShowPartnersPopover(false);
                       setShowEmojiPicker((v) => !v);
                     }}
                   >
@@ -6244,6 +6272,7 @@ export default function ChatModal() {
                     onClick={() => {
                       setShowGifPicker(false);
                       setShowEmojiPicker(false);
+                      setShowPartnersPopover(false);
                       setShowGiftPicker((prev) => {
                         const next = !prev;
                         if (next && activeChannelDef.isDm && activeChannelDef.name) {
@@ -6262,6 +6291,7 @@ export default function ChatModal() {
                     onClick={() => {
                       setShowEmojiPicker(false);
                       setShowGiftPicker(false);
+                      setShowPartnersPopover(false);
                       setShowGifPicker((v) => !v);
                     }}
                   >
@@ -6297,6 +6327,19 @@ export default function ChatModal() {
                   if (targetId) void handleToggleReaction(targetId, emoji);
                 }}
                 onClose={() => setReactPickerMessageId(null)}
+              />
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showPartnersPopover && (
+              <ChatPartnersPopover
+                popoverRef={partnersPopoverRef}
+                disabled={isSending}
+                onSendPartnerCard={async (card) => {
+                  await sendChatMessage("", undefined, null, card);
+                }}
+                onOpenCamera={() => setShowCameraModal(true)}
+                onClose={() => setShowPartnersPopover(false)}
+                notifyToast={notifyToast}
               />
             )}
 
