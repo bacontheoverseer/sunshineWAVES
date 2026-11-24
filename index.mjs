@@ -1341,6 +1341,7 @@ const chatBackgrounds = new Map(); // channelId -> image/gif URL (/api/chat/medi
 const staffActionLogs = []; // Array<{ id, timestamp, action, actor, actorRole, targetUsername, channel, details }>
 const staffUserNotes = new Map(); // usernameLower -> Array<{ id, targetUsername, author, authorRole, note, category, createdAt }>
 const deletedStaffNoteIds = new Set(); // Set<noteId>
+const deletedChatMessageIds = new Set(); // Set<messageId>
 const bannedDevices = []; // Array<{ id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at }>
 const shadowbannedUsers = new Set(); // Set<usernameLower>
 const userDeviceMap = new Map(); // usernameLower -> { fingerprint_id, storage_token, updatedAt }
@@ -2185,12 +2186,16 @@ function applyChatMetaKvMap(kvMap) {
     }
   }
   const hist = kvMap.chat_history_v1;
-  if (Array.isArray(hist) && typeof chatHistory !== "undefined" && chatHistory.length === 0) {
-    for (const m of hist.slice(-250)) {
-      if (m && typeof m === "object" && m.id && m.author && m.channel) {
-        chatHistory.push(m);
-      }
+  if (Array.isArray(hist) && typeof chatHistory !== "undefined") {
+    const byId = new Map();
+    for (const m of [...hist, ...chatHistory]) {
+      if (!m || typeof m !== "object" || !m.id || !m.author || !m.channel) continue;
+      const idStr = String(m.id);
+      if (deletedChatMessageIds.has(idStr)) continue;
+      byId.set(idStr, m);
     }
+    const merged = trimChatHistoryPerChannel(Array.from(byId.values()));
+    chatHistory.splice(0, chatHistory.length, ...merged);
   }
   if (Array.isArray(hist)) {
     recoverProfilesFromChatHistory(hist);
@@ -2569,6 +2574,35 @@ function matchesSpamFilter(rawText) {
   return null;
 }
 
+function detectTextSpamViolation(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return null;
+  if (/(.)\1{11,}/u.test(text)) {
+    return "AutoMod: Please don't flood chat with repeated characters.";
+  }
+  if (/\b(\S+)(?:\s+\1){5,}/i.test(text)) {
+    return "AutoMod: Please don't spam repeated words.";
+  }
+  const newlineCount = (text.match(/\n/g) || []).length;
+  if (newlineCount >= 8) {
+    return "AutoMod: Too many line breaks in one message.";
+  }
+  const tokens = text.split(/\s+/);
+  for (const tok of tokens) {
+    if (tok.length >= 55 && !/^https?:\/\//i.test(tok)) {
+      return "AutoMod: Please don't send wall-of-text character floods.";
+    }
+  }
+  const letters = text.replace(/[^a-zA-Z]/g, "");
+  if (letters.length >= 26) {
+    const uppers = letters.replace(/[^A-Z]/g, "").length;
+    if (uppers / letters.length >= 0.85) {
+      return "AutoMod: Please turn off CAPS LOCK (excessive all-caps spam).";
+    }
+  }
+  return null;
+}
+
 function recordUserDeviceSignature(username, { fingerprint_id = "", storage_token = "" } = {}) {
   const cleanUser = String(username || "").trim();
   const uk = cleanUser.toLowerCase();
@@ -2769,6 +2803,7 @@ function wipeUserChatAndMentions(targetUsername) {
     const m = chatHistory[i];
     if (!m) continue;
     if (String(m.author || "").trim().toLowerCase() === uk) {
+      if (m.id) deletedChatMessageIds.add(String(m.id));
       chatHistory.splice(i, 1);
       changed++;
       continue;
@@ -2810,6 +2845,7 @@ function wipeUserChatAndMentions(targetUsername) {
         m.image || m.media || m.attachment || m.sticker || m.embed || m.file
       );
       if (!cleanedText && !hasMedia) {
+        if (m.id) deletedChatMessageIds.add(String(m.id));
         chatHistory.splice(i, 1);
         changed++;
         continue;
@@ -3526,9 +3562,59 @@ function getAllStaffNotesList(limit = 100) {
   return combined.slice(0, limit);
 }
 
+function extractChatMessageTs(m) {
+  if (!m || typeof m !== "object") return 0;
+  const direct = Number(m.createdAt) || 0;
+  if (direct > 0) return direct;
+  const idMatch = /^msg_(\d{10,15})_/.exec(String(m.id || ""));
+  if (idMatch) return Number(idMatch[1]) || 0;
+  return 0;
+}
+
+function isPinnedHistoryChannel(channelId) {
+  const ch = String(channelId || "").trim().toLowerCase();
+  if (!ch) return false;
+  if (ch === "announcements" || ch === "updates" || ch === "rules" || ch === "staff-chat") {
+    return true;
+  }
+  const cfg = typeof chatChannels !== "undefined" ? chatChannels.find((c) => c.id === ch) : null;
+  if (cfg && (cfg.writeAccess === "staff" || cfg.categoryId === "info")) {
+    return true;
+  }
+  return false;
+}
+
+function trimChatHistoryPerChannel(list) {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const sorted = [...list].sort((a, b) => extractChatMessageTs(a) - extractChatMessageTs(b));
+  const perChannelCounts = new Map();
+  const keptReversed = [];
+  let normalCount = 0;
+
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const m = sorted[i];
+    if (!m || !m.id || !m.channel) continue;
+    const ch = String(m.channel);
+    const pinned = isPinnedHistoryChannel(ch);
+    const chLimit = pinned ? 150 : 90;
+    const curChCount = perChannelCounts.get(ch) || 0;
+    if (curChCount >= chLimit) continue;
+    if (!pinned && normalCount >= 480) continue;
+    perChannelCounts.set(ch, curChCount + 1);
+    if (!pinned) normalCount++;
+    keptReversed.push(m);
+  }
+
+  return keptReversed.reverse();
+}
+
 function persistChatHistory() {
   if (typeof chatHistory !== "undefined") {
-    kvSetJson("chat_history_v1", chatHistory.slice(-250));
+    const trimmed = trimChatHistoryPerChannel(chatHistory);
+    if (trimmed.length !== chatHistory.length) {
+      chatHistory.splice(0, chatHistory.length, ...trimmed);
+    }
+    kvSetJson("chat_history_v1", trimmed);
   }
 }
 
@@ -6126,7 +6212,6 @@ app.post("/api/chat/gift", async (req, res) => {
           isGoat: goatUsers.has(senderKey),
         };
         chatHistory.push(giftMsg);
-        if (chatHistory.length > 500) chatHistory.shift();
         persistChatHistory();
         broadcastChatPayload(channel, { type: "chat-event", event: "NEW_MESSAGE", message: giftMsg });
       }
@@ -6180,7 +6265,6 @@ app.post("/api/chat/gift", async (req, res) => {
         isGoat: goatUsers.has(senderKey),
       };
       chatHistory.push(giftMsg);
-      if (chatHistory.length > 500) chatHistory.shift();
       persistChatHistory();
       broadcastChatPayload(channel, { type: "chat-event", event: "NEW_MESSAGE", message: giftMsg });
     }
@@ -7891,6 +7975,7 @@ app.get("/api/chat/state", async (req, res) => {
   const visibleMessages = chatHistory.filter((m) =>
     canAccessChatChannel(m.channel, verifiedUserKey)
   );
+  const stateMessages = trimChatHistoryPerChannel(visibleMessages);
 
   const userGroups = [];
   if (verifiedUserKey) {
@@ -7921,8 +8006,8 @@ app.get("/api/chat/state", async (req, res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
   res.json({
     success: true,
-    messages: visibleMessages.slice(-200),
-    hasMoreMessages: visibleMessages.length > 200,
+    messages: stateMessages,
+    hasMoreMessages: visibleMessages.length > stateMessages.length,
     presenceAt: presence.snapshotAt,
     usersLoaded: presence.usersLoaded,
     totalUsersCount: presence.totalUsersCount,
@@ -8762,9 +8847,17 @@ app.post("/api/chat/send", async (req, res) => {
 
     let track = userLastMessageTrack.get(authorKey);
     if (!track) {
-      track = { lastSentAt: 0, recentTexts: [], recentDmTargets: new Map() };
+      track = {
+        lastSentAt: 0,
+        recentTexts: [],
+        recentTimestamps: [],
+        spamStrikes: [],
+        recentDmTargets: new Map(),
+      };
       userLastMessageTrack.set(authorKey, track);
     }
+    if (!Array.isArray(track.recentTimestamps)) track.recentTimestamps = [];
+    if (!Array.isArray(track.spamStrikes)) track.spamStrikes = [];
     if (!isStaffSender && track.lastSentAt > 0 && nowMs - track.lastSentAt < CHAT_SLOWMODE_MS) {
       const waitMs = CHAT_SLOWMODE_MS - (nowMs - track.lastSentAt);
       return res.status(429).json({
@@ -8819,6 +8912,7 @@ app.post("/api/chat/send", async (req, res) => {
       ...(cleanPartnerCard ? { partnerCard: cleanPartnerCard } : {}),
       ...(cleanReplyTo ? { replyTo: cleanReplyTo } : {}),
       channel: String(message.channel).trim().slice(0, 120),
+      createdAt: Number(message?.createdAt) > 0 ? Number(message.createdAt) : nowMs,
     };
     if (!cleanReplyTo) delete sanitizedMsg.replyTo;
 
@@ -8901,30 +8995,104 @@ app.post("/api/chat/send", async (req, res) => {
     }
 
     touchKnownUser(sanitizedMsg.author);
+
+    // ── SPAM AUTOMOD EVERYWHERE (Public Channels, Private DMs, and Group Chats) ──
+    track.recentTimestamps = track.recentTimestamps.filter((t) => nowMs - t < 8000);
+    const isBurstFlood = !isStaffSender && track.recentTimestamps.length >= 4;
+    track.recentTimestamps.push(nowMs);
     track.lastSentAt = nowMs;
 
-    // Duplicate / near-identical message check within 30s window
+    // Duplicate / near-identical message or media check within 45s window (applies in DMs & all channels)
+    const mediaSig = hasValidGif
+      ? `gif:${rawGifUrl}`
+      : hasValidImage
+      ? `img:${rawImageUrl.slice(0, 120)}`
+      : cleanPartnerCard
+      ? `card:${cleanPartnerCard.type}:${cleanPartnerCard.title || cleanPartnerCard.url || ""}`
+      : "";
     const normDup = cleanText
       ? normalizeSpamText(cleanText).compact || cleanText.toLowerCase().trim()
-      : "";
-    track.recentTexts = track.recentTexts.filter((item) => nowMs - item.at < CHAT_DUPLICATE_WINDOW_MS);
+      : mediaSig;
+    track.recentTexts = track.recentTexts.filter((item) => nowMs - item.at < 45000);
+    const duplicateHits = normDup
+      ? track.recentTexts.filter(
+          (item) =>
+            item.norm === normDup ||
+            (!mediaSig &&
+              normDup.length >= 5 &&
+              item.norm.length >= 5 &&
+              (item.norm.includes(normDup) || normDup.includes(item.norm)) &&
+              Math.abs(item.norm.length - normDup.length) <= 3)
+        ).length
+      : 0;
     const isDuplicateMsg =
       !isStaffSender &&
       Boolean(normDup) &&
-      track.recentTexts.some(
-        (item) =>
-          item.norm === normDup ||
-          (normDup.length >= 6 &&
-            item.norm.length >= 6 &&
-            (item.norm.includes(normDup) || normDup.includes(item.norm)) &&
-            Math.abs(item.norm.length - normDup.length) <= 3)
-      );
+      (mediaSig ? duplicateHits >= 2 : duplicateHits >= 1);
     if (normDup) {
       track.recentTexts.push({ norm: normDup, at: nowMs });
     }
 
-    // Regex keyword spam filter, device-ban check & silent shadowban check
+    const textFloodReason = !isStaffSender && sanitizedMsg.text ? detectTextSpamViolation(sanitizedMsg.text) : null;
     const spamPatternMatched = !isStaffSender && sanitizedMsg.text ? matchesSpamFilter(sanitizedMsg.text) : null;
+
+    if (isBurstFlood || isDuplicateMsg || textFloodReason || spamPatternMatched) {
+      track.spamStrikes = track.spamStrikes.filter((t) => nowMs - t < 120000);
+      track.spamStrikes.push(nowMs);
+
+      const isHighConfidenceRaid =
+        Boolean(spamPatternMatched) &&
+        /cookie|gamma/i.test(String(spamPatternMatched));
+      if (isHighConfidenceRaid && !isAccountShadowbanned(authorKey)) {
+        setAccountShadowbanned(authorName, true, {
+          reason: `auto-shadowban triggered by raid spam filter (${spamPatternMatched})`,
+          recordDevice: true,
+          highConfidenceSpam: true,
+        });
+      }
+
+      if (track.spamStrikes.length >= 3) {
+        const until = nowMs + 2 * 60 * 1000;
+        const timeoutObj = {
+          username: authorName,
+          until,
+          reason: "AutoMod: repeated spam in chat or DMs",
+          by: "AutoMod",
+        };
+        chatTimeouts.set(authorKey, timeoutObj);
+        persistChatTimeouts();
+        broadcastToClients(
+          {
+            type: "chat-event",
+            event: "MOD_UPDATE",
+            targetUsername: authorName,
+            timeout: timeoutObj,
+          },
+          "all"
+        );
+        return res.status(403).json({
+          success: false,
+          timedOut: true,
+          until,
+          error: "AutoMod: You have been timed out for 2 minutes due to repeated spam.",
+        });
+      }
+
+      const automodReason =
+        textFloodReason ||
+        (isBurstFlood
+          ? "AutoMod: Slow down! You are sending messages too quickly."
+          : isDuplicateMsg
+          ? "AutoMod: Please don't spam duplicate messages."
+          : "AutoMod: External links, invites, or promotional spam are not allowed.");
+      return res.status(429).json({
+        success: false,
+        automod: true,
+        error: automodReason,
+      });
+    }
+
+    // Device-ban & silent shadowban check
     const sendDeviceBan = !isStaffSender
       ? checkDeviceBanForSignup({
           fingerprint_id: fingerprintId || userDeviceMap.get(authorKey)?.fingerprint_id || "",
@@ -8933,17 +9101,14 @@ app.post("/api/chat/send", async (req, res) => {
       : { hardBlocked: false, shadowban: false };
     const isDeviceBannedSender = Boolean(sendDeviceBan.hardBlocked || sendDeviceBan.shadowban);
     const isShadowbanned = !isStaffSender && (isAccountShadowbanned(authorKey) || isDeviceBannedSender);
-    if (isShadowbanned || spamPatternMatched || isDuplicateMsg) {
-      if ((spamPatternMatched || isDeviceBannedSender) && !isAccountShadowbanned(authorKey)) {
+    if (isShadowbanned) {
+      if (isDeviceBannedSender && !isAccountShadowbanned(authorKey)) {
         setAccountShadowbanned(authorName, true, {
-          reason: spamPatternMatched
-            ? `auto-shadowban triggered by spam filter (${spamPatternMatched})`
-            : "auto-shadowban triggered by banned device signature on chat send",
-          recordDevice: Boolean(spamPatternMatched),
-          highConfidenceSpam: Boolean(spamPatternMatched),
+          reason: "auto-shadowban triggered by banned device signature on chat send",
+          recordDevice: false,
+          highConfidenceSpam: false,
         });
       }
-      // Return 200 OK ONLY to sender's client; do NOT save to public DB or broadcast via SSE
       return res.status(200).json({ success: true, message: sanitizedMsg });
     }
 
@@ -8960,7 +9125,6 @@ app.post("/api/chat/send", async (req, res) => {
     }
 
     chatHistory.push(sanitizedMsg);
-    if (chatHistory.length > 500) chatHistory.shift();
     persistChatHistory();
 
     // Broadcast via SSE to connected clients
@@ -9101,6 +9265,7 @@ app.post("/api/chat/delete-chat", async (req, res) => {
     let removed = 0;
     for (let i = chatHistory.length - 1; i >= 0; i--) {
       if (chatHistory[i]?.channel === channel) {
+        if (chatHistory[i]?.id) deletedChatMessageIds.add(String(chatHistory[i].id));
         chatHistory.splice(i, 1);
         removed++;
       }
@@ -9830,6 +9995,7 @@ app.post("/api/chat/mod/delete-message", async (req, res) => {
     }
 
     if (idx >= 0) {
+      if (chatHistory[idx]?.id) deletedChatMessageIds.add(String(chatHistory[idx].id));
       chatHistory.splice(idx, 1);
       persistChatHistory();
     }

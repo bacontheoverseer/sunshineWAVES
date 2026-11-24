@@ -197,8 +197,112 @@ export function checkContent(input: string): FilterResult {
  * Explicitly allows casual swear words (fuck, shit, bitch, ass, damn, hell, etc.) while
  * blocking hate speech, self-harm, violent threats, sexual content, gambling, and malware.
  */
+const clientRecentMessages: Array<{ norm: string; at: number }> = [];
+const clientRecentSendTimes: number[] = [];
+
+export function checkSpamAutomod(rawText: string): FilterResult {
+  const text = (rawText || "").trim();
+  if (!text) return { blocked: false };
+
+  const now = Date.now();
+  while (clientRecentSendTimes.length > 0 && now - clientRecentSendTimes[0] >= 7500) {
+    clientRecentSendTimes.shift();
+  }
+  if (clientRecentSendTimes.length >= 4) {
+    return {
+      blocked: true,
+      category: "spam-flood",
+      reason: "AutoMod: Slow down! You are sending messages too quickly.",
+    };
+  }
+
+  if (/(.)\1{11,}/u.test(text)) {
+    return {
+      blocked: true,
+      category: "spam-chars",
+      reason: "AutoMod: Please don't flood chat with repeated characters.",
+    };
+  }
+  if (/\b(\S+)(?:\s+\1){5,}/i.test(text)) {
+    return {
+      blocked: true,
+      category: "spam-words",
+      reason: "AutoMod: Please don't spam repeated words.",
+    };
+  }
+  if ((text.match(/\n/g) || []).length >= 8) {
+    return {
+      blocked: true,
+      category: "spam-newlines",
+      reason: "AutoMod: Too many line breaks in one message.",
+    };
+  }
+  for (const tok of text.split(/\s+/)) {
+    if (tok.length >= 55 && !/^https?:\/\//i.test(tok)) {
+      return {
+        blocked: true,
+        category: "spam-wall",
+        reason: "AutoMod: Please don't send wall-of-text character floods.",
+      };
+    }
+  }
+  const letters = text.replace(/[^a-zA-Z]/g, "");
+  if (letters.length >= 26) {
+    const uppers = letters.replace(/[^A-Z]/g, "").length;
+    if (uppers / letters.length >= 0.85) {
+      return {
+        blocked: true,
+        category: "spam-caps",
+        reason: "AutoMod: Please turn off CAPS LOCK (excessive all-caps spam).",
+      };
+    }
+  }
+  if (
+    /\bdiscord(?:\.gg|app\.com\/invite)\/[a-z0-9-]+/i.test(text) ||
+    /\b[a-z0-9-]{2,}\.(?:xyz|gg|site|online|click|top|buzz|club|fun|icu|tk|ml|ga|cf)(?:\/[^\s]*)?\b/i.test(text)
+  ) {
+    return {
+      blocked: true,
+      category: "spam-link",
+      reason: "AutoMod: External invite or promotional spam links are not allowed.",
+    };
+  }
+
+  const norm = text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  while (clientRecentMessages.length > 0 && now - clientRecentMessages[0].at >= 40000) {
+    clientRecentMessages.shift();
+  }
+  if (
+    norm.length >= 2 &&
+    clientRecentMessages.some(
+      (m) =>
+        m.norm === norm ||
+        (norm.length >= 6 &&
+          m.norm.length >= 6 &&
+          (m.norm.includes(norm) || norm.includes(m.norm)) &&
+          Math.abs(m.norm.length - norm.length) <= 3)
+    )
+  ) {
+    return {
+      blocked: true,
+      category: "spam-duplicate",
+      reason: "AutoMod: Please don't spam duplicate messages.",
+    };
+  }
+
+  clientRecentSendTimes.push(now);
+  if (norm) clientRecentMessages.push({ norm, at: now });
+  return { blocked: false };
+}
+
 export async function moderateChatMessage(text: string): Promise<FilterResult> {
   if (!text || !text.trim()) return { blocked: false };
+
+  // 0. Fast local Spam AutoMod check (applies in public channels, private DMs, group chats, & Game Space)
+  const spamCheck = checkSpamAutomod(text);
+  if (spamCheck.blocked) {
+    return { ...spamCheck, provider: "automod-spam" };
+  }
 
   // 1. Fast local check for Adult / Gambling / Malware links
   const baseCheck = checkContent(text);

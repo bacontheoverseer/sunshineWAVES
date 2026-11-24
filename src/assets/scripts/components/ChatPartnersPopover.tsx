@@ -90,6 +90,20 @@ function toggleGlobalSnippetAudio(key: string, previewUrl: string) {
   notifyPartnerAudioListeners();
 }
 
+export function stopPickerSnippetAudio(stopAll = false) {
+  if (!activePartnerAudio) return;
+  if (stopAll || !activePartnerAudioKey || activePartnerAudioKey.startsWith("picker:")) {
+    try {
+      activePartnerAudio.pause();
+      activePartnerAudio.currentTime = 0;
+      activePartnerAudio.src = "";
+    } catch {}
+    activePartnerAudio = null;
+    activePartnerAudioKey = null;
+    notifyPartnerAudioListeners();
+  }
+}
+
 const DRAW_COLORS = [
   "#ffffff",
   "#f43f5e",
@@ -320,8 +334,15 @@ export default function ChatPartnersPopover({
     partnerAudioListeners.add(listener);
     return () => {
       partnerAudioListeners.delete(listener);
+      stopPickerSnippetAudio(false);
     };
   }, []);
+
+  useEffect(() => {
+    if (tab !== "music") {
+      stopPickerSnippetAudio(false);
+    }
+  }, [tab]);
 
   // Initialize drawing canvas dark background when switching to Draw tab
   useEffect(() => {
@@ -579,7 +600,7 @@ export default function ChatPartnersPopover({
       <div class="chat-partners-header">
         <div class="chat-partners-title">
           <i class="fa-solid fa-link"></i>
-          <span>partners</span>
+          <span>add-ons</span>
         </div>
         <div class="chat-partners-tabs">
           <button

@@ -60,6 +60,7 @@ import {
 import ChatCameraModal from "./ChatCameraModal.tsx";
 import ChatPartnersPopover, {
   ChatPartnerCard,
+  stopPickerSnippetAudio,
   type ChatPartnerCardPayload,
 } from "./ChatPartnersPopover.tsx";
 import {
@@ -2599,7 +2600,7 @@ export default function ChatModal() {
             const myLower = (cloudUser || "guest").toLowerCase();
             const serverIds = new Set<string>();
             const newlyArrived: ChatMessage[] = [];
-            let minServerTs = Infinity;
+            const minServerTsByChannel = new Map<string, number>();
             const nowTs = Date.now();
 
             for (const m of serverMsgs) {
@@ -2621,7 +2622,10 @@ export default function ChatModal() {
               }
               serverIds.add(m.id);
               const ts = getMsgTimestampMs(m);
-              if (ts > 0 && ts < minServerTs) minServerTs = ts;
+              if (ts > 0 && m.channel) {
+                const prevMin = minServerTsByChannel.get(m.channel) ?? Infinity;
+                if (ts < prevMin) minServerTsByChannel.set(m.channel, ts);
+              }
               if (!seenMessageIdsRef.current.has(m.id)) {
                 seenMessageIdsRef.current.add(m.id);
                 newlyArrived.push(m);
@@ -2673,9 +2677,10 @@ export default function ChatModal() {
                   const isPending =
                     pendingMessageIdsRef.current.has(existing.id) ||
                     (exTs > 0 && nowTs - exTs < 30000);
-                  const withinServerWindow =
-                    !hasMore || (minServerTs < Infinity && exTs > 0 && exTs >= minServerTs);
-                  if (!isPending && withinServerWindow) {
+                  const chMinTs = minServerTsByChannel.get(existing.channel) ?? Infinity;
+                  const withinChannelServerWindow =
+                    !hasMore || (chMinTs < Infinity && exTs > 0 && exTs >= chMinTs);
+                  if (!isPending && withinChannelServerWindow) {
                     changed = true;
                   } else {
                     kept.push(existing);
@@ -2691,9 +2696,21 @@ export default function ChatModal() {
               }
 
               if (!changed) return prev;
-              const sorted = kept
-                .sort((a, b) => getMsgTimestampMs(a) - getMsgTimestampMs(b))
-                .slice(-250);
+              const sortedAll = kept.sort((a, b) => getMsgTimestampMs(a) - getMsgTimestampMs(b));
+              const perChCounts = new Map<string, number>();
+              const trimmedRev: ChatMessage[] = [];
+              for (let i = sortedAll.length - 1; i >= 0; i--) {
+                const item = sortedAll[i];
+                const ch = item.channel || "general";
+                const isPinnedCh =
+                  ch === "announcements" || ch === "updates" || ch === "rules" || ch === "staff-chat";
+                const limit = isPinnedCh ? 150 : 90;
+                const c = perChCounts.get(ch) || 0;
+                if (c >= limit) continue;
+                perChCounts.set(ch, c + 1);
+                trimmedRev.push(item);
+              }
+              const sorted = trimmedRev.reverse();
               try {
                 batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(sorted));
               } catch {}
@@ -6322,14 +6339,17 @@ export default function ChatModal() {
                   <button
                     type="button"
                     class={`chat-media-toggle-btn chat-partners-toggle-btn${showPartnersPopover ? " active" : ""}`}
-                    title="Partners (Music snippets, Embeds, Draw & Camera)"
-                    aria-label="Open partners"
+                    title="Add-ons (Music snippets, Embeds, Draw & Camera)"
+                    aria-label="Open add-ons"
                     disabled={isSending}
                     onClick={() => {
                       setShowGifPicker(false);
                       setShowEmojiPicker(false);
                       setShowGiftPicker(false);
-                      setShowPartnersPopover((v) => !v);
+                      setShowPartnersPopover((v) => {
+                        if (v) stopPickerSnippetAudio(false);
+                        return !v;
+                      });
                     }}
                   >
                     <i class="fa-solid fa-link"></i>
