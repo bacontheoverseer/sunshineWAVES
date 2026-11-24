@@ -651,10 +651,10 @@ export default function GameSpaceModal() {
         const mult = getCoinMultiplier();
         if (playSeconds % 300 === 0) {
           addCookieCoins(25 * mult, `5-min streak playing ${gName}`);
-          awardGamePassXp(75, "game", { silent: true });
+          awardGamePassXp(20, "game", { silent: true });
         } else {
           addCookieCoins(10 * mult, `playing ${gName}`);
-          awardGamePassXp(35, "game", { silent: true });
+          awardGamePassXp(10, "game", { silent: true });
         }
       }
     }, 1000);

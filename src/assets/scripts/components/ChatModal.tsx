@@ -4496,7 +4496,7 @@ export default function ChatModal() {
     }
     await sendChatMessage(inputText);
     awardChatMessageCoins();
-    awardGamePassXp(15, "chat", { silent: true });
+    awardGamePassXp(4, "chat", { silent: true });
   };
 
   const handleSendGif = async (gif: KlipyGifItem) => {

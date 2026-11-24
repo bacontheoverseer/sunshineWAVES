@@ -81,39 +81,39 @@ export const GAME_PASS_SEASON = 1;
 export const GAME_PASS_STORAGE_KEY = "cookie_gamepass_v1";
 export const GAME_PASS_PRO_XP_MULTIPLIER = 1.5;
 const DAILY_XP_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-const SITE_USAGE_TICK_MS = 2 * 60 * 1000; // +15 XP every 2 min active on site
+const SITE_USAGE_TICK_MS = 5 * 60 * 1000; // +5 XP every 5 min active on site
 const SITE_IDLE_THRESHOLD_MS = 3 * 60 * 1000;
 
 export const GAME_PASS_LEVELS: PassLevelDef[] = [
   {
     level: 1,
-    xpRequired: 0,
+    xpRequired: 150,
     free: {
       id: "s1_l1_free",
-      title: "+50 coins",
+      title: "+25 coins",
       subtitle: "starter coin pouch",
       icon: "fa-coins",
       accent: "#94a3b8",
       rarity: "common",
-      coins: 50,
+      coins: 25,
     },
     pro: {
       id: "s1_l1_pro",
-      title: "+250 coins",
+      title: "+100 coins",
       subtitle: "pro welcome drop",
       icon: "fa-coins",
       accent: "#fbbf24",
       rarity: "rare",
-      coins: 250,
+      coins: 100,
     },
   },
   {
     level: 2,
-    xpRequired: 100,
+    xpRequired: 400,
     free: {
       id: "s1_l2_free",
       title: "15m 2x xp",
-      subtitle: "level up 2x faster",
+      subtitle: "short xp boost",
       icon: "fa-angles-up",
       accent: "#60a5fa",
       rarity: "common",
@@ -121,303 +121,303 @@ export const GAME_PASS_LEVELS: PassLevelDef[] = [
     },
     pro: {
       id: "s1_l2_pro",
-      title: "2x prank tokens",
-      subtitle: "2 free shop pranks",
+      title: "1x prank token",
+      subtitle: "1 free shop prank",
       icon: "fa-ticket",
       accent: "#22d3ee",
-      rarity: "epic",
-      prankTokens: 2,
+      rarity: "rare",
+      prankTokens: 1,
     },
   },
   {
     level: 3,
-    xpRequired: 225,
+    xpRequired: 750,
     free: {
       id: "s1_l3_free",
-      title: "+75 coins",
+      title: "+35 coins",
       subtitle: "cookie stash",
       icon: "fa-coins",
       accent: "#94a3b8",
       rarity: "common",
-      coins: 75,
+      coins: 35,
     },
     pro: {
       id: "s1_l3_pro",
-      title: "1h 2x coins",
+      title: "30m 2x coins",
       subtitle: "2x game & chat coins",
       icon: "fa-bolt",
       accent: "#f59e0b",
       rarity: "epic",
-      coinBoostMins: 60,
+      coinBoostMins: 30,
     },
   },
   {
     level: 4,
-    xpRequired: 375,
+    xpRequired: 1200,
     free: {
       id: "s1_l4_free",
-      title: "1h ad-free",
+      title: "30m ad-free",
       subtitle: "temporary ad shield",
+      icon: "fa-shield-halved",
+      accent: "#60a5fa",
+      rarity: "common",
+      adFreeHours: 0.5,
+    },
+    pro: {
+      id: "s1_l4_pro",
+      title: "+175 coins",
+      subtitle: "pro coin crate",
+      icon: "fa-coins",
+      accent: "#fbbf24",
+      rarity: "rare",
+      coins: 175,
+    },
+  },
+  {
+    level: 5,
+    xpRequired: 1800,
+    free: {
+      id: "s1_l5_free",
+      title: "+50 coins",
+      subtitle: "cookie pouch",
+      icon: "fa-coins",
+      accent: "#94a3b8",
+      rarity: "common",
+      coins: 50,
+    },
+    pro: {
+      id: "s1_l5_pro",
+      title: "golden vault",
+      subtitle: "rolls 175–400 coins",
+      icon: "fa-box-open",
+      accent: "#fb923c",
+      rarity: "epic",
+      crateRange: [175, 400],
+    },
+  },
+  {
+    level: 6,
+    xpRequired: 2550,
+    free: {
+      id: "s1_l6_free",
+      title: "15m 2x coins",
+      subtitle: "2x game & chat coins",
+      icon: "fa-bolt",
+      accent: "#fb923c",
+      rarity: "rare",
+      coinBoostMins: 15,
+    },
+    pro: {
+      id: "s1_l6_pro",
+      title: "30m 2x xp boost",
+      subtitle: "stacks to 3x pro xp",
+      icon: "fa-rocket",
+      accent: "#a855f7",
+      rarity: "epic",
+      xpBoostMins: 30,
+    },
+  },
+  {
+    level: 7,
+    xpRequired: 3450,
+    free: {
+      id: "s1_l7_free",
+      title: "+65 coins",
+      subtitle: "cookie stash",
+      icon: "fa-coins",
+      accent: "#94a3b8",
+      rarity: "common",
+      coins: 65,
+    },
+    pro: {
+      id: "s1_l7_pro",
+      title: "1x prank token",
+      subtitle: "1 free shop prank",
+      icon: "fa-ticket",
+      accent: "#22d3ee",
+      rarity: "epic",
+      prankTokens: 1,
+    },
+  },
+  {
+    level: 8,
+    xpRequired: 4500,
+    free: {
+      id: "s1_l8_free",
+      title: "mystery box",
+      subtitle: "rolls 40–110 coins",
+      icon: "fa-cube",
+      accent: "#60a5fa",
+      rarity: "rare",
+      crateRange: [40, 110],
+    },
+    pro: {
+      id: "s1_l8_pro",
+      title: "+250 coins",
+      subtitle: "pro treasury drop",
+      icon: "fa-coins",
+      accent: "#fbbf24",
+      rarity: "epic",
+      coins: 250,
+    },
+  },
+  {
+    level: 9,
+    xpRequired: 5750,
+    free: {
+      id: "s1_l9_free",
+      title: "1h ad-free",
+      subtitle: "clean browse pass",
       icon: "fa-shield-halved",
       accent: "#60a5fa",
       rarity: "rare",
       adFreeHours: 1,
     },
     pro: {
-      id: "s1_l4_pro",
-      title: "+450 coins",
-      subtitle: "pro coin crate",
-      icon: "fa-coins",
-      accent: "#fbbf24",
-      rarity: "rare",
-      coins: 450,
-    },
-  },
-  {
-    level: 5,
-    xpRequired: 550,
-    free: {
-      id: "s1_l5_free",
-      title: "1x prank token",
-      subtitle: "1 free shop prank",
-      icon: "fa-ticket",
-      accent: "#38bdf8",
-      rarity: "rare",
-      prankTokens: 1,
-    },
-    pro: {
-      id: "s1_l5_pro",
-      title: "golden vault",
-      subtitle: "rolls 450–1,200 coins",
-      icon: "fa-box-open",
-      accent: "#fb923c",
-      rarity: "epic",
-      crateRange: [450, 1200],
-    },
-  },
-  {
-    level: 6,
-    xpRequired: 750,
-    free: {
-      id: "s1_l6_free",
-      title: "+100 coins",
-      subtitle: "cookie pouch",
-      icon: "fa-coins",
-      accent: "#94a3b8",
-      rarity: "common",
-      coins: 100,
-    },
-    pro: {
-      id: "s1_l6_pro",
-      title: "1h 2x xp boost",
-      subtitle: "stacks to 3x pro xp",
-      icon: "fa-rocket",
-      accent: "#a855f7",
-      rarity: "epic",
-      xpBoostMins: 60,
-    },
-  },
-  {
-    level: 7,
-    xpRequired: 975,
-    free: {
-      id: "s1_l7_free",
-      title: "20m 2x coins",
-      subtitle: "2x game & chat coins",
-      icon: "fa-bolt",
-      accent: "#fb923c",
-      rarity: "rare",
-      coinBoostMins: 20,
-    },
-    pro: {
-      id: "s1_l7_pro",
-      title: "3x prank tokens",
-      subtitle: "3 free shop pranks",
-      icon: "fa-ticket",
-      accent: "#22d3ee",
-      rarity: "epic",
-      prankTokens: 3,
-    },
-  },
-  {
-    level: 8,
-    xpRequired: 1225,
-    free: {
-      id: "s1_l8_free",
-      title: "mystery box",
-      subtitle: "rolls 75–225 coins",
-      icon: "fa-cube",
-      accent: "#60a5fa",
-      rarity: "rare",
-      crateRange: [75, 225],
-    },
-    pro: {
-      id: "s1_l8_pro",
-      title: "+750 coins",
-      subtitle: "pro treasury drop",
-      icon: "fa-coins",
-      accent: "#fbbf24",
-      rarity: "epic",
-      coins: 750,
-    },
-  },
-  {
-    level: 9,
-    xpRequired: 1500,
-    free: {
-      id: "s1_l9_free",
-      title: "2h ad-free",
-      subtitle: "clean browse pass",
-      icon: "fa-shield-halved",
-      accent: "#60a5fa",
-      rarity: "rare",
-      adFreeHours: 2,
-    },
-    pro: {
       id: "s1_l9_pro",
-      title: "2h 2x coins",
+      title: "45m 2x coins",
       subtitle: "2x game & chat coins",
       icon: "fa-fire-flame-curved",
       accent: "#facc15",
       rarity: "epic",
-      coinBoostMins: 120,
+      coinBoostMins: 45,
     },
   },
   {
     level: 10,
-    xpRequired: 1800,
+    xpRequired: 7200,
     free: {
       id: "s1_l10_free",
-      title: "+150 coins",
-      subtitle: "milestone stash",
-      icon: "fa-coins",
-      accent: "#818cf8",
-      rarity: "rare",
-      coins: 150,
-    },
-    pro: {
-      id: "s1_l10_pro",
-      title: "+1,000c & +3d pro",
-      subtitle: "+1,000 coins + 3d master",
-      icon: "fa-crown",
-      accent: "#fbbf24",
-      rarity: "legendary",
-      coins: 1000,
-      masterDays: 3,
-    },
-  },
-  {
-    level: 11,
-    xpRequired: 2125,
-    free: {
-      id: "s1_l11_free",
-      title: "30m 2x xp",
-      subtitle: "double pass xp",
-      icon: "fa-angles-up",
-      accent: "#60a5fa",
-      rarity: "rare",
-      xpBoostMins: 30,
-    },
-    pro: {
-      id: "s1_l11_pro",
-      title: "diamond vault",
-      subtitle: "rolls 900–2,200 coins",
-      icon: "fa-gem",
-      accent: "#22d3ee",
-      rarity: "legendary",
-      crateRange: [900, 2200],
-    },
-  },
-  {
-    level: 12,
-    xpRequired: 2475,
-    free: {
-      id: "s1_l12_free",
       title: "1x prank token",
       subtitle: "1 free shop prank",
       icon: "fa-ticket",
-      accent: "#7dd3fc",
+      accent: "#818cf8",
       rarity: "rare",
       prankTokens: 1,
     },
     pro: {
+      id: "s1_l10_pro",
+      title: "+400c & +1d pro",
+      subtitle: "+400 coins + 1d master",
+      icon: "fa-crown",
+      accent: "#fbbf24",
+      rarity: "legendary",
+      coins: 400,
+      masterDays: 1,
+    },
+  },
+  {
+    level: 11,
+    xpRequired: 8900,
+    free: {
+      id: "s1_l11_free",
+      title: "+85 coins",
+      subtitle: "cookie pouch",
+      icon: "fa-coins",
+      accent: "#94a3b8",
+      rarity: "common",
+      coins: 85,
+    },
+    pro: {
+      id: "s1_l11_pro",
+      title: "diamond vault",
+      subtitle: "rolls 300–700 coins",
+      icon: "fa-gem",
+      accent: "#22d3ee",
+      rarity: "legendary",
+      crateRange: [300, 700],
+    },
+  },
+  {
+    level: 12,
+    xpRequired: 10850,
+    free: {
+      id: "s1_l12_free",
+      title: "20m 2x xp",
+      subtitle: "double pass xp",
+      icon: "fa-angles-up",
+      accent: "#7dd3fc",
+      rarity: "rare",
+      xpBoostMins: 20,
+    },
+    pro: {
       id: "s1_l12_pro",
-      title: "4x prank tokens",
-      subtitle: "4 free shop pranks",
+      title: "2x prank tokens",
+      subtitle: "2 free shop pranks",
       icon: "fa-ticket",
       accent: "#f43f5e",
       rarity: "legendary",
-      prankTokens: 4,
+      prankTokens: 2,
     },
   },
   {
     level: 13,
-    xpRequired: 2850,
+    xpRequired: 13100,
     free: {
       id: "s1_l13_free",
-      title: "+200 coins",
+      title: "+110 coins",
       subtitle: "cookie pouch",
       icon: "fa-coins",
       accent: "#94a3b8",
       rarity: "rare",
-      coins: 200,
+      coins: 110,
     },
     pro: {
       id: "s1_l13_pro",
-      title: "3h 2x surge",
-      subtitle: "3h 2x coins & 2x xp",
+      title: "1h 2x surge",
+      subtitle: "1h 2x coins & 2x xp",
       icon: "fa-bolt",
       accent: "#38bdf8",
       rarity: "legendary",
-      coinBoostMins: 180,
-      xpBoostMins: 180,
+      coinBoostMins: 60,
+      xpBoostMins: 60,
     },
   },
   {
     level: 14,
-    xpRequired: 3250,
+    xpRequired: 15700,
     free: {
       id: "s1_l14_free",
-      title: "30m 2x coins",
+      title: "20m 2x coins",
       subtitle: "2x game & chat coins",
       icon: "fa-bolt",
       accent: "#60a5fa",
       rarity: "rare",
-      coinBoostMins: 30,
+      coinBoostMins: 20,
     },
     pro: {
       id: "s1_l14_pro",
-      title: "+1,500 coins",
+      title: "+600 coins",
       subtitle: "royal bank drop",
       icon: "fa-sack-dollar",
       accent: "#facc15",
       rarity: "legendary",
-      coins: 1500,
+      coins: 600,
     },
   },
   {
     level: 15,
-    xpRequired: 3700,
+    xpRequired: 18800,
     free: {
       id: "s1_l15_free",
-      title: "+350c & 6h ad-free",
+      title: "+200c & 2h ad-free",
       subtitle: "season 1 free finale",
       icon: "fa-trophy",
       accent: "#60a5fa",
       rarity: "epic",
-      coins: 350,
-      adFreeHours: 6,
+      coins: 200,
+      adFreeHours: 2,
     },
     pro: {
       id: "s1_l15_pro",
       title: "pro jackpot pack",
-      subtitle: "+3,000c, +7d pro & 5x tokens",
+      subtitle: "+1,200c, +3d pro & 2x tokens",
       icon: "fa-crown",
       accent: "#fbbf24",
       rarity: "legendary",
-      coins: 3000,
-      masterDays: 7,
-      prankTokens: 5,
+      coins: 1200,
+      masterDays: 3,
+      prankTokens: 2,
     },
   },
 ];
@@ -503,7 +503,7 @@ export function consumeShopPrankToken(): boolean {
 
 export function computeLevelFromXp(xp: number): number {
   const safeXp = Math.max(0, Math.floor(xp));
-  let level = 1;
+  let level = 0;
   for (const def of GAME_PASS_LEVELS) {
     if (safeXp >= def.xpRequired) {
       level = def.level;
@@ -525,11 +525,11 @@ export function getGamePassProgress(): GamePassProgress {
   const st = getGamePassState();
   const maxLevel = GAME_PASS_LEVELS[GAME_PASS_LEVELS.length - 1].level;
   const level = computeLevelFromXp(st.xp);
-  const currentDef = GAME_PASS_LEVELS[level - 1] || GAME_PASS_LEVELS[0];
+  const currentDef = level > 0 ? GAME_PASS_LEVELS[level - 1] : null;
   const nextDef = GAME_PASS_LEVELS[level] || null;
   const isMaxLevel = !nextDef;
-  const currentLevelFloorXp = currentDef.xpRequired;
-  const nextLevelXp = nextDef ? nextDef.xpRequired : currentDef.xpRequired;
+  const currentLevelFloorXp = currentDef ? currentDef.xpRequired : 0;
+  const nextLevelXp = nextDef ? nextDef.xpRequired : currentLevelFloorXp;
   const xpIntoLevel = isMaxLevel ? 0 : Math.max(0, st.xp - currentLevelFloorXp);
   const xpNeededForNext = isMaxLevel ? 0 : Math.max(1, nextLevelXp - currentLevelFloorXp);
   const levelPercent = isMaxLevel
@@ -593,7 +593,7 @@ export function awardGamePassXp(
 
   if (source === "chat") {
     const now = Date.now();
-    if (now - lastChatXpAt < 20000) {
+    if (now - lastChatXpAt < 45000) {
       const cur = getGamePassState();
       return { awarded: 0, leveledUp: false, level: computeLevelFromXp(cur.xp), totalXp: cur.xp };
     }
@@ -639,7 +639,7 @@ export function claimDailyPassXp(): { claimed: boolean; awarded: number; remaini
     ...st,
     lastDailyXpAt: Date.now(),
   });
-  const res = awardGamePassXp(50, "daily", { label: "daily check-in" });
+  const res = awardGamePassXp(30, "daily", { label: "daily check-in" });
   return { claimed: true, awarded: res.awarded, remainingMs: DAILY_XP_COOLDOWN_MS };
 }
 
@@ -814,7 +814,7 @@ export function startSiteUsageXpTracker(): void {
   window.setInterval(() => {
     if (document.visibilityState !== "visible") return;
     if (Date.now() - lastUserInteractionAt > SITE_IDLE_THRESHOLD_MS) return;
-    awardGamePassXp(15, "site", { silent: true });
+    awardGamePassXp(5, "site", { silent: true });
   }, SITE_USAGE_TICK_MS);
 }
 

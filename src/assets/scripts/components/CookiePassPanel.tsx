@@ -227,7 +227,7 @@ export default function CookiePassPanel({
             <i class="fa-solid fa-calendar-check" style={{ color: "#4ade80" }} />
             <span>
               {progress.canClaimDailyXp
-                ? `daily check-in (+${Math.round(50 * xpMult)} xp)`
+                ? `daily check-in (+${Math.round(30 * xpMult)} xp)`
                 : `daily xp in ${formatDurationCompact(progress.dailyXpRemainingMs)}`}
             </span>
           </button>
@@ -269,19 +269,19 @@ export default function CookiePassPanel({
           <div class="cookie-pass-source-chip">
             <i class="fa-solid fa-comments" style={{ color: "#60a5fa" }} />
             <span>chatting</span>
-            <strong>+{Math.round(15 * xpMult)} xp / msg</strong>
+            <strong>+{Math.round(4 * xpMult)} xp / msg</strong>
             <span class="cookie-pass-source-earned">{progress.chatXp} xp</span>
           </div>
           <div class="cookie-pass-source-chip">
             <i class="fa-solid fa-gamepad" style={{ color: "#a855f7" }} />
             <span>playing games</span>
-            <strong>+{Math.round(35 * xpMult)} xp / min</strong>
+            <strong>+{Math.round(10 * xpMult)} xp / min</strong>
             <span class="cookie-pass-source-earned">{progress.gameXp} xp</span>
           </div>
           <div class="cookie-pass-source-chip">
             <i class="fa-solid fa-globe" style={{ color: "#34d399" }} />
             <span>using site</span>
-            <strong>+{Math.round(15 * xpMult)} xp / 2m</strong>
+            <strong>+{Math.round(5 * xpMult)} xp / 5m</strong>
             <span class="cookie-pass-source-earned">{progress.siteXp} xp</span>
           </div>
         </div>
