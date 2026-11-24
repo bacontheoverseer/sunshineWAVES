@@ -4710,16 +4710,8 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
 
     const recoveryQuestionId = String(req.body?.recoveryQuestionId || "").trim();
     const recoveryAnswerNorm = normalizeRecoveryAnswer(req.body?.recoveryAnswer || "");
-    if (!RECOVERY_QUESTIONS_BY_ID.has(recoveryQuestionId)) {
-      return res
-        .status(400)
-        .json({ success: false, user: null, error: "please choose an account recovery question" });
-    }
-    if (recoveryAnswerNorm.length < 2) {
-      return res
-        .status(400)
-        .json({ success: false, user: null, error: "please enter an answer for your recovery question" });
-    }
+    const hasInitialRecovery =
+      RECOVERY_QUESTIONS_BY_ID.has(recoveryQuestionId) && recoveryAnswerNorm.length >= 2;
 
     const hashed = Bun.password.hashSync(password, {
       algorithm: "bcrypt",
@@ -4736,12 +4728,14 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
     const createdIso = new Date(nowMs).toISOString();
     userCreatedAtMap.set(username.toLowerCase(), nowMs);
     persistUserCreatedAtMap();
-    userRecoveryMap.set(username.toLowerCase(), {
-      questionId: recoveryQuestionId,
-      answerNorm: recoveryAnswerNorm,
-      updatedAt: nowMs,
-    });
-    persistUserRecoveryMap();
+    if (hasInitialRecovery) {
+      userRecoveryMap.set(username.toLowerCase(), {
+        questionId: recoveryQuestionId,
+        answerNorm: recoveryAnswerNorm,
+        updatedAt: nowMs,
+      });
+      persistUserRecoveryMap();
+    }
 
     if (fingerprintId || storageToken) {
       recordUserDeviceSignature(username, {
@@ -4773,9 +4767,11 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
         id: userId,
         username,
         createdAt: createdIso,
-        hasRecoveryQuestion: true,
-        recoveryQuestionId,
-        recoveryQuestionText: RECOVERY_QUESTIONS_BY_ID.get(recoveryQuestionId) || "",
+        hasRecoveryQuestion: hasInitialRecovery,
+        recoveryQuestionId: hasInitialRecovery ? recoveryQuestionId : "",
+        recoveryQuestionText: hasInitialRecovery
+          ? RECOVERY_QUESTIONS_BY_ID.get(recoveryQuestionId) || ""
+          : "",
       },
       error: null,
     });

@@ -880,23 +880,17 @@ export class CloudSync {
                         <input type="text" id="reg-username" placeholder="create username" autocomplete="off">
                         <div id="reg-username-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">3-20 chars, letters/numbers</div>
 
-                        <label style="margin-top: 12px;">password</label>
+                        <label style="margin-top: 15px;">password</label>
                         <div style="position: relative;">
                             <input type="password" id="reg-password" placeholder="create password" style="width: 100%; padding-right: 35px; box-sizing: border-box;">
                             <i class="fa-solid fa-eye password-toggle" data-target="reg-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
                         </div>
                         <div id="reg-password-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">8+ chars, 1 number, 1 symbol</div>
 
-                        <label style="margin-top: 12px;">recovery question (to reset password if locked out)</label>
-                        <select id="reg-recovery-question" class="cloudsync-select">
-                            ${questionOptionsHtml}
-                        </select>
-                        <input type="text" id="reg-recovery-answer" placeholder="write your answer & save" autocomplete="off" style="margin-top: 7px;">
-
                         <div id="reg-turnstile-container" style="margin-top: 10px; display: flex; justify-content: center;"></div>
 
                         <div style="text-align: center;">
-                            <button type="submit" class="auth-action-btn" style="width: 65%; margin-top: 14px;">sign up for cloudsync</button>
+                            <button type="submit" class="auth-action-btn" style="width: 65%; margin-top: 15px;">sign up for cloudsync</button>
                             <p style="font-size: 11px; color: var(--text-muted); margin-top: 8px; max-width: 90%; margin-left: auto; margin-right: auto;">
                                 by signing up, you agree to our <a href="/terms" target="_blank" rel="noopener noreferrer" class="cloudsync-legal-link" data-doc="terms" style="color: var(--text-white); text-decoration: underline;">terms of service</a> &amp; <a href="/privacy" target="_blank" rel="noopener noreferrer" class="cloudsync-legal-link" data-doc="privacy" style="color: var(--text-white); text-decoration: underline;">privacy policy</a>
                             </p>
@@ -939,8 +933,8 @@ export class CloudSync {
                         <div>
                             <span id="auth-prompt-text">already have an account?</span> <span id="auth-action-text" class="hover-link">login!</span>
                         </div>
-                        <div style="margin-top: 6px; font-size: 12px;">
-                            locked out? <span id="auth-recover-open-btn" class="hover-link">recover your account</span>
+                        <div style="margin-top: 8px;">
+                            <button type="button" id="auth-recover-open-btn" class="cloudsync-tiny-recover-btn">recover your account</button>
                         </div>
                     </div>
                     <div id="auth-error" style="color: #ff5555; margin-top: 10px; font-size: 13px; min-height: 18px; text-align: center;"></div>
@@ -1473,12 +1467,6 @@ export class CloudSync {
     const password = (
       document.getElementById("reg-password") as HTMLInputElement
     ).value;
-    const recoveryQuestionId = (
-      document.getElementById("reg-recovery-question") as HTMLSelectElement | null
-    )?.value || "q1";
-    const recoveryAnswer = (
-      document.getElementById("reg-recovery-answer") as HTMLInputElement | null
-    )?.value.trim() || "";
 
     if (!username || !password) {
       this.showError("please fill in both fields!");
@@ -1487,17 +1475,6 @@ export class CloudSync {
           "error",
           "please fill in both username and password!",
           "triangle-exclamation",
-        );
-      return;
-    }
-
-    if (recoveryAnswer.length < 2) {
-      this.showError("please write an answer for your recovery question!");
-      if (window.showToast)
-        window.showToast(
-          "error",
-          "please write an answer for your recovery question!",
-          "key",
         );
       return;
     }
@@ -1539,8 +1516,6 @@ export class CloudSync {
         body: JSON.stringify({
           username,
           password,
-          recoveryQuestionId,
-          recoveryAnswer,
           fingerprint_id: deviceSig.fingerprint_id,
           storage_token: deviceSig.storage_token,
           "cf-turnstile-response": turnstileToken,
@@ -1561,11 +1536,12 @@ export class CloudSync {
         if (toastController) toastController.hide();
         this._turnstileToken = "";
         this.setSession(data as unknown as SessionData);
-        await this.toggleModal();
         this.syncMeta.dirty = true;
         this._dirtyKeys.clear();
         this.saveMeta();
         await this.syncData();
+        // Keep the modal open on their newly created account so they choose & save their recovery question right now
+        await this.promptMissingRecoveryQuestion();
       } else {
         if (toastController) toastController.hide();
         this._turnstileToken = "";
