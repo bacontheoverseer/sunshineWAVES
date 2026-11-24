@@ -32,6 +32,7 @@ const COINS_STORAGE_KEY = "cookie_coins_balance_v1";
 const STUDIO_STORAGE_KEY = "cookie_user_studio_v1";
 const LEADERBOARD_STORAGE_KEY = "cookie_game_leaderboards_v2";
 const AD_FREE_UNTIL_KEY = "sunshine_ad_free_until";
+const COIN_BOOST_UNTIL_KEY = "cookie_coin_boost_until_v1";
 export const COOKIE_MASTER_STORAGE_KEY = "cookie_master_status_v1";
 export const COOKIE_MASTER_DAILY_COINS = 1000;
 export const COOKIE_MASTER_COIN_PRICE = 5000;
@@ -209,6 +210,37 @@ export function activateAdFreePass(durationMs: number): number {
   return nextUntil;
 }
 
+export function getCoinBoostUntil(): number {
+  try {
+    const raw = localStorage.getItem(COIN_BOOST_UNTIL_KEY);
+    const ts = raw ? Number(raw) : 0;
+    return Number.isFinite(ts) && ts > Date.now() ? ts : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function isCoinBoostActive(): boolean {
+  return getCoinBoostUntil() > Date.now();
+}
+
+export function getCoinMultiplier(): number {
+  return isCoinBoostActive() ? 2 : 1;
+}
+
+export function activateCoinBoost(durationMs: number): number {
+  const base = Math.max(getCoinBoostUntil(), Date.now());
+  const nextUntil = base + Math.max(0, Math.floor(durationMs));
+  try {
+    localStorage.setItem(COIN_BOOST_UNTIL_KEY, String(nextUntil));
+  } catch {}
+  try {
+    window.dispatchEvent(new CustomEvent("cookie-coins-updated"));
+    window.dispatchEvent(new CustomEvent("cookie-pass-updated"));
+  } catch {}
+  return nextUntil;
+}
+
 export function formatAdFreeRemaining(untilMs: number): string {
   const diff = Math.max(0, untilMs - Date.now());
   if (diff <= 0) return "expired";
@@ -329,7 +361,7 @@ export function awardChatMessageCoins(): number {
   const now = Date.now();
   if (now - lastChatCoinAwardAt < 30000) return 0;
   lastChatCoinAwardAt = now;
-  const amount = 5;
+  const amount = 5 * getCoinMultiplier();
   setCookieCoins(getCookieCoins() + amount);
   return amount;
 }

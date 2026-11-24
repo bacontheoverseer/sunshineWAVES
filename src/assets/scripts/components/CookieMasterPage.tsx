@@ -958,8 +958,8 @@ export default function CookieMasterPage() {
               </h3>
             </div>
             <p class="app-card-desc">
-              Unlock the entire Pro tier of the Cookie Pass with animated auras, rare message pills,
-              massive coin drops, plus 1.5x XP boost and the Cookie Master crown badge.
+              Unlock the Pro Cookie Pass track with Golden &amp; Diamond coin vaults, 2x coin &amp; XP
+              boosters, free Cookie Shop prank tokens, bonus membership days, and 1.5x XP boost.
             </p>
           </article>
         </div>

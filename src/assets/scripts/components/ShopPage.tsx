@@ -13,6 +13,7 @@ import {
 import { getClientId, executeTrollAction, isLiveStreamConnected } from "../core/liveClient.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
 import { isChromebookModeEnabled } from "../core/chromebookMode.ts";
+import { consumeShopPrankToken, getShopPrankTokens } from "../core/gamePass.ts";
 
 interface ShopTrollItem {
   id: string;
@@ -236,6 +237,7 @@ export default function ShopPage() {
   const [ttsMessage, setTtsMessage] = useState<string>("hey there from cookie shop!");
   const [filterCat, setFilterCat] = useState<"all" | "sound" | "visual" | "voice">("all");
   const [sendingId, setSendingId] = useState<string | null>(null);
+  const [prankTokens, setPrankTokens] = useState<number>(() => getShopPrankTokens());
 
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const trollBcRef = useRef<BroadcastChannel | null>(null);
@@ -283,6 +285,7 @@ export default function ShopPage() {
     document.body.classList.add("shop-view");
     setVisible(true);
     setCoins(getCookieCoins());
+    setPrankTokens(getShopPrankTokens());
     syncAdFreeDomClass();
     setAdFreeUntil(getAdFreeUntil());
 
@@ -318,7 +321,12 @@ export default function ShopPage() {
     if (shopBtn) shopBtn.addEventListener("click", onShopClick);
     if (brand) brand.addEventListener("click", onBrandClick);
 
-    const onCoinsUpdated = () => setCoins(getCookieCoins());
+    const onCoinsUpdated = () => {
+      setCoins(getCookieCoins());
+      setPrankTokens(getShopPrankTokens());
+    };
+    const onPassUpdated = () => setPrankTokens(getShopPrankTokens());
+    window.addEventListener("cookie-pass-updated", onPassUpdated);
     const onAdFreeUpdated = () => {
       syncAdFreeDomClass();
       setAdFreeUntil(getAdFreeUntil());
@@ -335,6 +343,7 @@ export default function ShopPage() {
       if (shopBtn) shopBtn.removeEventListener("click", onShopClick);
       if (brand) brand.removeEventListener("click", onBrandClick);
       window.removeEventListener("cookie-coins-updated", onCoinsUpdated);
+      window.removeEventListener("cookie-pass-updated", onPassUpdated);
       window.removeEventListener("sunshine-ad-free-changed", onAdFreeUpdated);
       document.removeEventListener("cloudsync-restored", onAdFreeUpdated);
       trollBcRef.current?.close();
@@ -450,9 +459,9 @@ export default function ShopPage() {
       return;
     }
 
-    if (coins < item.cost) {
+    if (prankTokens <= 0 && coins < item.cost) {
       notifyToast(
-        `not enough cookie coins! you need ${item.cost} coins (make & publish games in game studio to earn more)`,
+        `not enough cookie coins! you need ${item.cost} coins (or earn free prank tokens in cookie pass)`,
         "error"
       );
       return;
@@ -510,7 +519,11 @@ export default function ShopPage() {
         }
       }
 
-      if (!spendCookieCoins(item.cost)) {
+      let usedFreeToken = false;
+      if (getShopPrankTokens() > 0 && consumeShopPrankToken()) {
+        usedFreeToken = true;
+        setPrankTokens(getShopPrankTokens());
+      } else if (!spendCookieCoins(item.cost)) {
         notifyToast("insufficient cookie coins", "error");
         return;
       }
@@ -534,7 +547,9 @@ export default function ShopPage() {
       }
 
       notifyToast(
-        `sent 1x "${item.name}" to @${targetUser} (-${item.cost} cookie coins)`,
+        usedFreeToken
+          ? `sent 1x "${item.name}" to @${targetUser} (used 1 free prank token!)`
+          : `sent 1x "${item.name}" to @${targetUser} (-${item.cost} cookie coins)`,
         "success"
       );
     } finally {
@@ -586,6 +601,22 @@ export default function ShopPage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+          {prankTokens > 0 && (
+            <div
+              class="studio-tab-btn"
+              style={{
+                cursor: "default",
+                fontWeight: 600,
+                color: "#22d3ee",
+                borderColor: "rgba(34, 211, 238, 0.38)",
+                background: "rgba(34, 211, 238, 0.1)",
+              }}
+              title="Free prank tokens from Cookie Pass — automatically used instead of coins!"
+            >
+              <i class="fa-solid fa-ticket"></i>
+              <span>{prankTokens} free token{prankTokens === 1 ? "" : "s"}</span>
+            </div>
+          )}
           <div
             class="studio-tab-btn active"
             style={{ cursor: "default", fontWeight: 600 }}
@@ -879,7 +910,7 @@ export default function ShopPage() {
         }}
       >
         {filteredItems.map((item) => {
-          const canAfford = coins >= item.cost;
+          const canAfford = prankTokens > 0 || coins >= item.cost;
           const isSending = sendingId === item.id;
           return (
             <article
@@ -967,8 +998,14 @@ export default function ShopPage() {
                 disabled={isSending}
                 onClick={() => handleBuyTroll(item)}
               >
-                <i class="fa-solid fa-bolt"></i>
-                <span>{isSending ? "sending..." : `send 1x (${item.cost} coins)`}</span>
+                <i class={`fa-solid ${prankTokens > 0 ? "fa-ticket" : "fa-bolt"}`}></i>
+                <span>
+                  {isSending
+                    ? "sending..."
+                    : prankTokens > 0
+                      ? "send free (1 token)"
+                      : `send 1x (${item.cost} coins)`}
+                </span>
               </button>
             </article>
           );

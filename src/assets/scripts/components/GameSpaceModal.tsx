@@ -7,6 +7,7 @@ import {
   syncGameActivityToServer,
   formatPlayTime,
   addCookieCoins,
+  getCoinMultiplier,
   isWebsiteNotGame,
   type LeaderboardEntry,
 } from "../core/cookieCoins.ts";
@@ -647,11 +648,12 @@ export default function GameSpaceModal() {
 
       // Every 60 seconds of active play, award Cookie Coins & Cookie Pass XP!
       if (playSeconds % 60 === 0) {
+        const mult = getCoinMultiplier();
         if (playSeconds % 300 === 0) {
-          addCookieCoins(25, `5-min streak playing ${gName}`);
+          addCookieCoins(25 * mult, `5-min streak playing ${gName}`);
           awardGamePassXp(75, "game", { silent: true });
         } else {
-          addCookieCoins(10, `playing ${gName}`);
+          addCookieCoins(10 * mult, `playing ${gName}`);
           awardGamePassXp(35, "game", { silent: true });
         }
       }

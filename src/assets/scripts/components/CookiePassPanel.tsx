@@ -2,14 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { formatDurationCompact } from "../core/cookieCoins.ts";
 import {
   GAME_PASS_LEVELS,
-  GAME_PASS_PRO_XP_MULTIPLIER,
   GamePassProgress,
   PassReward,
   PassTrack,
   claimAllReadyPassRewards,
   claimDailyPassXp,
   claimPassReward,
-  equipPassStyleReward,
   getGamePassProgress,
 } from "../core/gamePass.ts";
 
@@ -23,7 +21,6 @@ export default function CookiePassPanel({
   onPromptUpgrade,
 }: CookiePassPanelProps) {
   const [progress, setProgress] = useState<GamePassProgress>(() => getGamePassProgress());
-  const [equippingId, setEquippingId] = useState<string | null>(null);
   const railRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
@@ -33,12 +30,14 @@ export default function CookiePassPanel({
   useEffect(() => {
     refresh();
     window.addEventListener("cookie-pass-updated", refresh);
+    window.addEventListener("cookie-coins-updated", refresh);
     window.addEventListener("cookie-master-changed", refresh);
     window.addEventListener("storage", refresh);
     document.addEventListener("cloudsync-restored", refresh);
-    const timer = window.setInterval(refresh, 30000);
+    const timer = window.setInterval(refresh, 20000);
     return () => {
       window.removeEventListener("cookie-pass-updated", refresh);
+      window.removeEventListener("cookie-coins-updated", refresh);
       window.removeEventListener("cookie-master-changed", refresh);
       window.removeEventListener("storage", refresh);
       document.removeEventListener("cloudsync-restored", refresh);
@@ -62,16 +61,6 @@ export default function CookiePassPanel({
     }
   };
 
-  const handleEquip = async (reward: PassReward) => {
-    if (equippingId) return;
-    setEquippingId(reward.id);
-    try {
-      await equipPassStyleReward(reward);
-    } finally {
-      setEquippingId(null);
-    }
-  };
-
   const handleClaimAll = () => {
     const res = claimAllReadyPassRewards();
     if (res.count > 0) refresh();
@@ -83,13 +72,14 @@ export default function CookiePassPanel({
   };
 
   const claimedSet = new Set(progress.claimedIds);
+  const xpMult = progress.effectiveXpMultiplier;
 
   const renderRewardCard = (level: number, track: PassTrack, reward: PassReward) => {
     const levelUnlocked = progress.level >= level;
     const isProLocked = track === "pro" && !isActiveMaster;
     const isClaimed = claimedSet.has(reward.id);
     const canClaim = levelUnlocked && !isProLocked && !isClaimed;
-    const isStyleReward = Boolean(reward.profilePatch);
+    const isCrate = Boolean(reward.crateRange);
 
     return (
       <div
@@ -125,30 +115,18 @@ export default function CookiePassPanel({
 
         <div class="cookie-pass-card-footer">
           {isClaimed ? (
-            isStyleReward ? (
-              <button
-                type="button"
-                class="cookie-pass-btn is-equip"
-                disabled={equippingId === reward.id}
-                onClick={() => void handleEquip(reward)}
-              >
-                <i class={`fa-solid ${equippingId === reward.id ? "fa-spinner fa-spin" : "fa-shirt"}`} />
-                <span>{equippingId === reward.id ? "equipping..." : "equip"}</span>
-              </button>
-            ) : (
-              <div class="cookie-pass-status is-done">
-                <i class="fa-solid fa-circle-check" />
-                <span>claimed</span>
-              </div>
-            )
+            <div class="cookie-pass-status is-done">
+              <i class="fa-solid fa-circle-check" />
+              <span>{isCrate ? "opened" : "claimed"}</span>
+            </div>
           ) : canClaim ? (
             <button
               type="button"
               class={`cookie-pass-btn ${track === "pro" ? "is-claim-pro" : "is-claim-free"}`}
               onClick={() => handleClaim(level, track)}
             >
-              <i class="fa-solid fa-gift" />
-              <span>claim</span>
+              <i class={`fa-solid ${isCrate ? "fa-box-open" : "fa-gift"}`} />
+              <span>{isCrate ? "open vault" : "claim"}</span>
             </button>
           ) : isProLocked ? (
             <button
@@ -185,16 +163,52 @@ export default function CookiePassPanel({
               <span class="cookie-pass-lvl-pill">
                 lvl {progress.level} / {progress.maxLevel}
               </span>
-              {isActiveMaster ? (
+              {xpMult > 1 ? (
                 <span class="cookie-pass-boost-pill">
-                  <i class="fa-solid fa-crown" /> {GAME_PASS_PRO_XP_MULTIPLIER}x pro xp
+                  <i class="fa-solid fa-bolt" /> {xpMult}x xp active
                 </span>
               ) : (
                 <span class="cookie-pass-free-status-pill">free track active</span>
               )}
+              {progress.coinBoostRemainingMs > 0 && (
+                <span
+                  class="cookie-pass-boost-pill"
+                  style={{
+                    background: "rgba(249, 115, 22, 0.16)",
+                    color: "#fdba74",
+                    borderColor: "rgba(249, 115, 22, 0.38)",
+                  }}
+                >
+                  <i class="fa-solid fa-coins" /> 2x coins ({formatDurationCompact(progress.coinBoostRemainingMs)})
+                </span>
+              )}
+              {progress.xpBoostRemainingMs > 0 && (
+                <span
+                  class="cookie-pass-boost-pill"
+                  style={{
+                    background: "rgba(168, 85, 247, 0.16)",
+                    color: "#d8b4fe",
+                    borderColor: "rgba(168, 85, 247, 0.38)",
+                  }}
+                >
+                  <i class="fa-solid fa-angles-up" /> 2x xp ({formatDurationCompact(progress.xpBoostRemainingMs)})
+                </span>
+              )}
+              {progress.prankTokens > 0 && (
+                <span
+                  class="cookie-pass-boost-pill"
+                  style={{
+                    background: "rgba(34, 211, 238, 0.14)",
+                    color: "#67e8f9",
+                    borderColor: "rgba(34, 211, 238, 0.35)",
+                  }}
+                >
+                  <i class="fa-solid fa-ticket" /> {progress.prankTokens} free prank token{progress.prankTokens === 1 ? "" : "s"}
+                </span>
+              )}
             </div>
             <p class="cookie-pass-subtitle">
-              level up by chatting, playing games, and using operation cookie · pro track unlocks with cookie master
+              level up by chatting, playing games, and using operation cookie · unlock coin vaults, 2x boosters, free shop prank tokens &amp; pro days
             </p>
           </div>
         </div>
@@ -213,7 +227,7 @@ export default function CookiePassPanel({
             <i class="fa-solid fa-calendar-check" style={{ color: "#4ade80" }} />
             <span>
               {progress.canClaimDailyXp
-                ? `daily check-in (+${isActiveMaster ? 75 : 50} xp)`
+                ? `daily check-in (+${Math.round(50 * xpMult)} xp)`
                 : `daily xp in ${formatDurationCompact(progress.dailyXpRemainingMs)}`}
             </span>
           </button>
@@ -255,19 +269,19 @@ export default function CookiePassPanel({
           <div class="cookie-pass-source-chip">
             <i class="fa-solid fa-comments" style={{ color: "#60a5fa" }} />
             <span>chatting</span>
-            <strong>+{isActiveMaster ? 23 : 15} xp / msg</strong>
+            <strong>+{Math.round(15 * xpMult)} xp / msg</strong>
             <span class="cookie-pass-source-earned">{progress.chatXp} xp</span>
           </div>
           <div class="cookie-pass-source-chip">
             <i class="fa-solid fa-gamepad" style={{ color: "#a855f7" }} />
             <span>playing games</span>
-            <strong>+{isActiveMaster ? 53 : 35} xp / min</strong>
+            <strong>+{Math.round(35 * xpMult)} xp / min</strong>
             <span class="cookie-pass-source-earned">{progress.gameXp} xp</span>
           </div>
           <div class="cookie-pass-source-chip">
             <i class="fa-solid fa-globe" style={{ color: "#34d399" }} />
             <span>using site</span>
-            <strong>+{isActiveMaster ? 23 : 15} xp / 2m</strong>
+            <strong>+{Math.round(15 * xpMult)} xp / 2m</strong>
             <span class="cookie-pass-source-earned">{progress.siteXp} xp</span>
           </div>
         </div>
