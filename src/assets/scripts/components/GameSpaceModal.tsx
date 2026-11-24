@@ -11,6 +11,7 @@ import {
   type LeaderboardEntry,
 } from "../core/cookieCoins.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
+import { awardGamePassXp } from "../core/gamePass.ts";
 import { getClientId } from "../core/liveClient.ts";
 import { isChromebookModeEnabled, useChromebookMode } from "../core/chromebookMode.ts";
 
@@ -644,12 +645,14 @@ export default function GameSpaceModal() {
         });
       }
 
-      // Every 60 seconds of active play, award +10 Cookie Coins (+25 on 5-minute streak)!
+      // Every 60 seconds of active play, award Cookie Coins & Cookie Pass XP!
       if (playSeconds % 60 === 0) {
         if (playSeconds % 300 === 0) {
           addCookieCoins(25, `5-min streak playing ${gName}`);
+          awardGamePassXp(75, "game", { silent: true });
         } else {
           addCookieCoins(10, `playing ${gName}`);
+          awardGamePassXp(35, "game", { silent: true });
         }
       }
     }, 1000);

@@ -20,6 +20,7 @@ import {
   isCookieMasterActive,
   spendCookieCoins,
 } from "../core/cookieCoins.ts";
+import { awardGamePassXp } from "../core/gamePass.ts";
 import { getDeviceSignature } from "../core/deviceSignature.ts";
 import {
   ChatRole,
@@ -4495,6 +4496,7 @@ export default function ChatModal() {
     }
     await sendChatMessage(inputText);
     awardChatMessageCoins();
+    awardGamePassXp(15, "chat", { silent: true });
   };
 
   const handleSendGif = async (gif: KlipyGifItem) => {

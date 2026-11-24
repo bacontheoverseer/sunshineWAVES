@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "preact/hooks";
 import { showHomeView, store } from "../state/store.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
+import { awardGamePassXp } from "../core/gamePass.ts";
 import {
   getCookieCoins,
   addCookieCoins,
@@ -1564,6 +1565,7 @@ export default function GameStudioPage() {
               if (nextLvlIdx < cfg.levels.length) {
                 const bonusScore = sim.score + 50;
                 addCookieCoins(10, `cleared level ${sim.levelIndex + 1} in ${cfg.title}`);
+                awardGamePassXp(30, "game", { silent: true });
                 syncProgressToCloud({
                   levelReached: nextLvlIdx + 1,
                   score: bonusScore,
@@ -1584,6 +1586,7 @@ export default function GameStudioPage() {
                   sim.score += 100;
                   setLiveScore(sim.score);
                   addCookieCoins(25, `beat all levels of ${cfg.title}`);
+                  awardGamePassXp(60, "game", { silent: true });
                   recordGameActivity(cfg.title, 25, 1, sim.score);
                   syncProgressToCloud({
                     levelReached: cfg.levels.length,
@@ -2566,6 +2569,7 @@ export default function GameStudioPage() {
       } catch {}
 
       addCookieCoins(50, `published "${savedGame.title}" under ${userStudio.name}`);
+      awardGamePassXp(100, "game", { label: `published ${savedGame.title}` });
       const updatedStudio: StudioProfile = {
         ...userStudio,
         coinsEarned: (userStudio.coinsEarned || 0) + 50,

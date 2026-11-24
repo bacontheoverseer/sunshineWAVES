@@ -581,3 +581,474 @@ body.master-view #arrow-pointer {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────
+   COOKIE PASS (FREE & PRO BATTLE PASS)
+   ───────────────────────────────────────────────────────────── */
+.cookie-pass-panel {
+  padding: 20px !important;
+  gap: 16px !important;
+  background: linear-gradient(160deg, var(--bg-surface-3) 0%, var(--bg-surface-2) 100%);
+}
+
+.cookie-pass-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.cookie-pass-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 320px;
+}
+
+.cookie-pass-badge-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+  flex-shrink: 0;
+}
+
+.cookie-pass-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.cookie-pass-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-transform: lowercase;
+}
+
+.cookie-pass-season-pill,
+.cookie-pass-lvl-pill,
+.cookie-pass-boost-pill,
+.cookie-pass-free-status-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cookie-pass-season-pill {
+  background: rgba(99, 102, 241, 0.16);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.32);
+}
+
+.cookie-pass-lvl-pill {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.cookie-pass-boost-pill {
+  background: rgba(251, 191, 36, 0.16);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.38);
+}
+
+.cookie-pass-free-status-pill {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-sublabel);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.cookie-pass-subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}
+
+.cookie-pass-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cookie-pass-progress-box {
+  background: var(--bg-surface-4);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 13px;
+  padding: 13px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.cookie-pass-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  text-transform: lowercase;
+}
+
+.cookie-pass-xp-main {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cookie-pass-xp-total {
+  color: var(--color-sublabel);
+}
+
+.cookie-pass-progress-track {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cookie-pass-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1 0%, #a855f7 55%, #fbbf24 100%);
+  transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  min-width: 4px;
+}
+
+.cookie-pass-xp-sources {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.cookie-pass-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}
+
+.cookie-pass-source-chip strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.cookie-pass-source-earned {
+  padding-left: 5px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--color-sublabel);
+  font-size: 10.5px;
+}
+
+.cookie-pass-rail-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cookie-pass-rail-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cookie-pass-track-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.cookie-pass-legend-free {
+  color: #93c5fd;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cookie-pass-legend-pro {
+  color: #fcd34d;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cookie-pass-scroll-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--bg-surface-10);
+  background: var(--bg-surface-4);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.cookie-pass-scroll-btn:hover {
+  background: var(--bg-surface-10);
+}
+
+.cookie-pass-rail {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 6px 2px 12px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.cookie-pass-col {
+  flex: 0 0 156px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  scroll-snap-align: start;
+}
+
+.cookie-pass-card {
+  border-radius: 13px;
+  padding: 11px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 138px;
+  background: var(--bg-surface-4);
+  border: 1px solid var(--bg-surface-10);
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  position: relative;
+}
+
+.cookie-pass-card.is-pro {
+  background: linear-gradient(155deg, rgba(42, 31, 14, 0.72) 0%, rgba(20, 18, 28, 0.88) 100%);
+  border-color: rgba(251, 191, 36, 0.24);
+}
+
+.cookie-pass-card.is-locked {
+  opacity: 0.78;
+}
+
+.cookie-pass-card.is-claimable {
+  border-color: rgba(96, 165, 250, 0.65);
+  box-shadow: 0 0 16px rgba(96, 165, 250, 0.2);
+}
+
+.cookie-pass-card.is-pro.is-claimable {
+  border-color: rgba(251, 191, 36, 0.78);
+  box-shadow: 0 0 18px rgba(251, 191, 36, 0.26);
+}
+
+.cookie-pass-card.is-claimed {
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.cookie-pass-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.cookie-pass-card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.cookie-pass-free-pill,
+.cookie-pass-pro-pill {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.cookie-pass-free-pill {
+  background: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
+}
+
+.cookie-pass-pro-pill {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.34);
+}
+
+.cookie-pass-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cookie-pass-card-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-transform: lowercase;
+  line-height: 1.25;
+}
+
+.cookie-pass-card-sub {
+  font-size: 10.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+  line-height: 1.3;
+}
+
+.cookie-pass-card-footer {
+  margin-top: auto;
+}
+
+.cookie-pass-btn {
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.12s ease;
+}
+
+.cookie-pass-btn:hover {
+  filter: brightness(1.08);
+}
+
+.cookie-pass-btn.is-claim-free {
+  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
+  color: #fff;
+}
+
+.cookie-pass-btn.is-claim-pro {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #111;
+}
+
+.cookie-pass-btn.is-equip {
+  background: rgba(74, 222, 128, 0.16);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.36);
+}
+
+.cookie-pass-btn.is-upgrade {
+  background: rgba(251, 191, 36, 0.12);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+}
+
+.cookie-pass-status {
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: lowercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-sublabel);
+}
+
+.cookie-pass-status.is-done {
+  background: rgba(74, 222, 128, 0.12);
+  color: #4ade80;
+}
+
+/* Middle Level Node Track */
+.cookie-pass-node-row {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  margin: 2px -5px;
+}
+
+.cookie-pass-connector {
+  flex: 1;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.cookie-pass-connector.is-filled {
+  background: linear-gradient(90deg, #6366f1, #fbbf24);
+}
+
+.cookie-pass-connector.is-hidden {
+  background: transparent;
+}
+
+.cookie-pass-node {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--bg-surface-4);
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  color: var(--color-sublabel);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cookie-pass-node.is-reached {
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  border-color: #c4b5fd;
+  color: #fff;
+}
+
+.cookie-pass-node.is-current {
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+  border-color: #fef08a;
+  color: #111;
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.55);
+}
