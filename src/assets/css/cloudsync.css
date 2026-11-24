@@ -107,3 +107,61 @@
   z-index: 1000000;
   pointer-events: all;
 }
+
+.cloudsync-select {
+  background-color: var(--input-bg);
+  border: 2px solid transparent;
+  border-radius: 15px;
+  box-sizing: border-box;
+  color: var(--input-text);
+  font-size: 13px;
+  outline: none;
+  padding: 9px 10px;
+  width: 100%;
+  cursor: pointer;
+}
+
+.cloudsync-select option {
+  background-color: #141418;
+  color: #fff;
+}
+
+.cloudsync-recovery-question-box {
+  background: var(--bg-surface-5);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 13px;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.cloudsync-recovery-setup-card {
+  background: var(--bg-surface-5);
+  border: 1px solid var(--bg-surface-10);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.cloudsync-recovery-status {
+  font-size: 12px;
+  color: var(--text-white);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cloudsync-recovery-input {
+  background-color: var(--input-bg);
+  border: 2px solid transparent;
+  border-radius: 13px;
+  box-sizing: border-box;
+  color: var(--input-text);
+  font-size: 13px;
+  outline: none;
+  padding: 8px 10px;
+  width: 100%;
+}

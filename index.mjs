@@ -1346,6 +1346,22 @@ const bannedDevices = []; // Array<{ id, fingerprint_id, storage_token, banned_u
 const shadowbannedUsers = new Set(); // Set<usernameLower>
 const userDeviceMap = new Map(); // usernameLower -> { fingerprint_id, storage_token, updatedAt }
 const userCreatedAtMap = new Map(); // usernameLower -> timestampMs
+const userRecoveryMap = new Map(); // usernameLower -> { questionId, answerNorm, updatedAt }
+const recoveryAttemptTracker = new Map(); // key -> { count, windowStart }
+
+const RECOVERY_PRESET_QUESTIONS = [
+  { id: "q1", text: "what was the name of your first pet?" },
+  { id: "q2", text: "what is your favorite video game of all time?" },
+  { id: "q3", text: "what city or town were you born in?" },
+  { id: "q4", text: "what is your favorite food or snack?" },
+  { id: "q5", text: "what was your childhood nickname?" },
+  { id: "q6", text: "what is the name of your elementary school?" },
+  { id: "q7", text: "what is your favorite movie or tv show?" },
+  { id: "q8", text: "what is your dream car or vehicle?" },
+  { id: "q9", text: "what is your favorite sports team or athlete?" },
+  { id: "q10", text: "what was the first concert or live event you went to?" },
+];
+const RECOVERY_QUESTIONS_BY_ID = new Map(RECOVERY_PRESET_QUESTIONS.map((q) => [q.id, q.text]));
 const userLastMessageTrack = new Map(); // usernameLower -> { lastSentAt, recentTexts: Array<{ norm, at }>, recentDmTargets: Map<targetLower, number> }
 const TURNSTILE_SITE_KEY = (process.env.TURNSTILE_SITE_KEY || process.env.CF_TURNSTILE_SITE_KEY || "").trim();
 const TURNSTILE_SECRET_KEY = (process.env.TURNSTILE_SECRET_KEY || process.env.CF_TURNSTILE_SECRET_KEY || "").trim();
@@ -1484,6 +1500,7 @@ const CHAT_META_KV_KEYS = [
   "shadowbanned_users_v1",
   "user_device_map_v1",
   "user_created_at_v1",
+  "user_recovery_questions_v1",
   "pending_coin_grants_v1",
   "coin_claim_cooldowns_v1",
   STUDIO_GAMES_KV_KEY,
@@ -2360,6 +2377,26 @@ function applyChatMetaKvMap(kvMap) {
       if (cleanK && numTs > 0) userCreatedAtMap.set(cleanK, numTs);
     }
   }
+  const sRecoveryMap = kvMap.user_recovery_questions_v1;
+  if (sRecoveryMap && typeof sRecoveryMap === "object") {
+    for (const [uk, entry] of Object.entries(sRecoveryMap)) {
+      const cleanK = String(uk || "").trim().toLowerCase();
+      if (!cleanK || !entry || typeof entry !== "object") continue;
+      const qid = String(entry.questionId || "").trim();
+      const ans = String(entry.answerNorm || "").trim();
+      if (RECOVERY_QUESTIONS_BY_ID.has(qid) && ans) {
+        const existing = userRecoveryMap.get(cleanK);
+        const incomingTs = Number(entry.updatedAt) || 0;
+        if (!existing || incomingTs >= (existing.updatedAt || 0)) {
+          userRecoveryMap.set(cleanK, {
+            questionId: qid,
+            answerNorm: ans,
+            updatedAt: incomingTs || Date.now(),
+          });
+        }
+      }
+    }
+  }
 }
 
 function ensureChatMetaLoaded() {
@@ -2381,6 +2418,7 @@ function ensureChatMetaLoaded() {
     shadowbanned_users_v1: kvGetJson("shadowbanned_users_v1", []),
     user_device_map_v1: kvGetJson("user_device_map_v1", {}),
     user_created_at_v1: kvGetJson("user_created_at_v1", {}),
+    user_recovery_questions_v1: kvGetJson("user_recovery_questions_v1", {}),
     [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
     [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
   });
@@ -4133,6 +4171,121 @@ async function dbCreateUser(username, passwordHash) {
   }
 }
 
+function persistUserRecoveryMap() {
+  const out = {};
+  for (const [k, v] of userRecoveryMap.entries()) {
+    if (k && v && v.questionId && v.answerNorm) {
+      out[k] = v;
+    }
+  }
+  kvSetJson("user_recovery_questions_v1", out);
+}
+
+function normalizeRecoveryAnswer(raw) {
+  return String(raw || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+function stripRecoveryStopwords(norm) {
+  return norm
+    .replace(/\b(the|a|an|my|our|is|was|it|its|in|at|on|of)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function levenshteinDistance(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const prev = new Array(b.length + 1);
+  const curr = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function isRecoveryAnswerCloseEnough(submittedRaw, savedNormRaw) {
+  const sub = normalizeRecoveryAnswer(submittedRaw);
+  const saved = normalizeRecoveryAnswer(savedNormRaw);
+  if (!sub || !saved) return false;
+  if (sub === saved) return true;
+
+  const subCore = stripRecoveryStopwords(sub) || sub;
+  const savedCore = stripRecoveryStopwords(saved) || saved;
+  if (subCore === savedCore) return true;
+
+  const subCompact = subCore.replace(/\s+/g, "");
+  const savedCompact = savedCore.replace(/\s+/g, "");
+  if (subCompact === savedCompact) return true;
+
+  const maxLen = Math.max(subCompact.length, savedCompact.length);
+  const minLen = Math.min(subCompact.length, savedCompact.length);
+  if (minLen >= 4 && (savedCompact.includes(subCompact) || subCompact.includes(savedCompact))) {
+    if (minLen / maxLen >= 0.65) return true;
+  }
+
+  const dist = levenshteinDistance(subCompact, savedCompact);
+  if (maxLen <= 3) return dist === 0;
+  if (maxLen <= 6 && dist <= 1) return true;
+  if (maxLen <= 12 && dist <= 2) return true;
+  const similarity = 1 - dist / maxLen;
+  return similarity >= 0.76;
+}
+
+async function dbUpdateUserPassword(username, newPasswordHash) {
+  const existing = await dbFindUserByUsername(username, { includePasswordHash: true });
+  if (!existing) return null;
+  const userId = Number(existing.id);
+  const canonicalUsername = String(existing.username);
+  const nextTokenVersion = (Number(existing.token_version) || 1) + 1;
+
+  if (USE_SUPABASE_CLOUDSYNC && !isSupabaseDegraded()) {
+    try {
+      await aivenDb.query(
+        "UPDATE public.cloudsync_users SET password_hash = $1, token_version = $2 WHERE id = $3 OR username_lower = $4",
+        [newPasswordHash, nextTokenVersion, userId, canonicalUsername.toLowerCase()]
+      );
+    } catch (err) {
+      markSupabaseDegraded(err?.message);
+    }
+  }
+
+  const db = openCloudSyncDb(false);
+  try {
+    db.query(
+      "UPDATE users SET password_hash = ?, token_version = ? WHERE LOWER(username) = LOWER(?)"
+    ).run(newPasswordHash, nextTokenVersion, canonicalUsername);
+  } catch {} finally {
+    db.close();
+  }
+
+  cacheCloudSyncUserRecord({
+    id: userId,
+    username: canonicalUsername,
+    password_hash: newPasswordHash,
+    token_version: nextTokenVersion,
+  });
+
+  return {
+    id: userId,
+    username: canonicalUsername,
+    token_version: nextTokenVersion,
+  };
+}
+
 async function dbDeleteUser(userId, username = "") {
   const numId = Number(userId) || 0;
   evictCloudSyncUserRecord({ userId: numId, username });
@@ -4555,6 +4708,19 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
         .json({ success: false, user: null, error: "password too long" });
     }
 
+    const recoveryQuestionId = String(req.body?.recoveryQuestionId || "").trim();
+    const recoveryAnswerNorm = normalizeRecoveryAnswer(req.body?.recoveryAnswer || "");
+    if (!RECOVERY_QUESTIONS_BY_ID.has(recoveryQuestionId)) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "please choose an account recovery question" });
+    }
+    if (recoveryAnswerNorm.length < 2) {
+      return res
+        .status(400)
+        .json({ success: false, user: null, error: "please enter an answer for your recovery question" });
+    }
+
     const hashed = Bun.password.hashSync(password, {
       algorithm: "bcrypt",
       cost: 10,
@@ -4570,6 +4736,12 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
     const createdIso = new Date(nowMs).toISOString();
     userCreatedAtMap.set(username.toLowerCase(), nowMs);
     persistUserCreatedAtMap();
+    userRecoveryMap.set(username.toLowerCase(), {
+      questionId: recoveryQuestionId,
+      answerNorm: recoveryAnswerNorm,
+      updatedAt: nowMs,
+    });
+    persistUserRecoveryMap();
 
     if (fingerprintId || storageToken) {
       recordUserDeviceSignature(username, {
@@ -4597,7 +4769,14 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
     return res.status(201).json({
       success: true,
       token,
-      user: { id: userId, username, createdAt: createdIso },
+      user: {
+        id: userId,
+        username,
+        createdAt: createdIso,
+        hasRecoveryQuestion: true,
+        recoveryQuestionId,
+        recoveryQuestionText: RECOVERY_QUESTIONS_BY_ID.get(recoveryQuestionId) || "",
+      },
       error: null,
     });
   } catch (err) {
@@ -4682,10 +4861,17 @@ app.post(["/api/auth/login", "/login"], async (req, res) => {
     touchKnownUser(canonicalUsername);
     broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
 
+    const rec = userRecoveryMap.get(canonicalUsername.toLowerCase());
     return res.status(200).json({
       success: true,
       token,
-      user: { id: userId, username: canonicalUsername },
+      user: {
+        id: userId,
+        username: canonicalUsername,
+        hasRecoveryQuestion: Boolean(rec?.questionId && rec?.answerNorm),
+        recoveryQuestionId: rec?.questionId || "",
+        recoveryQuestionText: rec?.questionId ? RECOVERY_QUESTIONS_BY_ID.get(rec.questionId) || "" : "",
+      },
       error: null,
     });
   } catch (err) {
@@ -4702,13 +4888,174 @@ app.post("/api/auth/logout", (_req, res) => {
 });
 
 app.get("/api/auth/me", async (req, res) => {
+  await ensureChatMetaReadyAsync();
   const user = await getAuthenticatedCloudSyncUser(req);
   if (!user) {
     return res
       .status(401)
       .json({ success: false, user: null, error: "unauthorized" });
   }
-  res.json({ success: true, user, error: null });
+  const rec = userRecoveryMap.get(String(user.username || "").toLowerCase());
+  res.json({
+    success: true,
+    user: {
+      ...user,
+      hasRecoveryQuestion: Boolean(rec?.questionId && rec?.answerNorm),
+      recoveryQuestionId: rec?.questionId || "",
+      recoveryQuestionText: rec?.questionId ? RECOVERY_QUESTIONS_BY_ID.get(rec.questionId) || "" : "",
+    },
+    error: null,
+  });
+});
+
+app.get("/api/auth/recovery/questions", (_req, res) => {
+  res.json({
+    success: true,
+    questions: RECOVERY_PRESET_QUESTIONS,
+  });
+});
+
+app.post("/api/auth/recovery/save", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const user = await getAuthenticatedCloudSyncUser(req);
+  if (!user) {
+    return res.status(401).json({ success: false, error: "sign in to save your recovery question" });
+  }
+  const questionId = String(req.body?.questionId || "").trim();
+  const answerNorm = normalizeRecoveryAnswer(req.body?.answer || "");
+  if (!RECOVERY_QUESTIONS_BY_ID.has(questionId)) {
+    return res.status(400).json({ success: false, error: "please choose one of the 10 preset questions" });
+  }
+  if (answerNorm.length < 2) {
+    return res.status(400).json({ success: false, error: "answer must be at least 2 characters" });
+  }
+  const uk = user.username.toLowerCase();
+  userRecoveryMap.set(uk, {
+    questionId,
+    answerNorm,
+    updatedAt: Date.now(),
+  });
+  persistUserRecoveryMap();
+  res.json({
+    success: true,
+    questionId,
+    questionText: RECOVERY_QUESTIONS_BY_ID.get(questionId) || "",
+  });
+});
+
+app.get("/api/auth/recovery/lookup", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const rawUsername = String(req.query?.username || "").trim();
+  if (!rawUsername || rawUsername.length < 3 || rawUsername.length > 20) {
+    return res.status(400).json({ success: false, error: "enter a valid username" });
+  }
+  const row = await dbFindUserByUsername(rawUsername);
+  if (!row) {
+    return res.status(404).json({ success: false, error: "no account found with that username" });
+  }
+  const uk = String(row.username).toLowerCase();
+  const rec = userRecoveryMap.get(uk);
+  if (!rec || !RECOVERY_QUESTIONS_BY_ID.has(rec.questionId)) {
+    return res.status(404).json({
+      success: false,
+      error: "this account has not saved a recovery question yet",
+    });
+  }
+  res.json({
+    success: true,
+    username: String(row.username),
+    questionId: rec.questionId,
+    questionText: RECOVERY_QUESTIONS_BY_ID.get(rec.questionId) || "",
+  });
+});
+
+app.post("/api/auth/recovery/reset", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const rawUsername = String(req.body?.username || "").trim();
+    const rawAnswer = String(req.body?.answer || "");
+    const newPassword = String(req.body?.newPassword || "");
+
+    if (!rawUsername || !rawAnswer || !newPassword) {
+      return res.status(400).json({ success: false, error: "fill in your username, answer, and new password" });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, error: "new password must be at least 8 characters" });
+    }
+    if (newPassword.length > 128) {
+      return res.status(400).json({ success: false, error: "new password is too long" });
+    }
+
+    const uk = rawUsername.toLowerCase();
+    const now = Date.now();
+    const attemptKey = `${uk}:${req.headers["cf-connecting-ip"] || req.ip || "ip"}`;
+    const attempt = recoveryAttemptTracker.get(attemptKey);
+    if (attempt && now - attempt.windowStart < 10 * 60 * 1000 && attempt.count >= 6) {
+      return res.status(429).json({
+        success: false,
+        error: "too many recovery attempts — please wait 10 minutes and try again",
+      });
+    }
+
+    const row = await dbFindUserByUsername(rawUsername);
+    const rec = userRecoveryMap.get(uk);
+    if (!row || !rec || !rec.answerNorm) {
+      return res.status(404).json({
+        success: false,
+        error: "no recovery question found for that account",
+      });
+    }
+
+    if (!isRecoveryAnswerCloseEnough(rawAnswer, rec.answerNorm)) {
+      const prevCount =
+        attempt && now - attempt.windowStart < 10 * 60 * 1000 ? attempt.count : 0;
+      recoveryAttemptTracker.set(attemptKey, {
+        count: prevCount + 1,
+        windowStart: prevCount === 0 ? now : attempt.windowStart,
+      });
+      return res.status(401).json({
+        success: false,
+        error: "that answer wasn't close enough to your saved answer — try again!",
+      });
+    }
+
+    recoveryAttemptTracker.delete(attemptKey);
+    const hashed = Bun.password.hashSync(newPassword, {
+      algorithm: "bcrypt",
+      cost: 10,
+    });
+    const updated = await dbUpdateUserPassword(row.username, hashed);
+    if (!updated) {
+      return res.status(500).json({ success: false, error: "could not update password" });
+    }
+
+    const exp = Math.floor(now / 1000) + 30 * 24 * 60 * 60;
+    const token = signCloudSyncJwt({
+      id: updated.id,
+      username: updated.username,
+      v: updated.token_version,
+      exp,
+    });
+    setCloudSyncAuthCookie(res, token, req);
+    upsertUserInCaches({ id: updated.id, username: updated.username });
+    touchKnownUser(updated.username);
+
+    return res.json({
+      success: true,
+      token,
+      user: {
+        id: updated.id,
+        username: updated.username,
+        hasRecoveryQuestion: true,
+        recoveryQuestionId: rec.questionId,
+        recoveryQuestionText: RECOVERY_QUESTIONS_BY_ID.get(rec.questionId) || "",
+      },
+      error: null,
+    });
+  } catch (err) {
+    console.error("CloudSync recovery reset error:", err);
+    return res.status(500).json({ success: false, error: "internal error" });
+  }
 });
 
 app.delete("/api/auth/me", async (req, res) => {

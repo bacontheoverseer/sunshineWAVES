@@ -12,8 +12,24 @@ interface SyncMeta {
 interface AuthUser {
   username?: string;
   id?: string | number;
+  hasRecoveryQuestion?: boolean;
+  recoveryQuestionId?: string;
+  recoveryQuestionText?: string;
   [key: string]: unknown;
 }
+
+const RECOVERY_PRESET_QUESTIONS: Array<{ id: string; text: string }> = [
+  { id: "q1", text: "what was the name of your first pet?" },
+  { id: "q2", text: "what is your favorite video game of all time?" },
+  { id: "q3", text: "what city or town were you born in?" },
+  { id: "q4", text: "what is your favorite food or snack?" },
+  { id: "q5", text: "what was your childhood nickname?" },
+  { id: "q6", text: "what is the name of your elementary school?" },
+  { id: "q7", text: "what is your favorite movie or tv show?" },
+  { id: "q8", text: "what is your dream car or vehicle?" },
+  { id: "q9", text: "what is your favorite sports team or athlete?" },
+  { id: "q10", text: "what was the first concert or live event you went to?" },
+];
 
 interface SyncPayload {
   localStorage: Record<string, string>;
@@ -297,6 +313,35 @@ export class CloudSync {
 
     if (this.isAuthenticated) {
       this.startPolling();
+      if (this.user && this.user.hasRecoveryQuestion === false) {
+        setTimeout(() => {
+          if (this.isAuthenticated && this.user?.hasRecoveryQuestion === false) {
+            void this.promptMissingRecoveryQuestion();
+          }
+        }, 900);
+      }
+    }
+  }
+
+  async promptMissingRecoveryQuestion(): Promise<void> {
+    if (!document.getElementById("auth-modal")) {
+      await this.createAuthModal();
+    }
+    this.updateModalState();
+    const modal = document.getElementById("auth-modal") as HTMLElement | null;
+    const overlay = document.getElementById("overlay") as HTMLElement | null;
+    if (modal && modal.style.display !== "flex") {
+      modal.style.display = "flex";
+      modal.classList.remove("fade-out-prompt");
+      modal.classList.add("fade-in-prompt");
+      overlay?.classList.add("show");
+      if (window.showToast) {
+        window.showToast(
+          "info",
+          "choose a recovery question & save an answer so you can always recover your account!",
+          "shield-halved"
+        );
+      }
     }
   }
 
@@ -800,6 +845,10 @@ export class CloudSync {
   async createAuthModal(): Promise<void> {
     if (document.getElementById("auth-modal")) return;
 
+    const questionOptionsHtml = RECOVERY_PRESET_QUESTIONS.map(
+      (q) => `<option value="${q.id}">${q.text}</option>`
+    ).join("");
+
     const modal = document.createElement("div");
     modal.id = "auth-modal";
     modal.className = "popup";
@@ -831,38 +880,92 @@ export class CloudSync {
                         <input type="text" id="reg-username" placeholder="create username" autocomplete="off">
                         <div id="reg-username-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">3-20 chars, letters/numbers</div>
 
-                        <label style="margin-top: 15px;">password</label>
+                        <label style="margin-top: 12px;">password</label>
                         <div style="position: relative;">
                             <input type="password" id="reg-password" placeholder="create password" style="width: 100%; padding-right: 35px; box-sizing: border-box;">
                             <i class="fa-solid fa-eye password-toggle" data-target="reg-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
                         </div>
                         <div id="reg-password-feedback" style="font-size: 11px; color: var(--text-muted); margin-top: 4px; text-align: left; min-height: 14px;">8+ chars, 1 number, 1 symbol</div>
 
+                        <label style="margin-top: 12px;">recovery question (to reset password if locked out)</label>
+                        <select id="reg-recovery-question" class="cloudsync-select">
+                            ${questionOptionsHtml}
+                        </select>
+                        <input type="text" id="reg-recovery-answer" placeholder="write your answer & save" autocomplete="off" style="margin-top: 7px;">
+
                         <div id="reg-turnstile-container" style="margin-top: 10px; display: flex; justify-content: center;"></div>
 
                         <div style="text-align: center;">
-                            <button type="submit" class="auth-action-btn" style="width: 65%; margin-top: 15px;">sign up for cloudsync</button>
-                            <p style="font-size: 11.5px; color: #ff5555; margin-top: 10px; max-width: 85%; margin-left: auto; margin-right: auto;">
-                                save your password somewhere safe! all data will be forever lost if you forget your password
-                            </p>
+                            <button type="submit" class="auth-action-btn" style="width: 65%; margin-top: 14px;">sign up for cloudsync</button>
                             <p style="font-size: 11px; color: var(--text-muted); margin-top: 8px; max-width: 90%; margin-left: auto; margin-right: auto;">
                                 by signing up, you agree to our <a href="/terms" target="_blank" rel="noopener noreferrer" class="cloudsync-legal-link" data-doc="terms" style="color: var(--text-white); text-decoration: underline;">terms of service</a> &amp; <a href="/privacy" target="_blank" rel="noopener noreferrer" class="cloudsync-legal-link" data-doc="privacy" style="color: var(--text-white); text-decoration: underline;">privacy policy</a>
                             </p>
                         </div>
                     </form>
 
-                    <div style="margin-top: 15px; margin-bottom: -20px; font-size: 13px; color: var(--text-muted); text-align: center;" id="auth-switch-container">
-                        <span id="auth-prompt-text">already have an account?</span> <span id="auth-action-text" class="hover-link">login!</span>
+                    <form id="recover-form" style="display: none;">
+                        <label>username</label>
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <input type="text" id="recover-username" placeholder="enter your username" autocomplete="off" style="flex: 1;">
+                            <button type="button" id="recover-lookup-btn" class="auth-action-btn" style="width: auto; padding: 10px 14px; white-space: nowrap;">find question</button>
+                        </div>
+
+                        <div id="recover-step-2" style="display: none; margin-top: 12px;">
+                            <div class="cloudsync-recovery-question-box">
+                                <div style="font-size: 10.5px; color: var(--text-muted); margin-bottom: 3px;">your saved recovery question:</div>
+                                <div id="recover-question-display" style="font-size: 13px; color: var(--text-white); font-weight: 500;"></div>
+                            </div>
+
+                            <label style="margin-top: 12px;">your answer</label>
+                            <input type="text" id="recover-answer" placeholder="type your saved answer (close matches work!)" autocomplete="off">
+
+                            <label style="margin-top: 12px;">new password</label>
+                            <div style="position: relative;">
+                                <input type="password" id="recover-new-password" placeholder="enter new password (8+ chars)" style="width: 100%; padding-right: 35px; box-sizing: border-box;">
+                                <i class="fa-solid fa-eye password-toggle" data-target="recover-new-password" style="position: absolute; right: 10px; top: 59%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); font-size: 13px;"></i>
+                            </div>
+
+                            <div style="text-align: center;">
+                                <button type="submit" class="auth-action-btn" style="width: 72%; margin-top: 14px;">reset password &amp; sign in</button>
+                            </div>
+                        </div>
+
+                        <div style="text-align: center; margin-top: 12px;">
+                            <span id="recover-back-btn" class="hover-link" style="font-size: 12.5px; color: var(--text-muted);">back to login</span>
+                        </div>
+                    </form>
+
+                    <div style="margin-top: 14px; font-size: 13px; color: var(--text-muted); text-align: center;" id="auth-switch-container">
+                        <div>
+                            <span id="auth-prompt-text">already have an account?</span> <span id="auth-action-text" class="hover-link">login!</span>
+                        </div>
+                        <div style="margin-top: 6px; font-size: 12px;">
+                            locked out? <span id="auth-recover-open-btn" class="hover-link">recover your account</span>
+                        </div>
                     </div>
                     <div id="auth-error" style="color: #ff5555; margin-top: 10px; font-size: 13px; min-height: 18px; text-align: center;"></div>
                 </div>
                 <div id="auth-logged-in" style="display: none; text-align: center;">
-                    <p style="margin-bottom: 20px; font-size: 16px;">logged in as <span id="auth-user-display" style="color: var(--text-white);"></span></p>
+                    <p style="margin-bottom: 12px; font-size: 16px;">logged in as <span id="auth-user-display" style="color: var(--text-white);"></span></p>
 
-                    <div style="margin-bottom: 20px;">
+                    <div style="margin-bottom: 14px;">
                         <span id="sync-status-indicator" style="color: var(--text-muted); font-size: 14px;">
                             <i class="fa-solid fa-check" style="color: var(--text-white)"></i> synced
                         </span>
+                    </div>
+
+                    <div class="cloudsync-recovery-setup-card">
+                        <div id="account-recovery-status" class="cloudsync-recovery-status">
+                            <i class="fa-solid fa-key"></i>
+                            <span>account recovery question</span>
+                        </div>
+                        <select id="account-recovery-question" class="cloudsync-select">
+                            ${questionOptionsHtml}
+                        </select>
+                        <input type="text" id="account-recovery-answer" class="cloudsync-recovery-input" placeholder="write your recovery answer..." autocomplete="off">
+                        <button type="button" id="save-recovery-btn" class="auth-action-btn" style="padding: 8px 12px; font-size: 12.5px; margin-top: 4px;">
+                            save recovery question
+                        </button>
                     </div>
 
                     <button id="logout-btn" class="auth-action-btn auth-secondary-btn">
@@ -1028,12 +1131,23 @@ export class CloudSync {
     const promptText = modal.querySelector<HTMLElement>("#auth-prompt-text")!;
     const actionText = modal.querySelector<HTMLElement>("#auth-action-text")!;
     const authTitle = modal.querySelector<HTMLElement>("#auth-title")!;
+    const switchContainer = modal.querySelector<HTMLElement>("#auth-switch-container")!;
+    const recoverForm = modal.querySelector<HTMLFormElement>("#recover-form")!;
+    const recoverOpenBtn = modal.querySelector<HTMLElement>("#auth-recover-open-btn")!;
+    const recoverBackBtn = modal.querySelector<HTMLElement>("#recover-back-btn")!;
+    const recoverLookupBtn = modal.querySelector<HTMLButtonElement>("#recover-lookup-btn")!;
+    const recoverUsername = modal.querySelector<HTMLInputElement>("#recover-username")!;
+    const recoverStep2 = modal.querySelector<HTMLElement>("#recover-step-2")!;
+    const recoverQuestionDisplay = modal.querySelector<HTMLElement>("#recover-question-display")!;
+    const saveRecoveryBtn = modal.querySelector<HTMLButtonElement>("#save-recovery-btn")!;
 
     const loginUsername = modal.querySelector<HTMLInputElement>("#login-username")!;
     const loginPassword = modal.querySelector<HTMLInputElement>("#login-password")!;
 
     actionText.addEventListener("click", () => {
       const isLogin = loginForm.style.display !== "none";
+      recoverForm.style.display = "none";
+      switchContainer.style.display = "block";
       if (isLogin) {
         regUsername.value = loginUsername.value;
         regPassword.value = loginPassword.value;
@@ -1055,8 +1169,50 @@ export class CloudSync {
       this.showError("");
     });
 
+    recoverOpenBtn.addEventListener("click", () => {
+      const seedUser = (loginForm.style.display !== "none" ? loginUsername.value : regUsername.value).trim();
+      if (seedUser) recoverUsername.value = seedUser;
+      loginForm.style.display = "none";
+      regForm.style.display = "none";
+      recoverForm.style.display = "block";
+      recoverStep2.style.display = "none";
+      switchContainer.style.display = "none";
+      authTitle.textContent = "recover account";
+      this.showError("");
+      if (recoverUsername.value.trim().length >= 3) {
+        void this.handleRecoveryLookup();
+      }
+    });
+
+    recoverBackBtn.addEventListener("click", () => {
+      recoverForm.style.display = "none";
+      regForm.style.display = "none";
+      loginForm.style.display = "block";
+      switchContainer.style.display = "block";
+      authTitle.textContent = "login";
+      promptText.textContent = "don't have an account?";
+      actionText.textContent = "create an account!";
+      this.mountTurnstileWidgets();
+      this.showError("");
+    });
+
+    recoverLookupBtn.addEventListener("click", () => {
+      void this.handleRecoveryLookup();
+    });
+
+    recoverUsername.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && recoverStep2.style.display === "none") {
+        ev.preventDefault();
+        void this.handleRecoveryLookup();
+      }
+    });
+
     loginForm.addEventListener("submit", (e) => this.handleLogin(e));
     regForm.addEventListener("submit", (e) => this.handleRegister(e));
+    recoverForm.addEventListener("submit", (e) => this.handleRecoverReset(e));
+    saveRecoveryBtn.addEventListener("click", () => {
+      void this.handleSaveRecoveryQuestion();
+    });
 
     modal
       .querySelector<HTMLElement>("#logout-btn")!
@@ -1155,6 +1311,19 @@ export class CloudSync {
       if (closeBtn) closeBtn.style.display = "inline-flex";
       const gate = document.getElementById("auth-gate-backdrop");
       if (gate) gate.remove();
+
+      const recSelect = document.getElementById("account-recovery-question") as HTMLSelectElement | null;
+      const recStatus = document.getElementById("account-recovery-status");
+      if (recSelect && this.user?.recoveryQuestionId) {
+        recSelect.value = String(this.user.recoveryQuestionId);
+      }
+      if (recStatus) {
+        if (this.user?.hasRecoveryQuestion) {
+          recStatus.innerHTML = `<i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i> <span>recovery question saved (update anytime)</span>`;
+        } else {
+          recStatus.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color: #facc15;"></i> <span>choose a recovery question &amp; save an answer</span>`;
+        }
+      }
     } else {
       if (loggedInView) loggedInView.style.display = "none";
       if (formsView) formsView.style.display = "block";
@@ -1266,6 +1435,11 @@ export class CloudSync {
         this.setSession(data as unknown as SessionData);
         await this.toggleModal();
         await this.restoreData();
+        if (this.isAuthenticated && this.user?.hasRecoveryQuestion === false) {
+          setTimeout(() => {
+            void this.promptMissingRecoveryQuestion();
+          }, 500);
+        }
       } else {
         if (toastController) toastController.hide();
         this._loginTurnstileToken = "";
@@ -1299,6 +1473,12 @@ export class CloudSync {
     const password = (
       document.getElementById("reg-password") as HTMLInputElement
     ).value;
+    const recoveryQuestionId = (
+      document.getElementById("reg-recovery-question") as HTMLSelectElement | null
+    )?.value || "q1";
+    const recoveryAnswer = (
+      document.getElementById("reg-recovery-answer") as HTMLInputElement | null
+    )?.value.trim() || "";
 
     if (!username || !password) {
       this.showError("please fill in both fields!");
@@ -1307,6 +1487,17 @@ export class CloudSync {
           "error",
           "please fill in both username and password!",
           "triangle-exclamation",
+        );
+      return;
+    }
+
+    if (recoveryAnswer.length < 2) {
+      this.showError("please write an answer for your recovery question!");
+      if (window.showToast)
+        window.showToast(
+          "error",
+          "please write an answer for your recovery question!",
+          "key",
         );
       return;
     }
@@ -1348,6 +1539,8 @@ export class CloudSync {
         body: JSON.stringify({
           username,
           password,
+          recoveryQuestionId,
+          recoveryAnswer,
           fingerprint_id: deviceSig.fingerprint_id,
           storage_token: deviceSig.storage_token,
           "cf-turnstile-response": turnstileToken,
@@ -1394,6 +1587,139 @@ export class CloudSync {
       this.showError(msg);
       if (window.showToast)
         window.showToast("error", msg, "warning");
+    }
+  }
+
+  async handleRecoveryLookup(): Promise<void> {
+    const usernameInput = document.getElementById("recover-username") as HTMLInputElement | null;
+    const step2 = document.getElementById("recover-step-2") as HTMLElement | null;
+    const questionDisplay = document.getElementById("recover-question-display") as HTMLElement | null;
+    const lookupBtn = document.getElementById("recover-lookup-btn") as HTMLButtonElement | null;
+    const username = usernameInput?.value.trim() || "";
+
+    if (username.length < 3) {
+      this.showError("enter your username first!");
+      return;
+    }
+
+    this.showError("");
+    if (lookupBtn) lookupBtn.disabled = true;
+    try {
+      const res = await fetch(
+        `/api/auth/recovery/lookup?username=${encodeURIComponent(username)}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        if (step2) step2.style.display = "none";
+        this.showError(data?.error || "could not find recovery question for that username");
+        return;
+      }
+      if (usernameInput && data.username) usernameInput.value = String(data.username);
+      if (questionDisplay) questionDisplay.textContent = String(data.questionText || "");
+      if (step2) step2.style.display = "block";
+      (document.getElementById("recover-answer") as HTMLInputElement | null)?.focus();
+    } catch {
+      this.showError("connection error looking up account");
+    } finally {
+      if (lookupBtn) lookupBtn.disabled = false;
+    }
+  }
+
+  async handleRecoverReset(e: Event): Promise<void> {
+    e.preventDefault();
+    const username = (
+      document.getElementById("recover-username") as HTMLInputElement | null
+    )?.value.trim() || "";
+    const answer = (
+      document.getElementById("recover-answer") as HTMLInputElement | null
+    )?.value.trim() || "";
+    const newPassword = (
+      document.getElementById("recover-new-password") as HTMLInputElement | null
+    )?.value || "";
+
+    if (!username || !answer || !newPassword) {
+      this.showError("please enter your answer and a new password!");
+      return;
+    }
+    if (newPassword.length < 8) {
+      this.showError("new password must be at least 8 characters!");
+      return;
+    }
+
+    this.showError("");
+    try {
+      const res = await fetch("/api/auth/recovery/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ username, answer, newPassword }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        const msg = data?.error || "could not recover account";
+        this.showError(msg);
+        if (window.showToast) window.showToast("error", msg, "warning");
+        return;
+      }
+
+      if (window.showToast) {
+        window.showToast("success", "password reset! welcome back", "check");
+      }
+      this.setSession(data as unknown as SessionData);
+      await this.toggleModal();
+      await this.restoreData();
+    } catch {
+      this.showError("connection error resetting password");
+    }
+  }
+
+  async handleSaveRecoveryQuestion(): Promise<void> {
+    const qSelect = document.getElementById("account-recovery-question") as HTMLSelectElement | null;
+    const ansInput = document.getElementById("account-recovery-answer") as HTMLInputElement | null;
+    const saveBtn = document.getElementById("save-recovery-btn") as HTMLButtonElement | null;
+    const questionId = qSelect?.value || "q1";
+    const answer = ansInput?.value.trim() || "";
+
+    if (answer.length < 2) {
+      if (window.showToast) {
+        window.showToast("error", "write an answer (at least 2 characters) first!", "key");
+      }
+      return;
+    }
+
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+      const res = await fetchWithTimeout("/api/auth/recovery/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ questionId, answer }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        if (window.showToast) {
+          window.showToast("error", data?.error || "failed to save recovery question", "warning");
+        }
+        return;
+      }
+      this.user = {
+        ...this.user,
+        hasRecoveryQuestion: true,
+        recoveryQuestionId: questionId,
+        recoveryQuestionText: data.questionText || "",
+      };
+      localStorage.setItem("auth_user", JSON.stringify(this.user));
+      if (ansInput) ansInput.value = "";
+      this.updateModalState();
+      if (window.showToast) {
+        window.showToast("success", "recovery question & answer saved!", "shield-halved");
+      }
+    } catch {
+      if (window.showToast) {
+        window.showToast("error", "failed to save recovery question", "warning");
+      }
+    } finally {
+      if (saveBtn) saveBtn.disabled = false;
     }
   }
 
