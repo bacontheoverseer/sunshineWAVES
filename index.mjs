@@ -2334,6 +2334,7 @@ function applyChatMetaKvMap(kvMap) {
     const byId = new Map();
     for (const item of [...bannedDevices, ...sBannedDevs]) {
       if (!item || typeof item !== "object") continue;
+      if (isAutoFalsePositiveBanReason(item.banned_reason)) continue;
       const fp = String(item.fingerprint_id || "").trim();
       const st = String(item.storage_token || "").trim();
       if (!fp && !st) continue;
@@ -2430,6 +2431,7 @@ function ensureChatMetaLoaded() {
       )
       .all();
     for (const b of localBans || []) {
+      if (isAutoFalsePositiveBanReason(b?.banned_reason)) continue;
       const fp = String(b?.fingerprint_id || "").trim();
       const st = String(b?.storage_token || "").trim();
       if (!fp && !st) continue;
@@ -2676,28 +2678,23 @@ function recordUserDeviceSignature(username, { fingerprint_id = "", storage_toke
   }
 }
 
+function isAutoFalsePositiveBanReason(reason) {
+  const r = String(reason || "").trim().toLowerCase();
+  return r.includes("auto-shadowban") || r.includes("spam filter");
+}
+
 function checkDeviceBanForSignup({ fingerprint_id = "", storage_token = "", highConfidenceSpam = false } = {}) {
   ensureChatMetaLoaded();
-  const fp = String(fingerprint_id || "").trim();
   const st = String(storage_token || "").trim();
-  if (!fp && !st) {
+  if (!st) {
     return { hardBlocked: false, shadowban: false, matchedEntry: null };
   }
-  if (st) {
-    const tokenMatch = bannedDevices.find((b) => b.storage_token && b.storage_token === st);
-    if (tokenMatch) {
-      return { hardBlocked: true, shadowban: false, matchedEntry: tokenMatch };
-    }
-  }
-  if (fp) {
-    const fpMatches = bannedDevices.filter((b) => b.fingerprint_id && b.fingerprint_id === fp);
-    if (fpMatches.length > 0) {
-      const spamFlagged = fpMatches.find((b) => b.high_confidence_spam) || (highConfidenceSpam ? fpMatches[0] : null);
-      if (spamFlagged || highConfidenceSpam) {
-        return { hardBlocked: true, shadowban: false, matchedEntry: spamFlagged || fpMatches[0] };
-      }
-      return { hardBlocked: false, shadowban: true, matchedEntry: fpMatches[0] };
-    }
+  // Only match exact browser storage_token for explicit staff device bans (never shared hardware fingerprint_id or auto-filter triggers)
+  const tokenMatch = bannedDevices.find(
+    (b) => b.storage_token && b.storage_token === st && !isAutoFalsePositiveBanReason(b.banned_reason)
+  );
+  if (tokenMatch) {
+    return { hardBlocked: false, shadowban: true, matchedEntry: tokenMatch };
   }
   return { hardBlocked: false, shadowban: false, matchedEntry: null };
 }
@@ -3320,6 +3317,7 @@ async function ensureChatMetaReadyAsync() {
               saveStripeSubscriptions(Array.from(byId.values()));
             }
             for (const row of bdRes.rows || []) {
+              if (isAutoFalsePositiveBanReason(row.banned_reason)) continue;
               const fp = String(row.fingerprint_id || "").trim();
               const st = String(row.storage_token || "").trim();
               if (!fp && !st) continue;
@@ -4669,17 +4667,11 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
         .json({ success: false, user: null, error: "security verification failed — please refresh and try again" });
     }
 
-    const spamUsernameMatch = matchesSpamFilter(username);
     const banCheck = checkDeviceBanForSignup({
       fingerprint_id: fingerprintId,
       storage_token: storageToken,
-      highConfidenceSpam: Boolean(spamUsernameMatch || req.body?.high_confidence_spam),
+      highConfidenceSpam: false,
     });
-    if (banCheck.hardBlocked) {
-      return res
-        .status(403)
-        .json({ success: false, user: null, error: "Registration temporarily unavailable" });
-    }
 
     if (isReservedSystemUsername(username)) {
       return res
@@ -4743,13 +4735,11 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
         storage_token: storageToken,
       });
     }
-    if (banCheck.shadowban || spamUsernameMatch) {
+    if (banCheck.shadowban) {
       setAccountShadowbanned(username, true, {
-        reason: banCheck.shadowban
-          ? "signup matched banned device fingerprint (Chromebook hybrid shadowban)"
-          : "signup username matched spam filter",
-        recordDevice: Boolean(spamUsernameMatch),
-        highConfidenceSpam: Boolean(spamUsernameMatch),
+        reason: "signup matched staff-banned device storage token",
+        recordDevice: false,
+        highConfidenceSpam: false,
       });
     }
 
@@ -9382,17 +9372,6 @@ app.post("/api/chat/send", async (req, res) => {
     if (isBurstFlood || isDuplicateMsg || textFloodReason || spamPatternMatched) {
       track.spamStrikes = track.spamStrikes.filter((t) => nowMs - t < 120000);
       track.spamStrikes.push(nowMs);
-
-      const isHighConfidenceRaid =
-        Boolean(spamPatternMatched) &&
-        /cookie|gamma/i.test(String(spamPatternMatched));
-      if (isHighConfidenceRaid && !isAccountShadowbanned(authorKey)) {
-        setAccountShadowbanned(authorName, true, {
-          reason: `auto-shadowban triggered by raid spam filter (${spamPatternMatched})`,
-          recordDevice: true,
-          highConfidenceSpam: true,
-        });
-      }
 
       if (track.spamStrikes.length >= 3) {
         const until = nowMs + 2 * 60 * 1000;
