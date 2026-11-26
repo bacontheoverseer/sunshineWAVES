@@ -933,8 +933,8 @@ export class CloudSync {
                         <div>
                             <span id="auth-prompt-text">already have an account?</span> <span id="auth-action-text" class="hover-link">login!</span>
                         </div>
-                        <div style="margin-top: 8px;">
-                            <button type="button" id="auth-recover-open-btn" class="cloudsync-tiny-recover-btn">recover your account</button>
+                        <div style="margin-top: 6px;">
+                            <span role="button" tabindex="0" id="auth-recover-open-btn" class="cloudsync-tiny-recover-btn">recover your account</span>
                         </div>
                     </div>
                     <div id="auth-error" style="color: #ff5555; margin-top: 10px; font-size: 13px; min-height: 18px; text-align: center;"></div>
