@@ -2,10 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "preact/hooks";
 import { checkContent } from "../core/contentFilter.ts";
 import {
   ADDON_APPS_CATALOG,
-  getAddonAppOpenState,
   getInstalledAddonApps,
   installAddonApp,
-  toggleAddonAppOpen,
+  openAddonAppUi,
   uninstallAddonApp,
 } from "../core/addonApps.ts";
 
@@ -927,7 +926,6 @@ export default function ChatPartnersPopover({
           <div class="chat-partners-apps-list">
             {ADDON_APPS_CATALOG.map((app) => {
               const isInstalled = installedApps.includes(app.id);
-              const isOpen = isInstalled && getAddonAppOpenState(app.id);
               const isComingSoon = app.status === "coming-soon";
               return (
                 <div
@@ -960,17 +958,14 @@ export default function ChatPartnersPopover({
                       <>
                         <button
                           type="button"
-                          class={`chat-partners-send-pill${isOpen ? " is-active-app" : ""}`}
+                          class="chat-partners-send-pill"
                           onClick={() => {
-                            const nextOpen = toggleAddonAppOpen(app.id);
-                            notifyToast(
-                              nextOpen ? `opened ${app.name}` : `closed ${app.name}`,
-                              "info"
-                            );
+                            openAddonAppUi(app.id);
+                            onClose();
                           }}
                         >
-                          <i class={`fa-solid ${isOpen ? "fa-eye-slash" : "fa-up-right-from-square"}`} />
-                          <span>{isOpen ? "hide" : "open"}</span>
+                          <i class="fa-solid fa-up-right-from-square" />
+                          <span>open</span>
                         </button>
                         <button
                           type="button"
@@ -991,6 +986,7 @@ export default function ChatPartnersPopover({
                         onClick={() => {
                           installAddonApp(app.id);
                           notifyToast(`installed ${app.name}!`, "success");
+                          onClose();
                         }}
                       >
                         <i class="fa-solid fa-download" />

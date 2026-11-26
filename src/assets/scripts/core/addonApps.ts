@@ -14,11 +14,20 @@ export interface AddonAppDef {
   status: "ready" | "coming-soon";
 }
 
+export interface FollowedStreamer {
+  id: string;
+  platform: "twitch" | "youtube";
+  channel: string; // twitch login (e.g. "kaicenat") or youtube path (e.g. "@ishowspeed" or "channel/UC...")
+  label: string;
+  rawUrl: string;
+  addedAt: number;
+}
+
 export const ADDON_APPS_CATALOG: AddonAppDef[] = [
   {
     id: "streamwatcher",
     name: "streamwatcher",
-    tagline: "watch any live stream in a draggable, resizable rounded PiP overlay on every page",
+    tagline: "follow twitch & youtube streamers — auto-pops a draggable, resizable muted PiP when they go live",
     icon: "fa-tv",
     accent: "#a855f7",
     status: "ready",
@@ -43,6 +52,7 @@ export const ADDON_APPS_CATALOG: AddonAppDef[] = [
 
 const INSTALLED_ADDONS_KEY = "cookie_installed_addons_v1";
 const OPEN_ADDONS_KEY = "cookie_open_addons_v1";
+const FOLLOWED_STREAMERS_KEY = "cookie_streamwatcher_follows_v1";
 
 function emitAddonsChanged() {
   try {
@@ -73,7 +83,8 @@ export function installAddonApp(id: string): void {
       localStorage.setItem(INSTALLED_ADDONS_KEY, JSON.stringify([...cur, id]));
     } catch {}
   }
-  setAddonAppOpenState(id, true);
+  emitAddonsChanged();
+  openAddonAppUi(id);
 }
 
 export function uninstallAddonApp(id: string): void {
@@ -109,57 +120,51 @@ export function setAddonAppOpenState(id: string, open: boolean): void {
   emitAddonsChanged();
 }
 
-export function toggleAddonAppOpen(id: string): boolean {
-  const next = !getAddonAppOpenState(id);
-  setAddonAppOpenState(id, next);
-  return next;
+export function openAddonAppUi(id: string): void {
+  try {
+    window.dispatchEvent(new CustomEvent("cookie-addon-open-ui", { detail: { id } }));
+  } catch {}
 }
 
-export interface ParsedStreamTarget {
-  embedUrl: string;
-  label: string;
-  platform: "twitch" | "youtube" | "kick" | "web";
-  error?: string;
+export function getFollowedStreamers(): FollowedStreamer[] {
+  try {
+    const raw = localStorage.getItem(FOLLOWED_STREAMERS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (s): s is FollowedStreamer =>
+        Boolean(s && typeof s === "object" && (s.platform === "twitch" || s.platform === "youtube") && s.channel)
+    );
+  } catch {
+    return [];
+  }
 }
 
-export function parseStreamEmbedUrl(rawInput: string): ParsedStreamTarget | null {
+export function parseFollowChannelUrl(
+  rawInput: string
+): { streamer?: FollowedStreamer; error?: string } {
   const raw = (rawInput || "").trim();
-  if (!raw) return null;
+  if (!raw) return { error: "enter a twitch or youtube channel url" };
 
   const safety = checkContent(raw);
   if (safety.blocked) {
-    return {
-      embedUrl: "",
-      label: "",
-      platform: "web",
-      error: safety.reason || "blocked by safety filter",
-    };
+    return { error: safety.reason || "blocked by safety filter" };
   }
 
-  const parentHost =
-    typeof window !== "undefined" && window.location.hostname
-      ? window.location.hostname
-      : "localhost";
-
-  // Shorthand twitch:channel
-  const twitchShort = /^twitch:([a-zA-Z0-9_]{2,32})$/i.exec(raw);
-  if (twitchShort) {
-    const ch = twitchShort[1].toLowerCase();
+  // Shorthand twitch:username
+  const twShort = /^twitch:([a-zA-Z0-9_]{2,32})$/i.exec(raw);
+  if (twShort) {
+    const ch = twShort[1].toLowerCase();
     return {
-      embedUrl: `https://player.twitch.tv/?channel=${encodeURIComponent(ch)}&parent=${encodeURIComponent(parentHost)}&muted=false`,
-      label: `twitch.tv/${ch}`,
-      platform: "twitch",
-    };
-  }
-
-  // Shorthand kick:channel
-  const kickShort = /^kick:([a-zA-Z0-9_-]{2,32})$/i.exec(raw);
-  if (kickShort) {
-    const ch = kickShort[1].toLowerCase();
-    return {
-      embedUrl: `https://player.kick.com/${encodeURIComponent(ch)}`,
-      label: `kick.com/${ch}`,
-      platform: "kick",
+      streamer: {
+        id: `twitch:${ch}`,
+        platform: "twitch",
+        channel: ch,
+        label: `twitch.tv/${ch}`,
+        rawUrl: `https://twitch.tv/${ch}`,
+        addedAt: Date.now(),
+      },
     };
   }
 
@@ -168,96 +173,104 @@ export function parseStreamEmbedUrl(rawInput: string): ParsedStreamTarget | null
   try {
     parsed = new URL(withProto);
   } catch {
-    return {
-      embedUrl: "",
-      label: "",
-      platform: "web",
-      error: "enter a valid twitch, youtube, kick, or stream url",
-    };
-  }
-
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return {
-      embedUrl: "",
-      label: "",
-      platform: "web",
-      error: "only https stream urls are supported",
-    };
+    return { error: "paste a valid twitch.tv/channel or youtube.com/@channel url" };
   }
 
   const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
-  const pathParts = parsed.pathname.split("/").filter(Boolean);
+  const parts = parsed.pathname.split("/").filter(Boolean);
 
-  // Twitch URLs
-  if (host === "twitch.tv" || host === "m.twitch.tv" || host === "player.twitch.tv") {
-    const ch = parsed.searchParams.get("channel") || pathParts[0] || "";
-    if (!ch || !/^[a-zA-Z0-9_]{2,32}$/.test(ch)) {
-      return {
-        embedUrl: "",
-        label: "",
+  if (host === "twitch.tv" || host === "m.twitch.tv") {
+    const login = (parts[0] || "").toLowerCase();
+    if (!login || !/^[a-z0-9_]{2,32}$/.test(login)) {
+      return { error: "enter a twitch channel url (e.g. twitch.tv/kaicenat)" };
+    }
+    return {
+      streamer: {
+        id: `twitch:${login}`,
         platform: "twitch",
-        error: "enter a twitch channel url (e.g. twitch.tv/channel)",
-      };
-    }
-    return {
-      embedUrl: `https://player.twitch.tv/?channel=${encodeURIComponent(ch.toLowerCase())}&parent=${encodeURIComponent(parentHost)}&muted=false`,
-      label: `twitch.tv/${ch.toLowerCase()}`,
-      platform: "twitch",
+        channel: login,
+        label: `twitch.tv/${login}`,
+        rawUrl: `https://twitch.tv/${login}`,
+        addedAt: Date.now(),
+      },
     };
   }
 
-  // YouTube live / watch / shorts / youtu.be
-  if (
-    host === "youtube.com" ||
-    host === "m.youtube.com" ||
-    host === "youtu.be" ||
-    host === "youtube-nocookie.com"
-  ) {
-    let vid = "";
-    if (host === "youtu.be") {
-      vid = pathParts[0] || "";
-    } else if (pathParts[0] === "watch") {
-      vid = parsed.searchParams.get("v") || "";
-    } else if (pathParts[0] === "live" || pathParts[0] === "embed" || pathParts[0] === "shorts") {
-      vid = pathParts[1] || "";
+  if (host === "youtube.com" || host === "m.youtube.com") {
+    let channelPath = "";
+    let label = "";
+    if (parts[0]?.startsWith("@")) {
+      channelPath = parts[0];
+      label = `youtube.com/${parts[0]}`;
+    } else if (
+      (parts[0] === "channel" || parts[0] === "c" || parts[0] === "user") &&
+      parts[1]
+    ) {
+      channelPath = `${parts[0]}/${parts[1]}`;
+      label = `youtube.com/${parts[0]}/${parts[1]}`;
     }
-    if (vid && /^[a-zA-Z0-9_-]{6,20}$/.test(vid)) {
-      return {
-        embedUrl: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}?autoplay=1&rel=0`,
-        label: `youtube · ${vid}`,
+    if (!channelPath) {
+      return { error: "enter a youtube channel url (e.g. youtube.com/@handle)" };
+    }
+    return {
+      streamer: {
+        id: `youtube:${channelPath.toLowerCase()}`,
         platform: "youtube",
-      };
-    }
-    return {
-      embedUrl: "",
-      label: "",
-      platform: "youtube",
-      error: "paste a youtube live or video link (e.g. youtube.com/watch?v=... or youtube.com/live/...)",
+        channel: channelPath,
+        label,
+        rawUrl: `https://www.youtube.com/${channelPath}`,
+        addedAt: Date.now(),
+      },
     };
   }
 
-  // Kick URLs
-  if (host === "kick.com" || host === "player.kick.com") {
-    const ch = pathParts[0] || "";
-    if (!ch || !/^[a-zA-Z0-9_-]{2,32}$/.test(ch)) {
-      return {
-        embedUrl: "",
-        label: "",
-        platform: "kick",
-        error: "enter a kick channel url (e.g. kick.com/channel)",
-      };
-    }
-    return {
-      embedUrl: `https://player.kick.com/${encodeURIComponent(ch.toLowerCase())}`,
-      label: `kick.com/${ch.toLowerCase()}`,
-      platform: "kick",
-    };
-  }
+  return { error: "only twitch and youtube channel urls are supported right now" };
+}
 
-  // Generic HTTPS embed/stream URL
-  return {
-    embedUrl: parsed.toString(),
-    label: host,
-    platform: "web",
-  };
+export function followStreamer(rawInput: string): {
+  added: boolean;
+  streamer?: FollowedStreamer;
+  error?: string;
+} {
+  const res = parseFollowChannelUrl(rawInput);
+  if (res.error || !res.streamer) {
+    return { added: false, error: res.error || "invalid channel url" };
+  }
+  const cur = getFollowedStreamers();
+  if (cur.some((s) => s.id === res.streamer!.id)) {
+    return { added: false, error: `already following ${res.streamer.label}` };
+  }
+  const next = [res.streamer, ...cur].slice(0, 20);
+  try {
+    localStorage.setItem(FOLLOWED_STREAMERS_KEY, JSON.stringify(next));
+  } catch {}
+  emitAddonsChanged();
+  return { added: true, streamer: res.streamer };
+}
+
+export function unfollowStreamer(id: string): void {
+  const next = getFollowedStreamers().filter((s) => s.id !== id);
+  try {
+    localStorage.setItem(FOLLOWED_STREAMERS_KEY, JSON.stringify(next));
+  } catch {}
+  emitAddonsChanged();
+}
+
+export function buildStreamEmbedUrl(
+  platform: "twitch" | "youtube",
+  channel: string,
+  opts: { muted: boolean; videoId?: string }
+): string {
+  const parentHost =
+    typeof window !== "undefined" && window.location.hostname
+      ? window.location.hostname
+      : "localhost";
+  if (platform === "twitch") {
+    const login = channel.replace(/^@/, "").toLowerCase();
+    return `https://player.twitch.tv/?channel=${encodeURIComponent(login)}&parent=${encodeURIComponent(parentHost)}&muted=${opts.muted ? "true" : "false"}`;
+  }
+  if (opts.videoId) {
+    return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(opts.videoId)}?autoplay=1&mute=${opts.muted ? "1" : "0"}&enablejsapi=1&rel=0`;
+  }
+  return "";
 }

@@ -8963,6 +8963,127 @@ app.get("/api/chat/partners/music", async (req, res) => {
   }
 });
 
+const streamLiveCheckCache = new Map(); // cacheKey -> { expiresAt, payload }
+
+app.get("/api/addons/streamwatcher/check", async (req, res) => {
+  try {
+    const platform = String(req.query?.platform || "").trim().toLowerCase();
+    const rawChannel = String(req.query?.channel || "").trim().slice(0, 120);
+    if ((platform !== "twitch" && platform !== "youtube") || !rawChannel) {
+      return res.status(400).json({ success: false, live: false, error: "invalid platform or channel" });
+    }
+
+    const cacheKey = `${platform}:${rawChannel.toLowerCase()}`;
+    const cached = streamLiveCheckCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+      return res.json(cached.payload);
+    }
+
+    if (platform === "twitch") {
+      const login = rawChannel.replace(/^@/, "").toLowerCase();
+      if (!/^[a-z0-9_]{2,32}$/.test(login)) {
+        return res.status(400).json({ success: false, live: false, error: "invalid twitch channel" });
+      }
+      let live = false;
+      let uptime = "";
+      let title = "";
+      try {
+        const upRes = await fetch(`https://decapi.me/twitch/uptime/${encodeURIComponent(login)}`, {
+          headers: { "User-Agent": "OperationCookie-StreamWatcher/1.0" },
+          signal: AbortSignal.timeout(5500),
+        });
+        if (upRes.ok) {
+          const text = (await upRes.text()).trim();
+          const lower = text.toLowerCase();
+          if (
+            text &&
+            !lower.includes("offline") &&
+            !lower.includes("no user with the name") &&
+            !lower.includes("error") &&
+            !lower.includes("not found")
+          ) {
+            live = true;
+            uptime = text.slice(0, 60);
+          }
+        }
+      } catch {}
+
+      if (live) {
+        try {
+          const titleRes = await fetch(`https://decapi.me/twitch/title/${encodeURIComponent(login)}`, {
+            headers: { "User-Agent": "OperationCookie-StreamWatcher/1.0" },
+            signal: AbortSignal.timeout(3500),
+          });
+          if (titleRes.ok) {
+            title = (await titleRes.text()).trim().slice(0, 120);
+          }
+        } catch {}
+      }
+
+      const payload = {
+        success: true,
+        live,
+        platform: "twitch",
+        channel: login,
+        uptime,
+        title,
+      };
+      streamLiveCheckCache.set(cacheKey, { expiresAt: Date.now() + 45000, payload });
+      return res.json(payload);
+    }
+
+    // YouTube live check
+    let ytPath = rawChannel.replace(/^\/+/, "");
+    if (!ytPath.startsWith("@") && !ytPath.startsWith("channel/") && !ytPath.startsWith("c/") && !ytPath.startsWith("user/")) {
+      ytPath = `@${ytPath}`;
+    }
+    const targetUrl = `https://www.youtube.com/${ytPath}/live`;
+    let live = false;
+    let videoId = "";
+    let title = "";
+    try {
+      const ytRes = await fetch(targetUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        redirect: "follow",
+        signal: AbortSignal.timeout(6500),
+      });
+      if (ytRes.ok) {
+        const html = (await ytRes.text()).slice(0, 350000);
+        const isLiveNow =
+          /"isLiveNow"\s*:\s*true/.test(html) ||
+          (/"isLive"\s*:\s*true/.test(html) && !/"isUpcoming"\s*:\s*true/.test(html));
+        if (isLiveNow) {
+          const canonMatch = html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']https?:\/\/www\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/i);
+          const vidMatch = canonMatch || html.match(/"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/);
+          if (vidMatch?.[1]) {
+            live = true;
+            videoId = vidMatch[1];
+            const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] || "";
+            title = ogTitle.replace(/\s+/g, " ").trim().slice(0, 120);
+          }
+        }
+      }
+    } catch {}
+
+    const payload = {
+      success: true,
+      live,
+      platform: "youtube",
+      channel: ytPath,
+      videoId,
+      title,
+    };
+    streamLiveCheckCache.set(cacheKey, { expiresAt: Date.now() + 45000, payload });
+    return res.json(payload);
+  } catch (err) {
+    res.status(500).json({ success: false, live: false, error: err?.message || "live check failed" });
+  }
+});
+
 app.post("/api/chat/partners/embed-preview", async (req, res) => {
   try {
     let rawUrl = String(req.body?.url || "").trim();

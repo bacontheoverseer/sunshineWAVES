@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
-  getAddonAppOpenState,
+  FollowedStreamer,
+  buildStreamEmbedUrl,
+  followStreamer,
+  getFollowedStreamers,
   isAddonAppInstalled,
-  parseStreamEmbedUrl,
-  setAddonAppOpenState,
+  unfollowStreamer,
 } from "../core/addonApps.ts";
 
 interface StreamWatcherGeometry {
@@ -13,22 +15,37 @@ interface StreamWatcherGeometry {
   h: number;
 }
 
-interface RecentStream {
-  raw: string;
-  embedUrl: string;
+interface LiveStatusInfo {
+  live: boolean;
+  videoId?: string;
+  title?: string;
+  uptime?: string;
+  checkedAt: number;
+}
+
+interface ActivePipStream {
+  streamerId: string;
+  platform: "twitch" | "youtube";
+  channel: string;
   label: string;
-  platform: "twitch" | "youtube" | "kick" | "web";
+  videoId?: string;
+  title?: string;
 }
 
 const GEOMETRY_KEY = "cookie_streamwatcher_geom_v1";
-const STREAM_KEY = "cookie_streamwatcher_stream_v1";
-const RECENTS_KEY = "cookie_streamwatcher_recents_v1";
+const MIN_W = 270;
+const MIN_H = 185;
+const LIVE_POLL_INTERVAL_MS = 60 * 1000;
 
-const MIN_W = 260;
-const MIN_H = 180;
+function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
+  const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
+  if (typeof w.showToast === "function") {
+    w.showToast(message, type);
+  }
+}
 
 function loadGeometry(): StreamWatcherGeometry {
-  const defaultW = 380;
+  const defaultW = 384;
   const defaultH = 248;
   const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
   const vh = typeof window !== "undefined" ? window.innerHeight : 720;
@@ -53,64 +70,162 @@ function loadGeometry(): StreamWatcherGeometry {
   }
 }
 
-function loadSavedStream(): RecentStream | null {
-  try {
-    const raw = localStorage.getItem(STREAM_KEY);
-    if (!raw) return null;
-    const p = JSON.parse(raw);
-    if (p && typeof p.embedUrl === "string" && p.embedUrl) {
-      return p as RecentStream;
-    }
-  } catch {}
-  return null;
-}
-
-function loadRecentStreams(): RecentStream[] {
-  try {
-    const raw = localStorage.getItem(RECENTS_KEY);
-    if (!raw) return [];
-    const p = JSON.parse(raw);
-    return Array.isArray(p) ? p.slice(0, 4) : [];
-  } catch {
-    return [];
-  }
-}
-
 export default function StreamWatcherOverlay() {
-  const [visible, setVisible] = useState<boolean>(
-    () => isAddonAppInstalled("streamwatcher") && getAddonAppOpenState("streamwatcher")
-  );
-  const [geom, setGeom] = useState<StreamWatcherGeometry>(() => loadGeometry());
-  const [minimized, setMinimized] = useState(false);
-  const [activeStream, setActiveStream] = useState<RecentStream | null>(() => loadSavedStream());
-  const [recents, setRecents] = useState<RecentStream[]>(() => loadRecentStreams());
-  const [editingUrl, setEditingUrl] = useState<boolean>(() => !loadSavedStream());
-  const [urlInput, setUrlInput] = useState<string>(() => loadSavedStream()?.raw || "");
-  const [errorMsg, setErrorMsg] = useState("");
-  const [reloadNonce, setReloadNonce] = useState(0);
-  const [interacting, setInteracting] = useState(false);
+  const [installed, setInstalled] = useState<boolean>(() => isAddonAppInstalled("streamwatcher"));
+  const [managerOpen, setManagerOpen] = useState(false);
+  const [follows, setFollows] = useState<FollowedStreamer[]>(() => getFollowedStreamers());
+  const [liveMap, setLiveMap] = useState<Record<string, LiveStatusInfo>>({});
+  const [checkingLive, setCheckingLive] = useState(false);
 
+  // Follow form state
+  const [followInput, setFollowInput] = useState("");
+  const [followError, setFollowError] = useState("");
+
+  // Active PiP state
+  const [activeStream, setActiveStream] = useState<ActivePipStream | null>(null);
+  const [isMuted, setIsMuted] = useState(true);
+  const [isHoveringStream, setIsHoveringStream] = useState(false);
+  const [minimized, setMinimized] = useState(false);
+  const [geom, setGeom] = useState<StreamWatcherGeometry>(() => loadGeometry());
+  const [interacting, setInteracting] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
+
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const geomRef = useRef(geom);
   geomRef.current = geom;
+  const activeStreamRef = useRef(activeStream);
+  activeStreamRef.current = activeStream;
+  const dismissedLiveIdsRef = useRef<Set<string>>(new Set());
 
-  const syncVisible = useCallback(() => {
-    const shouldShow =
-      isAddonAppInstalled("streamwatcher") && getAddonAppOpenState("streamwatcher");
-    setVisible(shouldShow);
+  const syncFromStorage = useCallback(() => {
+    const isInst = isAddonAppInstalled("streamwatcher");
+    setInstalled(isInst);
+    setFollows(getFollowedStreamers());
+    if (!isInst) {
+      setManagerOpen(false);
+      setActiveStream(null);
+    }
   }, []);
 
   useEffect(() => {
-    window.addEventListener("cookie-addons-updated", syncVisible);
-    window.addEventListener("storage", syncVisible);
-    document.addEventListener("cloudsync-restored", syncVisible);
-    return () => {
-      window.removeEventListener("cookie-addons-updated", syncVisible);
-      window.removeEventListener("storage", syncVisible);
-      document.removeEventListener("cloudsync-restored", syncVisible);
+    const onOpenUi = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.id === "streamwatcher") {
+        setInstalled(isAddonAppInstalled("streamwatcher"));
+        setFollows(getFollowedStreamers());
+        setManagerOpen(true);
+      }
     };
-  }, [syncVisible]);
+    window.addEventListener("cookie-addons-updated", syncFromStorage);
+    window.addEventListener("cookie-addon-open-ui", onOpenUi);
+    window.addEventListener("storage", syncFromStorage);
+    document.addEventListener("cloudsync-restored", syncFromStorage);
+    return () => {
+      window.removeEventListener("cookie-addons-updated", syncFromStorage);
+      window.removeEventListener("cookie-addon-open-ui", onOpenUi);
+      window.removeEventListener("storage", syncFromStorage);
+      document.removeEventListener("cloudsync-restored", syncFromStorage);
+    };
+  }, [syncFromStorage]);
 
-  // Keep PiP clamped inside viewport on window resize
+  const openStreamInPip = useCallback(
+    (s: FollowedStreamer, liveInfo?: LiveStatusInfo, opts?: { autoTriggered?: boolean }) => {
+      dismissedLiveIdsRef.current.delete(s.id);
+      setActiveStream({
+        streamerId: s.id,
+        platform: s.platform,
+        channel: s.channel,
+        label: s.label,
+        videoId: liveInfo?.videoId,
+        title: liveInfo?.title,
+      });
+      setIsMuted(true); // Always starts muted; hover over stream to unmute
+      setMinimized(false);
+      setReloadNonce((n) => n + 1);
+      if (opts?.autoTriggered) {
+        notifyToast(`${s.label} is live! hover stream to unmute`, "info");
+      }
+    },
+    []
+  );
+
+  // Background live checker for all followed streamers
+  const checkFollowedLive = useCallback(
+    async (listOverride?: FollowedStreamer[]) => {
+      if (!isAddonAppInstalled("streamwatcher")) return;
+      const list = listOverride || getFollowedStreamers();
+      if (list.length === 0) return;
+
+      setCheckingLive(true);
+      try {
+        const results = await Promise.all(
+          list.map(async (s) => {
+            try {
+              const res = await fetch(
+                `/api/addons/streamwatcher/check?platform=${encodeURIComponent(s.platform)}&channel=${encodeURIComponent(s.channel)}`,
+                { cache: "no-store" }
+              );
+              const data = res.ok ? await res.json().catch(() => null) : null;
+              return {
+                streamer: s,
+                info: {
+                  live: Boolean(data?.live),
+                  videoId: typeof data?.videoId === "string" ? data.videoId : undefined,
+                  title: typeof data?.title === "string" ? data.title : undefined,
+                  uptime: typeof data?.uptime === "string" ? data.uptime : undefined,
+                  checkedAt: Date.now(),
+                } as LiveStatusInfo,
+              };
+            } catch {
+              return {
+                streamer: s,
+                info: { live: false, checkedAt: Date.now() } as LiveStatusInfo,
+              };
+            }
+          })
+        );
+
+        const nextMap: Record<string, LiveStatusInfo> = {};
+        let firstAutoLive: { streamer: FollowedStreamer; info: LiveStatusInfo } | null = null;
+
+        for (const r of results) {
+          nextMap[r.streamer.id] = r.info;
+          if (!r.info.live) {
+            // Stream went offline, clear dismissal so next time they go live it pops up again
+            dismissedLiveIdsRef.current.delete(r.streamer.id);
+          } else if (
+            !firstAutoLive &&
+            !dismissedLiveIdsRef.current.has(r.streamer.id) &&
+            (r.streamer.platform === "twitch" || Boolean(r.info.videoId))
+          ) {
+            firstAutoLive = r;
+          }
+        }
+
+        setLiveMap((prev) => ({ ...prev, ...nextMap }));
+
+        // If no PiP stream is currently open, auto-popup the live streamer (muted)!
+        if (!activeStreamRef.current && firstAutoLive) {
+          openStreamInPip(firstAutoLive.streamer, firstAutoLive.info, { autoTriggered: true });
+        }
+      } finally {
+        setCheckingLive(false);
+      }
+    },
+    [openStreamInPip]
+  );
+
+  // Poll every 60s whenever streamwatcher is installed and has followed streamers
+  useEffect(() => {
+    if (!installed || follows.length === 0) return;
+    void checkFollowedLive(follows);
+    const id = window.setInterval(() => {
+      void checkFollowedLive();
+    }, LIVE_POLL_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [installed, follows.length, checkFollowedLive]);
+
+  // Clamp PiP to viewport on resize
   useEffect(() => {
     const onWinResize = () => {
       setGeom((prev) => {
@@ -192,206 +307,329 @@ export default function StreamWatcherOverlay() {
     window.addEventListener("pointercancel", onUp);
   };
 
-  const applyStream = (raw: string) => {
-    setErrorMsg("");
-    const parsed = parseStreamEmbedUrl(raw);
-    if (!parsed) {
-      setErrorMsg("paste a twitch, youtube, kick, or stream url");
-      return;
+  const toggleMute = () => {
+    if (!activeStream) return;
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+
+    // Instant postMessage mute/unmute for YouTube without reloading!
+    if (activeStream.platform === "youtube" && iframeRef.current?.contentWindow) {
+      try {
+        iframeRef.current.contentWindow.postMessage(
+          JSON.stringify({
+            event: "command",
+            func: nextMuted ? "mute" : "unMute",
+            args: "",
+          }),
+          "*"
+        );
+      } catch {}
     }
-    if (parsed.error || !parsed.embedUrl) {
-      setErrorMsg(parsed.error || "invalid stream url");
-      return;
-    }
-    const next: RecentStream = {
-      raw: raw.trim(),
-      embedUrl: parsed.embedUrl,
-      label: parsed.label,
-      platform: parsed.platform,
-    };
-    setActiveStream(next);
-    setUrlInput(next.raw);
-    setEditingUrl(false);
-    setReloadNonce((n) => n + 1);
-    try {
-      localStorage.setItem(STREAM_KEY, JSON.stringify(next));
-      const nextRecents = [next, ...recents.filter((r) => r.embedUrl !== next.embedUrl)].slice(0, 4);
-      setRecents(nextRecents);
-      localStorage.setItem(RECENTS_KEY, JSON.stringify(nextRecents));
-    } catch {}
   };
 
-  if (!visible) return null;
+  const handleAddFollow = (e: Event) => {
+    e.preventDefault();
+    setFollowError("");
+    const res = followStreamer(followInput);
+    if (!res.added || !res.streamer) {
+      setFollowError(res.error || "could not follow channel");
+      return;
+    }
+    setFollowInput("");
+    const updated = getFollowedStreamers();
+    setFollows(updated);
+    notifyToast(`following ${res.streamer.label} — checking live status...`, "success");
+    void checkFollowedLive(updated);
+  };
 
-  if (minimized) {
-    return (
-      <div
-        class="streamwatcher-pill"
-        style={{ left: `${geom.x}px`, top: `${geom.y}px` }}
-        onPointerDown={startDrag as any}
-      >
-        <i class="fa-solid fa-tv" style={{ color: "#c084fc" }} />
-        <span class="streamwatcher-pill-label">
-          {activeStream ? activeStream.label : "streamwatcher"}
-        </span>
-        <button
-          type="button"
-          class="streamwatcher-icon-btn"
-          title="Expand stream"
-          onClick={() => setMinimized(false)}
-        >
-          <i class="fa-solid fa-up-right-and-down-left-from-center" />
-        </button>
-        <button
-          type="button"
-          class="streamwatcher-icon-btn"
-          title="Close streamwatcher"
-          onClick={() => setAddonAppOpenState("streamwatcher", false)}
-        >
-          <i class="fa-solid fa-xmark" />
-        </button>
-      </div>
-    );
-  }
+  const handleClosePip = () => {
+    if (activeStream) {
+      dismissedLiveIdsRef.current.add(activeStream.streamerId);
+    }
+    setActiveStream(null);
+  };
+
+  if (!installed) return null;
+
+  const activeEmbedUrl = activeStream
+    ? buildStreamEmbedUrl(activeStream.platform, activeStream.channel, {
+        muted: activeStream.platform === "youtube" ? true : isMuted,
+        videoId: activeStream.videoId,
+      })
+    : "";
 
   return (
-    <div
-      class={`streamwatcher-window${interacting ? " is-interacting" : ""}`}
-      style={{
-        left: `${geom.x}px`,
-        top: `${geom.y}px`,
-        width: `${geom.w}px`,
-        height: `${geom.h}px`,
-      }}
-    >
-      {/* Draggable Header Bar */}
-      <div class="streamwatcher-header" onPointerDown={startDrag as any}>
-        <div class="streamwatcher-title">
-          <span class="streamwatcher-live-dot" />
-          <i class="fa-solid fa-tv" />
-          <span>{activeStream ? activeStream.label : "streamwatcher"}</span>
-        </div>
-
-        <div class="streamwatcher-actions">
-          <button
-            type="button"
-            class={`streamwatcher-icon-btn${editingUrl ? " active" : ""}`}
-            title="Change stream URL"
-            onClick={() => setEditingUrl((v) => !v)}
+    <>
+      {/* ── STREAMWATCHER APP MANAGER UI (Opened from Add-ons -> Apps -> Open) ── */}
+      {managerOpen && (
+        <div
+          class="streamwatcher-modal-overlay"
+          onClick={() => setManagerOpen(false)}
+        >
+          <div
+            class="streamwatcher-modal-card"
+            onClick={(e) => e.stopPropagation()}
           >
-            <i class="fa-solid fa-link" />
-          </button>
-          {activeStream && (
+            <div class="streamwatcher-modal-header">
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div class="streamwatcher-modal-icon">
+                  <i class="fa-solid fa-tv" />
+                </div>
+                <div>
+                  <h3 class="streamwatcher-modal-title">streamwatcher</h3>
+                  <div class="streamwatcher-modal-sub">
+                    follow twitch or youtube channels — streams auto-pop muted when live
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="streamwatcher-icon-btn"
+                title="Close"
+                onClick={() => setManagerOpen(false)}
+              >
+                <i class="fa-solid fa-xmark" />
+              </button>
+            </div>
+
+            <form class="streamwatcher-follow-form" onSubmit={handleAddFollow}>
+              <input
+                type="text"
+                class="streamwatcher-input"
+                placeholder="paste twitch.tv/channel or youtube.com/@channel..."
+                value={followInput}
+                onInput={(e) => {
+                  setFollowInput((e.target as HTMLInputElement).value);
+                  setFollowError("");
+                }}
+              />
+              <button type="submit" class="streamwatcher-follow-btn">
+                <i class="fa-solid fa-heart" />
+                <span>follow</span>
+              </button>
+            </form>
+            {followError && <div class="streamwatcher-error">{followError}</div>}
+
+            <div class="streamwatcher-list-head">
+              <span>followed channels ({follows.length})</span>
+              <button
+                type="button"
+                class="streamwatcher-refresh-btn"
+                disabled={checkingLive || follows.length === 0}
+                onClick={() => void checkFollowedLive()}
+              >
+                <i class={`fa-solid ${checkingLive ? "fa-spinner fa-spin" : "fa-rotate"}`} />
+                <span>{checkingLive ? "checking..." : "check live"}</span>
+              </button>
+            </div>
+
+            <div class="streamwatcher-follow-list">
+              {follows.length === 0 ? (
+                <div class="streamwatcher-follow-empty">
+                  <i class="fa-solid fa-satellite-dish" />
+                  <span>no followed channels yet — paste a twitch or youtube channel url above</span>
+                </div>
+              ) : (
+                follows.map((s) => {
+                  const info = liveMap[s.id];
+                  const isLive = Boolean(info?.live);
+                  const isWatching = activeStream?.streamerId === s.id;
+                  return (
+                    <div
+                      key={s.id}
+                      class={`streamwatcher-follow-row${isLive ? " is-live" : ""}`}
+                    >
+                      <div class="streamwatcher-follow-info">
+                        <div class="streamwatcher-follow-name-row">
+                          <span class={`streamwatcher-status-dot${isLive ? " is-live" : ""}`} />
+                          <i
+                            class={`fa-brands ${
+                              s.platform === "twitch" ? "fa-twitch" : "fa-youtube"
+                            }`}
+                            style={{
+                              color: s.platform === "twitch" ? "#a855f7" : "#ef4444",
+                              fontSize: "12px",
+                            }}
+                          />
+                          <span class="streamwatcher-follow-label">{s.label}</span>
+                          {isLive && <span class="streamwatcher-live-tag">live</span>}
+                        </div>
+                        <div class="streamwatcher-follow-meta">
+                          {isLive
+                            ? info?.title || info?.uptime || "streaming live now"
+                            : "offline · will auto-pop muted when live"}
+                        </div>
+                      </div>
+
+                      <div class="streamwatcher-follow-actions">
+                        {(s.platform === "twitch" || (isLive && info?.videoId)) && (
+                          <button
+                            type="button"
+                            class="streamwatcher-watch-btn"
+                            onClick={() => {
+                              openStreamInPip(s, info);
+                              setManagerOpen(false);
+                            }}
+                          >
+                            <i class={`fa-solid ${isWatching ? "fa-tv" : "fa-play"}`} />
+                            <span>{isWatching ? "watching" : "watch"}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          class="streamwatcher-icon-btn danger"
+                          title={`Unfollow ${s.label}`}
+                          onClick={() => {
+                            unfollowStreamer(s.id);
+                            if (activeStream?.streamerId === s.id) {
+                              setActiveStream(null);
+                            }
+                            setFollows(getFollowedStreamers());
+                          }}
+                        >
+                          <i class="fa-solid fa-trash-can" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── FLOATING GLOBAL PiP WINDOW (Rounded Rectangle, Draggable, Resizable, Hover to Unmute) ── */}
+      {activeStream &&
+        (minimized ? (
+          <div
+            class="streamwatcher-pill"
+            style={{ left: `${geom.x}px`, top: `${geom.y}px` }}
+            onPointerDown={startDrag as any}
+          >
+            <span class="streamwatcher-live-dot" />
+            <span class="streamwatcher-pill-label">{activeStream.label}</span>
             <button
               type="button"
               class="streamwatcher-icon-btn"
-              title="Reload stream"
-              onClick={() => setReloadNonce((n) => n + 1)}
+              title="Expand stream"
+              onClick={() => setMinimized(false)}
             >
-              <i class="fa-solid fa-rotate-right" />
+              <i class="fa-solid fa-up-right-and-down-left-from-center" />
             </button>
-          )}
-          <button
-            type="button"
-            class="streamwatcher-icon-btn"
-            title="Minimize to pill"
-            onClick={() => setMinimized(true)}
-          >
-            <i class="fa-solid fa-minus" />
-          </button>
-          <button
-            type="button"
-            class="streamwatcher-icon-btn danger"
-            title="Close streamwatcher"
-            onClick={() => setAddonAppOpenState("streamwatcher", false)}
-          >
-            <i class="fa-solid fa-xmark" />
-          </button>
-        </div>
-      </div>
-
-      {/* Stream URL Switcher Drawer */}
-      {editingUrl && (
-        <form
-          class="streamwatcher-url-bar"
-          onSubmit={(e) => {
-            e.preventDefault();
-            applyStream(urlInput);
-          }}
-        >
-          <div class="streamwatcher-url-row">
-            <input
-              type="text"
-              class="streamwatcher-input"
-              placeholder="twitch.tv/name, youtube live url, kick.com/name..."
-              value={urlInput}
-              onInput={(e) => {
-                setUrlInput((e.target as HTMLInputElement).value);
-                setErrorMsg("");
-              }}
-            />
-            <button type="submit" class="streamwatcher-go-btn">
-              <i class="fa-solid fa-play" />
+            <button
+              type="button"
+              class="streamwatcher-icon-btn danger"
+              title="Close stream"
+              onClick={handleClosePip}
+            >
+              <i class="fa-solid fa-xmark" />
             </button>
           </div>
-          {errorMsg && <div class="streamwatcher-error">{errorMsg}</div>}
-          {recents.length > 0 && (
-            <div class="streamwatcher-recents">
-              {recents.map((r) => (
-                <button
-                  key={r.embedUrl}
-                  type="button"
-                  class="streamwatcher-recent-chip"
-                  onClick={() => applyStream(r.raw)}
-                >
-                  <i
-                    class={`fa-solid ${
-                      r.platform === "twitch"
-                        ? "fa-tower-broadcast"
-                        : r.platform === "youtube"
-                          ? "fa-play"
-                          : "fa-tv"
-                    }`}
-                  />
-                  <span>{r.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </form>
-      )}
-
-      {/* Video Stage */}
-      <div class="streamwatcher-stage">
-        {activeStream ? (
-          <iframe
-            key={`${activeStream.embedUrl}:${reloadNonce}`}
-            src={activeStream.embedUrl}
-            class="streamwatcher-iframe"
-            allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-            allowFullScreen
-            referrerPolicy="no-referrer-when-downgrade"
-          />
         ) : (
-          <div class="streamwatcher-empty">
-            <i class="fa-solid fa-tv" />
-            <div class="streamwatcher-empty-title">streamwatcher pip</div>
-            <div class="streamwatcher-empty-sub">
-              paste a twitch, youtube live, kick, or stream url above — drag &amp; resize anywhere on every page
+          <div
+            class={`streamwatcher-window${interacting ? " is-interacting" : ""}`}
+            style={{
+              left: `${geom.x}px`,
+              top: `${geom.y}px`,
+              width: `${geom.w}px`,
+              height: `${geom.h}px`,
+            }}
+            onPointerEnter={() => setIsHoveringStream(true)}
+            onPointerLeave={() => setIsHoveringStream(false)}
+          >
+            <div class="streamwatcher-header" onPointerDown={startDrag as any}>
+              <div class="streamwatcher-title">
+                <span class="streamwatcher-live-dot" />
+                <i
+                  class={`fa-brands ${
+                    activeStream.platform === "twitch" ? "fa-twitch" : "fa-youtube"
+                  }`}
+                />
+                <span>{activeStream.label}</span>
+              </div>
+
+              <div class="streamwatcher-actions">
+                <button
+                  type="button"
+                  class={`streamwatcher-icon-btn${!isMuted ? " active" : ""}`}
+                  title={isMuted ? "Unmute stream" : "Mute stream"}
+                  onClick={toggleMute}
+                >
+                  <i class={`fa-solid ${isMuted ? "fa-volume-xmark" : "fa-volume-high"}`} />
+                </button>
+                <button
+                  type="button"
+                  class="streamwatcher-icon-btn"
+                  title="Followed channels"
+                  onClick={() => setManagerOpen(true)}
+                >
+                  <i class="fa-solid fa-list" />
+                </button>
+                <button
+                  type="button"
+                  class="streamwatcher-icon-btn"
+                  title="Reload stream"
+                  onClick={() => setReloadNonce((n) => n + 1)}
+                >
+                  <i class="fa-solid fa-rotate-right" />
+                </button>
+                <button
+                  type="button"
+                  class="streamwatcher-icon-btn"
+                  title="Minimize to pill"
+                  onClick={() => setMinimized(true)}
+                >
+                  <i class="fa-solid fa-minus" />
+                </button>
+                <button
+                  type="button"
+                  class="streamwatcher-icon-btn danger"
+                  title="Close stream"
+                  onClick={handleClosePip}
+                >
+                  <i class="fa-solid fa-xmark" />
+                </button>
+              </div>
+            </div>
+
+            <div class="streamwatcher-stage">
+              {activeEmbedUrl && (
+                <iframe
+                  ref={iframeRef}
+                  key={`${activeStream.streamerId}:${activeStream.platform === "twitch" ? (isMuted ? "m" : "u") : "yt"}:${reloadNonce}`}
+                  src={activeEmbedUrl}
+                  class="streamwatcher-iframe"
+                  allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                  allowFullScreen
+                  referrerPolicy="no-referrer-when-downgrade"
+                />
+              )}
+
+              {/* Hover over the stream to unmute/mute */}
+              {isHoveringStream && !interacting && (
+                <button
+                  type="button"
+                  class={`streamwatcher-hover-mute-btn${isMuted ? " is-muted" : ""}`}
+                  onClick={toggleMute}
+                >
+                  <i class={`fa-solid ${isMuted ? "fa-volume-xmark" : "fa-volume-high"}`} />
+                  <span>{isMuted ? "unmute stream" : "mute"}</span>
+                </button>
+              )}
+
+              {interacting && <div class="streamwatcher-pointer-shield" />}
+            </div>
+
+            <div
+              class="streamwatcher-resize-handle"
+              title="Drag to resize"
+              onPointerDown={startResize as any}
+            >
+              <i class="fa-solid fa-up-right-and-down-left-from-center" />
             </div>
           </div>
-        )}
-        {interacting && <div class="streamwatcher-pointer-shield" />}
-      </div>
-
-      {/* Bottom-Right Resize Grip */}
-      <div
-        class="streamwatcher-resize-handle"
-        title="Drag to resize"
-        onPointerDown={startResize as any}
-      >
-        <i class="fa-solid fa-up-right-and-down-left-from-center" />
-      </div>
-    </div>
+        ))}
+    </>
   );
 }

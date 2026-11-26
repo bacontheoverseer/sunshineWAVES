@@ -1,6 +1,6 @@
 /**
  * Operation Cookie - Content Filter & OpenAI Moderation
- * Blocks adult/NSFW content, online gambling, malware/phishing, and severe harm
+ * Blocks adult/NSFW content, malware/phishing, and severe harm
  * (hate speech, self-harm, severe violence/threats, sexual content) while explicitly
  * excluding casual swear words / profanity in chat.
  */
@@ -45,44 +45,6 @@ const ADULT_PATTERNS = [
   "xxx",
   "nsfw",
   "nude",
-];
-
-// Blocked domain signatures (gambling, casinos, betting, skin gambling)
-const GAMBLING_PATTERNS = [
-  "stake.com",
-  "roobet",
-  "bet365",
-  "1xbet",
-  "bovada",
-  "draftkings",
-  "fanduel",
-  "betfair",
-  "pokerstars",
-  "888casino",
-  "betway",
-  "williamhill",
-  "betonline",
-  "csgoroll",
-  "csgoluck",
-  "clash.gg",
-  "hellcase",
-  "key-drop",
-  "gamdom",
-  "rollbit",
-  "duelbits",
-  "bc.game",
-  "hypedrop",
-  "betmgm",
-  "caesars",
-  "ignitioncasino",
-  "sportsbook",
-  "onlinecasino",
-  "casino",
-  "gambling",
-  "poker",
-  "roulette",
-  "slotmachine",
-  "sportsbetting",
 ];
 
 // Blocked domain signatures (IP loggers, phishing, scam gift generators, malware)
@@ -173,18 +135,6 @@ export function checkContent(input: string): FilterResult {
         blocked: true,
         category: "adult",
         reason: "Adult or explicit content is not permitted.",
-      };
-    }
-  }
-
-  // 3. Check Gambling / Betting
-  for (const pattern of GAMBLING_PATTERNS) {
-    const regex = new RegExp(`(^|[^a-z0-9])${pattern}([^a-z0-9]|$)`, "i");
-    if (regex.test(clean) || clean.includes(`${pattern}.`)) {
-      return {
-        blocked: true,
-        category: "gambling",
-        reason: "Online gambling, betting, or casino content is not permitted.",
       };
     }
   }
