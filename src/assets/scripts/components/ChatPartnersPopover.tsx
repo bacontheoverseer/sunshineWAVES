@@ -1,5 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "preact/hooks";
 import { checkContent } from "../core/contentFilter.ts";
+import {
+  ADDON_APPS_CATALOG,
+  getAddonAppOpenState,
+  getInstalledAddonApps,
+  installAddonApp,
+  toggleAddonAppOpen,
+  uninstallAddonApp,
+} from "../core/addonApps.ts";
 
 export interface ChatPartnerMusicCard {
   type: "music";
@@ -301,8 +309,10 @@ export default function ChatPartnersPopover({
   onClose: () => void;
   notifyToast: (msg: string, type?: "success" | "error" | "info") => void;
 }) {
-  const [tab, setTab] = useState<"music" | "embed" | "draw">("music");
+  const [tab, setTab] = useState<"music" | "embed" | "draw" | "apps">("music");
   const [sendingCard, setSendingCard] = useState(false);
+  const [installedApps, setInstalledApps] = useState<string[]>(() => getInstalledAddonApps());
+  const [, setAppsTick] = useState(0);
 
   // Music state
   const [musicQuery, setMusicQuery] = useState("");
@@ -331,9 +341,15 @@ export default function ChatPartnersPopover({
 
   useEffect(() => {
     const listener = () => setAudioTick((n) => n + 1);
+    const onAddons = () => {
+      setInstalledApps(getInstalledAddonApps());
+      setAppsTick((n) => n + 1);
+    };
     partnerAudioListeners.add(listener);
+    window.addEventListener("cookie-addons-updated", onAddons);
     return () => {
       partnerAudioListeners.delete(listener);
+      window.removeEventListener("cookie-addons-updated", onAddons);
       stopPickerSnippetAudio(false);
     };
   }, []);
@@ -629,6 +645,14 @@ export default function ChatPartnersPopover({
           </button>
           <button
             type="button"
+            class={`chat-partners-tab${tab === "apps" ? " active" : ""}`}
+            onClick={() => setTab("apps")}
+          >
+            <i class="fa-solid fa-cubes"></i>
+            <span>apps</span>
+          </button>
+          <button
+            type="button"
             class="chat-partners-tab"
             title="Open in-site camera"
             onClick={() => {
@@ -891,6 +915,92 @@ export default function ChatPartnersPopover({
               <i class={`fa-solid ${sendingCard ? "fa-spinner fa-spin" : "fa-paper-plane"}`}></i>
               <span>{sendingCard ? "sending..." : "send"}</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {tab === "apps" && (
+        <div class="chat-partners-pane">
+          <div class="chat-partners-apps-sub">
+            install customization apps to upgrade operation cookie across every page
+          </div>
+          <div class="chat-partners-apps-list">
+            {ADDON_APPS_CATALOG.map((app) => {
+              const isInstalled = installedApps.includes(app.id);
+              const isOpen = isInstalled && getAddonAppOpenState(app.id);
+              const isComingSoon = app.status === "coming-soon";
+              return (
+                <div
+                  key={app.id}
+                  class={`chat-partners-app-card${isInstalled ? " is-installed" : ""}${
+                    isComingSoon ? " is-coming-soon" : ""
+                  }`}
+                >
+                  <div
+                    class="chat-partners-app-icon"
+                    style={{
+                      color: app.accent,
+                      background: `${app.accent}1c`,
+                      borderColor: `${app.accent}44`,
+                    }}
+                  >
+                    <i class={`fa-solid ${app.icon}`} />
+                  </div>
+                  <div class="chat-partners-app-meta">
+                    <div class="chat-partners-app-title-row">
+                      <span class="chat-partners-app-name">{app.name}</span>
+                      {isInstalled && <span class="chat-partners-app-badge">installed</span>}
+                    </div>
+                    <div class="chat-partners-app-desc">{app.tagline}</div>
+                  </div>
+                  <div class="chat-partners-app-actions">
+                    {isComingSoon ? (
+                      <span class="chat-partners-app-soon">soon</span>
+                    ) : isInstalled ? (
+                      <>
+                        <button
+                          type="button"
+                          class={`chat-partners-send-pill${isOpen ? " is-active-app" : ""}`}
+                          onClick={() => {
+                            const nextOpen = toggleAddonAppOpen(app.id);
+                            notifyToast(
+                              nextOpen ? `opened ${app.name}` : `closed ${app.name}`,
+                              "info"
+                            );
+                          }}
+                        >
+                          <i class={`fa-solid ${isOpen ? "fa-eye-slash" : "fa-up-right-from-square"}`} />
+                          <span>{isOpen ? "hide" : "open"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="chat-partners-mini-btn"
+                          title={`Uninstall ${app.name}`}
+                          onClick={() => {
+                            uninstallAddonApp(app.id);
+                            notifyToast(`uninstalled ${app.name}`, "info");
+                          }}
+                        >
+                          <i class="fa-solid fa-trash-can" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        class="chat-partners-send-pill"
+                        onClick={() => {
+                          installAddonApp(app.id);
+                          notifyToast(`installed ${app.name}!`, "success");
+                        }}
+                      >
+                        <i class="fa-solid fa-download" />
+                        <span>install</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

@@ -18,6 +18,9 @@ const SettingsMenu = lazy(() => import("./components/SettingsMenu.tsx"));
 const ChatModal = lazy(() => import("./components/ChatModal.tsx"));
 const AdminPanel = lazy(() => import("./components/AdminPanel.tsx"));
 const WelcomeTour = lazy(() => import("./components/WelcomeTour.tsx"));
+const StreamWatcherOverlay = lazy(
+  () => import("./components/StreamWatcherOverlay.tsx"),
+);
 const HomepageDecorations = lazy(
   () => import("./components/HomepageDecorations.tsx"),
 );
@@ -77,6 +80,9 @@ export default function App() {
         <WelcomeTour />
       </Suspense>
       <div id="overlay" class="overlay" />
+      <Suspense fallback={null}>
+        <StreamWatcherOverlay />
+      </Suspense>
     </>
   );
 }
