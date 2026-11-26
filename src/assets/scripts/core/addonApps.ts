@@ -4,6 +4,7 @@
  */
 
 import { checkContent } from "./contentFilter.ts";
+import { encodeHttpProxyUrl, encodeMochiUrl } from "./utils.ts";
 
 export interface AddonAppDef {
   id: string;
@@ -259,18 +260,34 @@ export function unfollowStreamer(id: string): void {
 export function buildStreamEmbedUrl(
   platform: "twitch" | "youtube",
   channel: string,
-  opts: { muted: boolean; videoId?: string }
+  opts: { muted: boolean; videoId?: string; useProxy?: boolean }
 ): string {
-  const parentHost =
+  const host =
     typeof window !== "undefined" && window.location.hostname
       ? window.location.hostname
       : "localhost";
+  const bareHost = host.replace(/^www\./i, "");
+  const parents = Array.from(
+    new Set([host, bareHost, `www.${bareHost}`, "player.twitch.tv", "twitch.tv"].filter(Boolean))
+  );
+
+  let targetUrl = "";
   if (platform === "twitch") {
     const login = channel.replace(/^@/, "").toLowerCase();
-    return `https://player.twitch.tv/?channel=${encodeURIComponent(login)}&parent=${encodeURIComponent(parentHost)}&muted=${opts.muted ? "true" : "false"}`;
+    const parentParams = parents.map((p) => `parent=${encodeURIComponent(p)}`).join("&");
+    targetUrl = `https://player.twitch.tv/?channel=${encodeURIComponent(login)}&${parentParams}&muted=${opts.muted ? "true" : "false"}&autoplay=true`;
+  } else if (opts.videoId) {
+    targetUrl = `https://www.youtube.com/embed/${encodeURIComponent(opts.videoId)}?autoplay=1&mute=${opts.muted ? "1" : "0"}&enablejsapi=1&rel=0`;
   }
-  if (opts.videoId) {
-    return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(opts.videoId)}?autoplay=1&mute=${opts.muted ? "1" : "0"}&enablejsapi=1&rel=0`;
-  }
-  return "";
+
+  if (!targetUrl) return "";
+
+  const shouldProxy = opts.useProxy !== false;
+  if (!shouldProxy) return targetUrl;
+
+  const hasSw =
+    typeof navigator !== "undefined" &&
+    "serviceWorker" in navigator &&
+    Boolean(navigator.serviceWorker.controller);
+  return hasSw ? `/!!/${encodeMochiUrl(targetUrl)}/` : encodeHttpProxyUrl(targetUrl);
 }

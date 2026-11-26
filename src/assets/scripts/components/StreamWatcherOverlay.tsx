@@ -89,6 +89,7 @@ export default function StreamWatcherOverlay() {
   const [geom, setGeom] = useState<StreamWatcherGeometry>(() => loadGeometry());
   const [interacting, setInteracting] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [useProxy, setUseProxy] = useState(true);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const geomRef = useRef(geom);
@@ -355,6 +356,7 @@ export default function StreamWatcherOverlay() {
     ? buildStreamEmbedUrl(activeStream.platform, activeStream.channel, {
         muted: activeStream.platform === "youtube" ? true : isMuted,
         videoId: activeStream.videoId,
+        useProxy,
       })
     : "";
 
@@ -565,6 +567,17 @@ export default function StreamWatcherOverlay() {
                   onClick={() => setManagerOpen(true)}
                 >
                   <i class="fa-solid fa-list" />
+                </button>
+                <button
+                  type="button"
+                  class={`streamwatcher-icon-btn${useProxy ? " active" : ""}`}
+                  title={useProxy ? "Using built-in proxy (click for direct)" : "Using direct embed (click for proxy)"}
+                  onClick={() => {
+                    setUseProxy((v) => !v);
+                    setReloadNonce((n) => n + 1);
+                  }}
+                >
+                  <i class="fa-solid fa-shield-halved" />
                 </button>
                 <button
                   type="button"
