@@ -4249,27 +4249,35 @@ html.chromebook-mode .chat-user-item {
 }
 
 .chat-profile-frame-img.frame-slot-f {
-  top: -18px;
-  left: -18px;
-  width: calc(100% + 36px);
-  height: calc(100% + 36px);
+  top: -5.5%;
+  left: -5%;
+  width: 110%;
+  height: 111%;
   object-fit: fill;
 }
 
 .chat-profile-frame-img.frame-slot-t {
-  top: -24px;
-  left: -5%;
-  width: 110%;
+  top: -58px;
+  left: -5.5%;
+  width: 111%;
   height: auto;
   object-fit: contain;
 }
 
 .chat-profile-frame-img.frame-slot-b {
-  bottom: -20px;
+  bottom: -35px;
   left: -5%;
   width: 110%;
   height: auto;
   object-fit: contain;
+}
+
+.chat-customizer-preview-panel .chat-profile-frame-img.frame-slot-t {
+  top: -44px;
+}
+
+.chat-customizer-preview-panel .chat-profile-frame-img.frame-slot-b {
+  bottom: -27px;
 }
 
 .chat-user-item > *:not(.chat-nameplate-media) {
