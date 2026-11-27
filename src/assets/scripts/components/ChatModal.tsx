@@ -444,8 +444,8 @@ function formatElapsedDuration(startedAtMs: number | undefined, nowMs: number): 
   return `${secs}s`;
 }
 
-function renderFormattedText(text: string) {
-  const parts = text.split(/(\bhttps?:\/\/[^\s]+|@[a-zA-Z0-9_.-]+)/g);
+function renderFormattedText(text: string, onHashtagClick?: (tag: string) => void) {
+  const parts = text.split(/(\bhttps?:\/\/[^\s]+|@[a-zA-Z0-9_.-]+|#[a-zA-Z][a-zA-Z0-9_-]{1,31}\b)/g);
   return parts.map((part, i) => {
     if (part.startsWith("http://") || part.startsWith("https://")) {
       return (
@@ -459,6 +459,23 @@ function renderFormattedText(text: string) {
         <span key={i} class="chat-mention">
           {part}
         </span>
+      );
+    }
+    if (part.startsWith("#") && part.length >= 3) {
+      const tag = part.slice(1).toLowerCase();
+      return (
+        <button
+          key={i}
+          type="button"
+          class="chat-hashtag-pill"
+          title={`Search #${tag}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onHashtagClick?.(tag);
+          }}
+        >
+          {part}
+        </button>
       );
     }
     return part;
@@ -509,6 +526,7 @@ interface ChatMessageRowProps {
   onDeleteMessage: (msg: ChatMessage) => void;
   onOpenImageLightbox: (url: string, name?: string | undefined) => void;
   onCloseChat: () => void;
+  onHashtagClick?: (tag: string) => void;
 }
 
 function buildChatImageSrc(rawUrl: string | undefined, retryCount: number): string {
@@ -559,6 +577,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onVotePoll,
   onOpenImageLightbox,
   onCloseChat,
+  onHashtagClick,
 }: ChatMessageRowProps) {
   const replyRef = msg.replyTo || null;
   const [imgBroken, setImgBroken] = useState(false);
@@ -725,7 +744,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
                   : "";
               return (
                 <div class={`chat-entry-text${jumboCls}`}>
-                  {renderFormattedText(msg.text)}
+                  {renderFormattedText(msg.text, onHashtagClick)}
                   {msg.edited && <span class="chat-msg-edited">(edited)</span>}
                 </div>
               );
@@ -1292,6 +1311,27 @@ export default function ChatModal() {
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
   const [chName, setChName] = useState("");
   const [chCategory, setChCategory] = useState("social");
+  const [addingCustomCategory, setAddingCustomCategory] = useState(false);
+  const [customCategoryDraft, setCustomCategoryDraft] = useState("");
+  const [chatSearchQuery, setChatSearchQuery] = useState("");
+  const [chatSearchFilter, setChatSearchFilter] = useState<"all" | "messages" | "dms" | "user" | "hashtags">("all");
+  const [chatSearchFocused, setChatSearchFocused] = useState(false);
+  const [chatSearchLoading, setChatSearchLoading] = useState(false);
+  const [chatSearchResults, setChatSearchResults] = useState<
+    Array<{
+      id: string;
+      channel: string;
+      author: string;
+      text: string;
+      timestamp: string;
+      createdAt?: number;
+      hashtags?: string[];
+    }>
+  >([]);
+  const [chatSearchHashtags, setChatSearchHashtags] = useState<
+    Array<{ tag: string; count: number; lastUsed: number }>
+  >([]);
+  const chatSearchInputRef = useRef<HTMLInputElement>(null);
   const [chIcon, setChIcon] = useState("fa-hashtag");
   const [chVisibility, setChVisibility] = useState<"all" | "staff">("all");
   const [chWriteAccess, setChWriteAccess] = useState<"all" | "staff">("all");
@@ -5114,10 +5154,84 @@ export default function ChatModal() {
     [cloudUser]
   );
 
+  const existingCategoryOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const list: string[] = [];
+    for (const ch of chatChannels) {
+      const lbl = String(ch.categoryLabel || ch.categoryId || "social").trim().toLowerCase();
+      if (lbl && !seen.has(lbl)) {
+        seen.add(lbl);
+        list.push(lbl);
+      }
+    }
+    const curr = chCategory.trim().toLowerCase();
+    if (curr && !seen.has(curr)) {
+      list.push(curr);
+    }
+    return list;
+  }, [chatChannels, chCategory]);
+
+  const handleClickHashtag = useCallback((tag: string) => {
+    const clean = String(tag || "").trim().toLowerCase().replace(/^#/, "");
+    if (!clean) return;
+    setChatSearchFilter("hashtags");
+    setChatSearchQuery(`#${clean}`);
+    setChatSearchFocused(true);
+    window.setTimeout(() => chatSearchInputRef.current?.focus(), 40);
+  }, []);
+
+  const isChatSearchActive =
+    chatSearchQuery.trim().length > 0 || chatSearchFilter !== "all";
+
+  useEffect(() => {
+    if (!isOpen || !isChatSearchActive) {
+      setChatSearchResults([]);
+      if (!isChatSearchActive) setChatSearchHashtags([]);
+      setChatSearchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setChatSearchLoading(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        let token = "";
+        try {
+          token = localStorage.getItem("auth_token") || "";
+        } catch {}
+        const params = new URLSearchParams({
+          q: chatSearchQuery.trim(),
+          filter: chatSearchFilter,
+          limit: "40",
+        });
+        const res = await fetch(`/api/chat/search?${params.toString()}`, {
+          credentials: "same-origin",
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        });
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (res.ok && data?.success) {
+          setChatSearchResults(Array.isArray(data.results) ? data.results : []);
+          setChatSearchHashtags(Array.isArray(data.hashtags) ? data.hashtags : []);
+        }
+      } catch {
+        // ignore transient search error
+      } finally {
+        if (!cancelled) setChatSearchLoading(false);
+      }
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [isOpen, isChatSearchActive, chatSearchQuery, chatSearchFilter]);
+
   const openCreateChannelModal = useCallback(() => {
     setEditingChannelId(null);
     setChName("");
     setChCategory("social");
+    setAddingCustomCategory(false);
+    setCustomCategoryDraft("");
     setChIcon("fa-hashtag");
     setChVisibility("all");
     setChWriteAccess("all");
@@ -5302,7 +5416,163 @@ export default function ChatModal() {
             )}
           </div>
 
+          {/* ── CHATROOM SEARCHBAR + FILTERS (DMs, messages, user, #hashtags) ── */}
+          <div class="chat-sidebar-search-wrap">
+            <div class={`chat-sidebar-search-box ${chatSearchFocused || isChatSearchActive ? "is-active" : ""}`}>
+              <i class="fa-solid fa-magnifying-glass chat-sidebar-search-icon"></i>
+              <input
+                ref={chatSearchInputRef}
+                type="text"
+                class="chat-sidebar-search-input"
+                placeholder={
+                  chatSearchFilter === "user"
+                    ? "search by @username..."
+                    : chatSearchFilter === "hashtags"
+                    ? "search #hashtag..."
+                    : chatSearchFilter === "dms"
+                    ? "search DMs..."
+                    : "search chats, @user, #tag..."
+                }
+                value={chatSearchQuery}
+                onFocus={() => setChatSearchFocused(true)}
+                onInput={(e) => setChatSearchQuery((e.target as HTMLInputElement).value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setChatSearchQuery("");
+                    setChatSearchFilter("all");
+                    setChatSearchFocused(false);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+              />
+              {(chatSearchQuery || chatSearchFilter !== "all") && (
+                <button
+                  type="button"
+                  class="chat-sidebar-search-clear"
+                  title="Clear search"
+                  aria-label="Clear search"
+                  onClick={() => {
+                    setChatSearchQuery("");
+                    setChatSearchFilter("all");
+                    setChatSearchFocused(false);
+                  }}
+                >
+                  <i class="fa-solid fa-xmark"></i>
+                </button>
+              )}
+            </div>
+
+            {(chatSearchFocused || isChatSearchActive) && (
+              <div class="chat-search-filter-row" role="tablist" aria-label="Search filters">
+                {(
+                  [
+                    ["all", "all"],
+                    ["messages", "msgs"],
+                    ["dms", "dms"],
+                    ["user", "user"],
+                    ["hashtags", "#tags"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    class={`chat-search-filter-chip ${chatSearchFilter === id ? "active" : ""}`}
+                    onClick={() => setChatSearchFilter(id)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div class="chat-sidebar-scroll">
+            {isChatSearchActive ? (
+              <div class="chat-search-results-panel">
+                {chatSearchHashtags.length > 0 && (
+                  <div class="chat-search-tags-section">
+                    <div class="chat-search-section-lbl">
+                      <i class="fa-solid fa-hashtag"></i> hashtags
+                    </div>
+                    <div class="chat-search-tags-wrap">
+                      {chatSearchHashtags.slice(0, 14).map((h) => (
+                        <button
+                          key={h.tag}
+                          type="button"
+                          class={`chat-search-tag-chip ${
+                            chatSearchQuery.trim().toLowerCase() === `#${h.tag}` ? "active" : ""
+                          }`}
+                          onClick={() => {
+                            setChatSearchFilter("hashtags");
+                            setChatSearchQuery(`#${h.tag}`);
+                          }}
+                        >
+                          <span>#{h.tag}</span>
+                          <span class="chat-search-tag-count">{h.count}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div class="chat-search-section-lbl">
+                  <span>
+                    {chatSearchLoading
+                      ? "searching..."
+                      : `${chatSearchResults.length} result${chatSearchResults.length === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+
+                {!chatSearchLoading && chatSearchResults.length === 0 ? (
+                  <div class="chat-search-empty">
+                    {chatSearchFilter === "user" && !chatSearchQuery.trim()
+                      ? "type a username to find their messages."
+                      : "no matching messages found."}
+                  </div>
+                ) : (
+                  <div class="chat-search-list">
+                    {chatSearchResults.map((res) => {
+                      const isDm = res.channel.startsWith("dm:");
+                      const isGrp = res.channel.startsWith("grp:");
+                      const chanLabel = isDm
+                        ? `dm · ${res.channel
+                            .slice(3)
+                            .split("|")
+                            .find((p) => p.toLowerCase() !== (cloudUser || "").toLowerCase()) || "chat"}`
+                        : isGrp
+                        ? chatGroups.find((g) => g.id === res.channel)?.name || "group"
+                        : `#${res.channel}`;
+                      const timeStr =
+                        useLocalTimezone && res.createdAt
+                          ? new Date(res.createdAt).toLocaleTimeString([], {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })
+                          : res.timestamp || "";
+                      return (
+                        <button
+                          key={`${res.channel}:${res.id}`}
+                          type="button"
+                          class="chat-search-result-item"
+                          onClick={() => {
+                            setActiveChannel(res.channel);
+                            window.setTimeout(() => scrollToMessage(res.id), 180);
+                          }}
+                        >
+                          <div class="chat-search-result-top">
+                            <span class="chat-search-result-author">@{res.author}</span>
+                            <span class="chat-search-result-chan">{chanLabel}</span>
+                          </div>
+                          <div class="chat-search-result-text">{res.text}</div>
+                          {timeStr && <div class="chat-search-result-time">{timeStr}</div>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
             {/* Text Channel Categories */}
             {visibleCategories.map((cat) => {
               const isCollapsed = !!collapsedCategories[cat.id];
@@ -5657,6 +5927,8 @@ export default function ChatModal() {
                   })
                 ))}
             </div>
+              </>
+            )}
           </div>
 
           {/* Voice Connected Bottom Control Bar */}
@@ -6397,6 +6669,7 @@ export default function ChatModal() {
                     onToggleBlockUser={toggleBlockUser}
                     onDeleteMessage={handleDeleteMessage}
                     onVotePoll={handleVotePoll}
+                    onHashtagClick={handleClickHashtag}
                       onOpenImageLightbox={handleOpenImageLightbox}
                       onCloseChat={() => setIsOpen(false)}
                     />
@@ -8047,17 +8320,86 @@ export default function ChatModal() {
                 </label>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-                  <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
                     <span>category</span>
-                    <input
-                      type="text"
-                      class="apps-custom-input"
-                      value={chCategory}
-                      maxLength={24}
-                      placeholder="e.g. staff, info, social"
-                      onInput={(e) => setChCategory((e.target as HTMLInputElement).value)}
-                    />
-                  </label>
+                    {addingCustomCategory ? (
+                      <div class="chat-cat-select-row">
+                        <input
+                          type="text"
+                          class="apps-custom-input"
+                          style={{ flex: 1, minWidth: 0 }}
+                          value={customCategoryDraft}
+                          maxLength={24}
+                          placeholder="new category..."
+                          autoFocus
+                          onInput={(e) => setCustomCategoryDraft((e.target as HTMLInputElement).value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              const nextCat = customCategoryDraft.trim().toLowerCase();
+                              if (nextCat) setChCategory(nextCat);
+                              setAddingCustomCategory(false);
+                              setCustomCategoryDraft("");
+                            } else if (e.key === "Escape") {
+                              setAddingCustomCategory(false);
+                              setCustomCategoryDraft("");
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          class="chat-cat-inline-btn confirm"
+                          title="Add category"
+                          onClick={() => {
+                            const nextCat = customCategoryDraft.trim().toLowerCase();
+                            if (nextCat) setChCategory(nextCat);
+                            setAddingCustomCategory(false);
+                            setCustomCategoryDraft("");
+                          }}
+                        >
+                          <i class="fa-solid fa-check"></i>
+                        </button>
+                        <button
+                          type="button"
+                          class="chat-cat-inline-btn"
+                          title="Cancel"
+                          onClick={() => {
+                            setAddingCustomCategory(false);
+                            setCustomCategoryDraft("");
+                          }}
+                        >
+                          <i class="fa-solid fa-xmark"></i>
+                        </button>
+                      </div>
+                    ) : (
+                      <div class="chat-cat-select-row">
+                        <select
+                          class="apps-custom-input"
+                          style={{ flex: 1, minWidth: 0 }}
+                          value={chCategory.trim().toLowerCase() || "social"}
+                          onChange={(e) => setChCategory((e.target as HTMLSelectElement).value)}
+                        >
+                          {existingCategoryOptions.map((cat) => (
+                            <option key={cat} value={cat}>
+                              {cat}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          class="chat-cat-inline-btn"
+                          title="Add a new category"
+                          aria-label="Add a new category"
+                          onClick={() => {
+                            setCustomCategoryDraft("");
+                            setAddingCustomCategory(true);
+                          }}
+                        >
+                          <i class="fa-solid fa-plus"></i>
+                        </button>
+                      </div>
+                    )}
+                  </div>
 
                   <label style={{ display: "flex", flexDirection: "column", gap: "5px", fontSize: "12px", color: "var(--color-sublabel)" }}>
                     <span>icon</span>

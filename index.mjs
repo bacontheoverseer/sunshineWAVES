@@ -1339,6 +1339,82 @@ const DEFAULT_CHAT_CHANNELS = [
 ];
 const chatChannels = DEFAULT_CHAT_CHANNELS.map((c) => ({ ...c }));
 const chatBackgrounds = new Map(); // channelId -> image/gif URL (/api/chat/media/... or https://)
+const chatHashtags = new Map(); // tagLower -> { c: count, t: lastUsedMs, m: string[] (compact msg ids) }
+const MAX_CHAT_HASHTAGS = 250;
+const MAX_IDS_PER_HASHTAG = 35;
+
+function extractHashtagsFromText(text) {
+  if (!text || typeof text !== "string") return [];
+  const found = new Set();
+  const re = /(?:^|[\s(])#([a-zA-Z][a-zA-Z0-9_-]{1,31})\b/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const tag = String(match[1] || "").toLowerCase();
+    if (tag) found.add(tag);
+    if (found.size >= 8) break;
+  }
+  return Array.from(found);
+}
+
+function isPublicNonStaffChannel(channelId) {
+  const ch = String(channelId || "").trim().toLowerCase();
+  if (!ch || ch.startsWith("dm:") || ch.startsWith("grp:")) return false;
+  const def = chatChannels.find((c) => c.id === ch);
+  if (def && def.visibility === "staff") return false;
+  if (ch === "staff-chat") return false;
+  return true;
+}
+
+function indexMessageHashtags(msg, { persist = true } = {}) {
+  if (!msg || typeof msg.text !== "string" || !isPublicNonStaffChannel(msg.channel)) return;
+  const tags = extractHashtagsFromText(msg.text);
+  if (tags.length === 0) return;
+  const nowMs = Number(msg.createdAt) || Date.now();
+  const msgId = String(msg.id || "").trim();
+  let changed = false;
+
+  for (const tag of tags) {
+    const prev = chatHashtags.get(tag) || { c: 0, t: 0, m: [] };
+    if (msgId && prev.m.includes(msgId)) continue;
+    prev.c = (Number(prev.c) || 0) + 1;
+    prev.t = Math.max(Number(prev.t) || 0, nowMs);
+    if (msgId) {
+      prev.m.push(msgId);
+      if (prev.m.length > MAX_IDS_PER_HASHTAG) {
+        prev.m = prev.m.slice(-MAX_IDS_PER_HASHTAG);
+      }
+    }
+    chatHashtags.set(tag, prev);
+    changed = true;
+  }
+
+  if (chatHashtags.size > MAX_CHAT_HASHTAGS) {
+    const sorted = Array.from(chatHashtags.entries()).sort(
+      (a, b) => (b[1].t || 0) - (a[1].t || 0) || (b[1].c || 0) - (a[1].c || 0)
+    );
+    chatHashtags.clear();
+    for (const [k, v] of sorted.slice(0, MAX_CHAT_HASHTAGS)) {
+      chatHashtags.set(k, v);
+    }
+  }
+
+  if (changed && persist) {
+    persistChatHashtags();
+  }
+}
+
+function persistChatHashtags() {
+  // Compact tuple format [count, lastUsedMs, msgIds[]] to keep DB storage minimal
+  const compact = {};
+  for (const [tag, data] of chatHashtags.entries()) {
+    compact[tag] = [
+      Number(data.c) || 1,
+      Number(data.t) || 0,
+      Array.isArray(data.m) ? data.m.slice(-MAX_IDS_PER_HASHTAG) : [],
+    ];
+  }
+  kvSetJson("chat_hashtags_v1", compact);
+}
 const staffActionLogs = []; // Array<{ id, timestamp, action, actor, actorRole, targetUsername, channel, details }>
 const staffUserNotes = new Map(); // usernameLower -> Array<{ id, targetUsername, author, authorRole, note, category, createdAt }>
 const deletedStaffNoteIds = new Set(); // Set<noteId>
@@ -1494,6 +1570,7 @@ const CHAT_META_KV_KEYS = [
   "chat_groups_v1",
   "chat_channels_v1",
   "chat_backgrounds_v1",
+  "chat_hashtags_v1",
   "chat_history_v1",
   "staff_action_logs_v1",
   "staff_user_notes_v1",
@@ -2294,6 +2371,41 @@ function applyChatMetaKvMap(kvMap) {
       }
     }
   }
+  const storedHashtags = kvMap.chat_hashtags_v1;
+  if (storedHashtags && typeof storedHashtags === "object") {
+    for (const [rawTag, rawVal] of Object.entries(storedHashtags)) {
+      const tag = String(rawTag || "").trim().toLowerCase().replace(/^#/, "");
+      if (!tag || !/^[a-z][a-z0-9_-]{1,31}$/.test(tag)) continue;
+      let c = 0;
+      let t = 0;
+      let m = [];
+      if (Array.isArray(rawVal)) {
+        c = Number(rawVal[0]) || 0;
+        t = Number(rawVal[1]) || 0;
+        m = Array.isArray(rawVal[2]) ? rawVal[2].map(String).filter(Boolean).slice(-MAX_IDS_PER_HASHTAG) : [];
+      } else if (rawVal && typeof rawVal === "object") {
+        c = Number(rawVal.c) || 0;
+        t = Number(rawVal.t) || 0;
+        m = Array.isArray(rawVal.m) ? rawVal.m.map(String).filter(Boolean).slice(-MAX_IDS_PER_HASHTAG) : [];
+      }
+      const prev = chatHashtags.get(tag);
+      if (!prev) {
+        chatHashtags.set(tag, { c: Math.max(c, m.length), t, m });
+      } else {
+        const mergedIds = Array.from(new Set([...prev.m, ...m])).slice(-MAX_IDS_PER_HASHTAG);
+        chatHashtags.set(tag, {
+          c: Math.max(prev.c, c, mergedIds.length),
+          t: Math.max(prev.t, t),
+          m: mergedIds,
+        });
+      }
+    }
+  }
+  if (Array.isArray(chatHistory) && chatHistory.length > 0) {
+    for (const msg of chatHistory) {
+      indexMessageHashtags(msg, { persist: false });
+    }
+  }
   const storedBackgrounds = kvMap.chat_backgrounds_v1;
   if (storedBackgrounds && typeof storedBackgrounds === "object") {
     for (const [chId, rawUrl] of Object.entries(storedBackgrounds)) {
@@ -2436,6 +2548,7 @@ function ensureChatMetaLoaded() {
     chat_groups_v1: kvGetJson("chat_groups_v1", {}),
     chat_channels_v1: kvGetJson("chat_channels_v1", []),
     chat_backgrounds_v1: kvGetJson("chat_backgrounds_v1", {}),
+    chat_hashtags_v1: kvGetJson("chat_hashtags_v1", {}),
     staff_action_logs_v1: kvGetJson("staff_action_logs_v1", []),
     staff_user_notes_v1: kvGetJson("staff_user_notes_v1", {}),
     staff_user_notes_deleted_v1: kvGetJson("staff_user_notes_deleted_v1", []),
@@ -9852,6 +9965,7 @@ app.post("/api/chat/send", async (req, res) => {
 
     chatHistory.push(sanitizedMsg);
     persistChatHistory();
+    indexMessageHashtags(sanitizedMsg, { persist: true });
 
     // Broadcast via SSE to connected clients
     const eventPayload = {
@@ -9865,6 +9979,116 @@ app.post("/api/chat/send", async (req, res) => {
     res.json({ success: true, message: sanitizedMsg });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/chat/search", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const actor = await getModActor(req);
+    const requesterLower = (authUser?.username || "").toLowerCase();
+    const qRaw = String(req.query?.q || "").trim();
+    const filter = String(req.query?.filter || "all").trim().toLowerCase();
+    const userParam = String(req.query?.user || "").trim().replace(/^@/, "").toLowerCase();
+    const tagParam = String(req.query?.tag || "").trim().replace(/^#/, "").toLowerCase();
+    const limit = Math.max(1, Math.min(80, Number(req.query?.limit) || 40));
+
+    const qLower = qRaw.toLowerCase();
+    const effectiveTag = tagParam || (qLower.startsWith("#") ? qLower.slice(1).split(/\s+/)[0] : "");
+    const effectiveUser = userParam || (filter === "user" ? qLower.replace(/^@/, "") : (qLower.startsWith("@") ? qLower.slice(1).split(/\s+/)[0] : ""));
+
+    const canAccessChannel = (channelId) => {
+      const ch = String(channelId || "").trim();
+      if (!ch) return false;
+      if (ch.startsWith("dm:")) {
+        if (!requesterLower) return false;
+        const parts = ch.slice(3).split("|").map((p) => p.toLowerCase());
+        return parts.includes(requesterLower);
+      }
+      if (ch.startsWith("grp:")) {
+        if (!requesterLower) return false;
+        const grp = chatGroups.get(ch);
+        return Boolean(grp && Array.isArray(grp.members) && grp.members.some((m) => String(m).toLowerCase() === requesterLower));
+      }
+      const def = chatChannels.find((c) => c.id === ch);
+      if ((def && def.visibility === "staff") || ch === "staff-chat") {
+        return Boolean(actor.isMod);
+      }
+      return true;
+    };
+
+    // Build hashtags list (compact index + any matching private tags)
+    const tagQuery = effectiveTag || (filter === "hashtags" ? qLower.replace(/^#/, "") : "");
+    const hashtags = Array.from(chatHashtags.entries())
+      .filter(([tag]) => !tagQuery || tag.includes(tagQuery))
+      .map(([tag, data]) => ({
+        tag,
+        count: Number(data.c) || 0,
+        lastUsed: Number(data.t) || 0,
+      }))
+      .sort((a, b) => b.count - a.count || b.lastUsed - a.lastUsed)
+      .slice(0, 30);
+
+    const results = [];
+    for (let i = chatHistory.length - 1; i >= 0 && results.length < limit; i--) {
+      const msg = chatHistory[i];
+      if (!msg || !canAccessChannel(msg.channel)) continue;
+      if (msg.author && shadowbannedUsers.has(String(msg.author).toLowerCase()) && !actor.isMod) continue;
+
+      const ch = String(msg.channel || "");
+      const isDmOrGrp = ch.startsWith("dm:") || ch.startsWith("grp:");
+      const text = String(msg.text || "");
+      const textLower = text.toLowerCase();
+      const authorLower = String(msg.author || "").toLowerCase();
+      const msgTags = extractHashtagsFromText(text);
+
+      if (filter === "dms" && !isDmOrGrp) continue;
+      if (filter === "messages" && isDmOrGrp) continue;
+
+      if (filter === "user") {
+        if (!effectiveUser) continue;
+        if (!authorLower.includes(effectiveUser)) continue;
+      } else if (filter === "hashtags") {
+        if (msgTags.length === 0) continue;
+        if (tagQuery && !msgTags.some((t) => t.includes(tagQuery))) continue;
+      } else {
+        if (effectiveTag) {
+          if (!msgTags.some((t) => t === effectiveTag || t.includes(effectiveTag))) continue;
+        } else if (effectiveUser && qLower.startsWith("@")) {
+          if (!authorLower.includes(effectiveUser)) continue;
+        } else if (qLower) {
+          const matchesText = textLower.includes(qLower);
+          const matchesAuthor = authorLower.includes(qLower);
+          const matchesChan = ch.toLowerCase().includes(qLower);
+          const matchesTag = msgTags.some((t) => t.includes(qLower.replace(/^#/, "")));
+          if (!matchesText && !matchesAuthor && !matchesChan && !matchesTag) continue;
+        } else if (filter === "all") {
+          // Empty query in "all" mode: return nothing until user types or picks a filter
+          break;
+        }
+      }
+
+      results.push({
+        id: msg.id,
+        channel: ch,
+        author: msg.author,
+        text: text.slice(0, 220),
+        timestamp: msg.timestamp,
+        createdAt: Number(msg.createdAt) || 0,
+        hashtags: msgTags,
+      });
+    }
+
+    res.json({
+      success: true,
+      filter,
+      query: qRaw,
+      hashtags,
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Search failed" });
   }
 });
 
