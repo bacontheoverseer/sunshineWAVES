@@ -5822,3 +5822,84 @@ html.chromebook-mode .chat-media-toggle-btn {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
+
+/* ─────────────────────────────────────────────────────────────
+   CHAT "+" SLIDE-UP ADD MENU (IMAGES, ADD-ONS, GIFTS)
+   ───────────────────────────────────────────────────────────── */
+.chat-plus-toggle-btn i {
+  transition: transform 0.18s ease;
+}
+
+.chat-plus-toggle-btn.active i {
+  transform: rotate(45deg);
+}
+
+.chat-plus-menu {
+  position: absolute;
+  left: 16px;
+  bottom: calc(100% + 6px);
+  width: 248px;
+  padding: 6px;
+  border-radius: 16px;
+  background: rgba(16, 16, 24, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 60;
+  animation: chatPartnersSlideUp 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.chat-plus-menu-item {
+  width: 100%;
+  border: none;
+  border-radius: 11px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background-color 0.14s ease;
+}
+
+.chat-plus-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.chat-plus-menu-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.chat-plus-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.chat-plus-menu-text strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: lowercase;
+}
+
+.chat-plus-menu-text span {
+  font-size: 10.5px;
+  color: var(--color-sublabel);
+  text-transform: lowercase;
+}

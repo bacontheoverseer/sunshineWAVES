@@ -1044,6 +1044,8 @@ export default function ChatModal() {
   const [showGiftPicker, setShowGiftPicker] = useState(false);
   const [showPartnersPopover, setShowPartnersPopover] = useState(false);
   const partnersPopoverRef = useRef<HTMLDivElement>(null);
+  const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const plusMenuRef = useRef<HTMLDivElement>(null);
   const [giftTab, setGiftTab] = useState<"coins" | "cookie_master">("coins");
   const [giftRecipient, setGiftRecipient] = useState("");
   const [giftAmount, setGiftAmount] = useState("100");
@@ -3493,9 +3495,17 @@ export default function ChatModal() {
       if (
         showPartnersPopover &&
         !partnersPopoverRef.current?.contains(target) &&
-        !target.closest(".chat-partners-toggle-btn")
+        !target.closest(".chat-partners-toggle-btn") &&
+        !target.closest(".chat-plus-menu")
       ) {
         setShowPartnersPopover(false);
+      }
+      if (
+        showPlusMenu &&
+        !plusMenuRef.current?.contains(target) &&
+        !target.closest(".chat-plus-toggle-btn")
+      ) {
+        setShowPlusMenu(false);
       }
       if (
         reactingMessageId &&
@@ -3514,7 +3524,7 @@ export default function ChatModal() {
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [showGifPicker, showEmojiPicker, showGiftPicker, showPartnersPopover, reactingMessageId, reactPickerMessageId]);
+  }, [showGifPicker, showEmojiPicker, showGiftPicker, showPartnersPopover, showPlusMenu, reactingMessageId, reactPickerMessageId]);
 
   const isOwnerUser = Boolean(
     cloudUser &&
@@ -6338,21 +6348,24 @@ export default function ChatModal() {
                 }}>
                   <button
                     type="button"
-                    class={`chat-media-toggle-btn chat-partners-toggle-btn${showPartnersPopover ? " active" : ""}`}
-                    title="Add-ons (Music snippets, Embeds, Draw & Camera)"
-                    aria-label="Open add-ons"
+                    class={`chat-media-toggle-btn chat-plus-toggle-btn${
+                      showPlusMenu || showPartnersPopover || showGiftPicker ? " active" : ""
+                    }`}
+                    title="Add (Images, Add-ons, Gifts)"
+                    aria-label="Open add menu"
                     disabled={isSending}
                     onClick={() => {
                       setShowGifPicker(false);
                       setShowEmojiPicker(false);
+                      if (showPartnersPopover) {
+                        stopPickerSnippetAudio(false);
+                        setShowPartnersPopover(false);
+                      }
                       setShowGiftPicker(false);
-                      setShowPartnersPopover((v) => {
-                        if (v) stopPickerSnippetAudio(false);
-                        return !v;
-                      });
+                      setShowPlusMenu((v) => !v);
                     }}
                   >
-                    <i class="fa-solid fa-link"></i>
+                    <i class="fa-solid fa-plus"></i>
                   </button>
                   <input
                     ref={chatInputRef}
@@ -6389,16 +6402,6 @@ export default function ChatModal() {
                   />
                   <button
                     type="button"
-                    class="chat-media-toggle-btn"
-                    title="Upload image (or paste / drop file)"
-                    aria-label="Upload image"
-                    disabled={isSending}
-                    onClick={() => imageFileInputRef.current?.click()}
-                  >
-                    <i class="fa-solid fa-image"></i>
-                  </button>
-                  <button
-                    type="button"
                     class={`chat-emoji-toggle-btn${showEmojiPicker ? " active" : ""}`}
                     title="Pick an emoji"
                     aria-label="Open emoji picker"
@@ -6406,30 +6409,11 @@ export default function ChatModal() {
                       setShowGifPicker(false);
                       setShowGiftPicker(false);
                       setShowPartnersPopover(false);
+                      setShowPlusMenu(false);
                       setShowEmojiPicker((v) => !v);
                     }}
                   >
                     <i class="fa-regular fa-face-smile"></i>
-                  </button>
-                  <button
-                    type="button"
-                    class={`chat-gift-toggle-btn${showGiftPicker ? " active" : ""}`}
-                    title="Send a gift (Cookie Coins or 1 Month Cookie Master)"
-                    aria-label="Send a gift"
-                    onClick={() => {
-                      setShowGifPicker(false);
-                      setShowEmojiPicker(false);
-                      setShowPartnersPopover(false);
-                      setShowGiftPicker((prev) => {
-                        const next = !prev;
-                        if (next && activeChannelDef.isDm && activeChannelDef.name) {
-                          setGiftRecipient(activeChannelDef.name);
-                        }
-                        return next;
-                      });
-                    }}
-                  >
-                    <i class="fa-solid fa-gift"></i>
                   </button>
                   <button
                     type="button"
@@ -6439,6 +6423,7 @@ export default function ChatModal() {
                       setShowEmojiPicker(false);
                       setShowGiftPicker(false);
                       setShowPartnersPopover(false);
+                      setShowPlusMenu(false);
                       setShowGifPicker((v) => !v);
                     }}
                   >
@@ -6475,6 +6460,62 @@ export default function ChatModal() {
                 }}
                 onClose={() => setReactPickerMessageId(null)}
               />
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showPlusMenu && (
+              <div class="chat-plus-menu" ref={plusMenuRef}>
+                <button
+                  type="button"
+                  class="chat-plus-menu-item"
+                  onClick={() => {
+                    setShowPlusMenu(false);
+                    imageFileInputRef.current?.click();
+                  }}
+                >
+                  <span class="chat-plus-menu-icon" style={{ color: "#38bdf8", background: "rgba(56, 189, 248, 0.14)" }}>
+                    <i class="fa-solid fa-image"></i>
+                  </span>
+                  <span class="chat-plus-menu-text">
+                    <strong>images</strong>
+                    <span>upload a photo or image</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  class="chat-plus-menu-item"
+                  onClick={() => {
+                    setShowPlusMenu(false);
+                    setShowPartnersPopover(true);
+                  }}
+                >
+                  <span class="chat-plus-menu-icon" style={{ color: "#c084fc", background: "rgba(192, 132, 252, 0.14)" }}>
+                    <i class="fa-solid fa-link"></i>
+                  </span>
+                  <span class="chat-plus-menu-text">
+                    <strong>add-ons</strong>
+                    <span>music, embeds, draw &amp; apps</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  class="chat-plus-menu-item"
+                  onClick={() => {
+                    setShowPlusMenu(false);
+                    if (activeChannelDef.isDm && activeChannelDef.name) {
+                      setGiftRecipient(activeChannelDef.name);
+                    }
+                    setShowGiftPicker(true);
+                  }}
+                >
+                  <span class="chat-plus-menu-icon" style={{ color: "#facc15", background: "rgba(250, 204, 21, 0.14)" }}>
+                    <i class="fa-solid fa-gift"></i>
+                  </span>
+                  <span class="chat-plus-menu-text">
+                    <strong>gifts</strong>
+                    <span>cookie coins or cookie master</span>
+                  </span>
+                </button>
+              </div>
             )}
 
             {cloudUser && !isCurrentDmBlocked && showPartnersPopover && (
