@@ -2917,7 +2917,7 @@ html.chromebook-mode .chat-lastfm-eq > i {
   top: -24px;
   animation: effectFall var(--dur, 5s) linear infinite;
   animation-delay: var(--delay, 0s);
-  opacity: 0.48;
+  opacity: 0.78;
 }
 
 .chat-effect-particle.petal-white {
@@ -4207,19 +4207,19 @@ html.chromebook-mode .chat-user-item {
 }
 
 .chat-profile-effect-layer.chat-profile-effect-media.is-intro {
-  opacity: 0.56;
+  opacity: 0.92;
 }
 
 .chat-profile-effect-layer.chat-profile-effect-media.is-pulse {
-  opacity: 0.4;
+  opacity: 0.82;
 }
 
 .chat-profile-effect-layer.chat-profile-effect-media.is-resting {
-  opacity: 0.1;
+  opacity: 0.34;
 }
 
 .chat-profile-effect-layer.chat-profile-effect-media.is-preview {
-  opacity: 0.72;
+  opacity: 0.94;
 }
 
 .chat-profile-effect-img {

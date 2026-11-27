@@ -66,14 +66,14 @@ export function ProfileEffectLayer({
         settleTimer = window.setTimeout(() => {
           setEffectPhase("resting");
           scheduleNextPulse();
-        }, 2400);
-      }, 35000);
+        }, 3200);
+      }, 22000);
     };
 
     const introTimer = window.setTimeout(() => {
       setEffectPhase("resting");
       scheduleNextPulse();
-    }, 2600);
+    }, 3600);
 
     return () => {
       window.clearTimeout(introTimer);
