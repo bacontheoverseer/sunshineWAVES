@@ -111,6 +111,7 @@ interface ChatMessage {
   imageUrl?: string;
   imageName?: string;
   timestamp: string;
+  createdAt?: number;
   channel: string;
   recipient?: string | null;
   replyTo?: ChatReplyRef | null;
@@ -368,6 +369,9 @@ function notifyDmOrMentionToast(
 }
 
 function extractMsgEpochMs(msg: ChatMessage): number | null {
+  if (typeof msg.createdAt === "number" && Number.isFinite(msg.createdAt) && msg.createdAt > 0) {
+    return msg.createdAt;
+  }
   const m = /^msg_(\d{12,15})_/.exec(msg.id || "");
   if (!m || !m[1]) return null;
   const n = Number(m[1]);
@@ -379,6 +383,35 @@ function getMsgTimestampMs(msg: ChatMessage): number {
   if (fromId !== null && fromId > 0) return fromId;
   const parsed = Number(new Date(msg.timestamp).getTime());
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function getOrdinalSuffix(day: number): string {
+  const mod100 = day % 100;
+  if (mod100 >= 11 && mod100 <= 13) return "th";
+  switch (day % 10) {
+    case 1:
+      return "st";
+    case 2:
+      return "nd";
+    case 3:
+      return "rd";
+    default:
+      return "th";
+  }
+}
+
+function formatDayDividerLabel(epochMs: number): string {
+  const d = new Date(epochMs);
+  const month = d.toLocaleString("en-US", { month: "long" });
+  const day = d.getDate();
+  const year = d.getFullYear();
+  return `${month} ${day}${getOrdinalSuffix(day)}, ${year}`;
+}
+
+function getLocalDayKey(epochMs: number): string {
+  if (!epochMs || epochMs <= 0) return "";
+  const d = new Date(epochMs);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
 function shouldGroupMessages(prev: ChatMessage | undefined, curr: ChatMessage): boolean {
@@ -440,6 +473,7 @@ interface ChatMessageRowProps {
   isAuthorCookieMaster?: boolean;
   canDeleteMsg: boolean;
   displayName: string;
+  displayTimestamp: string;
   replyAuthorLabel: string;
   replyMiniCustom: ProfileCustomization | null;
   replyTextColorClass: string;
@@ -488,6 +522,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   isAuthorCookieMaster,
   canDeleteMsg,
   displayName,
+  displayTimestamp,
   replyAuthorLabel,
   replyMiniCustom,
   replyTextColorClass,
@@ -588,7 +623,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
       <div class="chat-entry-main">
         {isGrouped ? (
           <div class="chat-entry-gutter" aria-hidden="true">
-            <span class="chat-entry-hover-time">{msg.timestamp}</span>
+            <span class="chat-entry-hover-time">{displayTimestamp}</span>
           </div>
         ) : (
           <UserAvatar
@@ -627,7 +662,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
               {msgCustom?.customTag && (
                 <span class="chat-role-badge custom-tag">{msgCustom.customTag}</span>
               )}
-              <span class="chat-entry-time">{msg.timestamp}</span>
+              <span class="chat-entry-time">{displayTimestamp}</span>
             </div>
           )}
           {isEditingThis ? (
@@ -1082,6 +1117,29 @@ export default function ChatModal() {
   const stickerPickerRef = useRef<HTMLDivElement>(null);
   const [showPollCreator, setShowPollCreator] = useState(false);
   const pollCreatorRef = useRef<HTMLFormElement>(null);
+  const [useLocalTimezone, setUseLocalTimezone] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("chatLocalTimezone") !== "false";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    const syncTzSetting = () => {
+      try {
+        setUseLocalTimezone(localStorage.getItem("chatLocalTimezone") !== "false");
+      } catch {
+        setUseLocalTimezone(true);
+      }
+    };
+    window.addEventListener("sunshine-chat-settings-changed", syncTzSetting);
+    window.addEventListener("storage", syncTzSetting);
+    return () => {
+      window.removeEventListener("sunshine-chat-settings-changed", syncTzSetting);
+      window.removeEventListener("storage", syncTzSetting);
+    };
+  }, []);
   const [giftTab, setGiftTab] = useState<"coins" | "cookie_master">("coins");
   const [giftRecipient, setGiftRecipient] = useState("");
   const [giftAmount, setGiftAmount] = useState("100");
@@ -6235,7 +6293,17 @@ export default function ChatModal() {
                     : sliceStartIdx > 0
                     ? channelMessages[sliceStartIdx - 1]
                     : undefined;
-                const isGrouped = shouldGroupMessages(prevMsg, msg);
+                const msgTs = getMsgTimestampMs(msg);
+                const prevTs = prevMsg ? getMsgTimestampMs(prevMsg) : 0;
+                const currDayKey = getLocalDayKey(msgTs);
+                const prevDayKey = getLocalDayKey(prevTs);
+                const showDayDivider =
+                  Boolean(currDayKey) && (idx === 0 || (Boolean(prevDayKey) && currDayKey !== prevDayKey));
+                const isGrouped = !showDayDivider && shouldGroupMessages(prevMsg, msg);
+                const displayTimestamp =
+                  useLocalTimezone && msgTs > 0
+                    ? formatClockTime(new Date(msgTs))
+                    : msg.timestamp;
                 const isSelf = Boolean(
                   cloudUser && msg.author.toLowerCase() === cloudUser.toLowerCase()
                 );
@@ -6275,18 +6343,24 @@ export default function ChatModal() {
                 const isEditingThis = editingMessageId === msg.id;
 
                 return (
-                  <ChatMessageRow
-                    key={msg.id}
-                    msg={msg}
-                    isGrouped={isGrouped}
-                    isSelf={isSelf}
-                    msgCustom={msgCustom}
-                    safeFallbackColor={safeFallbackColor}
-                    authorRole={authorRole}
-                    isAuthorGoat={isUserGoat(msg.author)}
-                    isAuthorCookieMaster={isUserCookieMaster(msg.author)}
-                    canDeleteMsg={canDeleteMsg}
-                    displayName={displayName}
+                  <div key={msg.id} class="chat-msg-slot">
+                    {showDayDivider && (
+                      <div class="chat-date-divider" role="separator">
+                        <span>{formatDayDividerLabel(msgTs)}</span>
+                      </div>
+                    )}
+                    <ChatMessageRow
+                      msg={msg}
+                      isGrouped={isGrouped}
+                      isSelf={isSelf}
+                      msgCustom={msgCustom}
+                      safeFallbackColor={safeFallbackColor}
+                      authorRole={authorRole}
+                      isAuthorGoat={isUserGoat(msg.author)}
+                      isAuthorCookieMaster={isUserCookieMaster(msg.author)}
+                      canDeleteMsg={canDeleteMsg}
+                      displayName={displayName}
+                      displayTimestamp={displayTimestamp}
                     replyAuthorLabel={replyAuthorLabel}
                     replyMiniCustom={replyMiniCustom}
                     replyTextColorClass={getNameClasses(replyMeta?.customization)}
@@ -6314,9 +6388,10 @@ export default function ChatModal() {
                     onToggleBlockUser={toggleBlockUser}
                     onDeleteMessage={handleDeleteMessage}
                     onVotePoll={handleVotePoll}
-                    onOpenImageLightbox={handleOpenImageLightbox}
-                    onCloseChat={() => setIsOpen(false)}
-                  />
+                      onOpenImageLightbox={handleOpenImageLightbox}
+                      onCloseChat={() => setIsOpen(false)}
+                    />
+                  </div>
                 );
               })
             )}

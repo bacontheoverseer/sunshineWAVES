@@ -134,6 +134,9 @@ export default function SettingsMenu() {
   const [focusCloaking, setFocusCloaking] = useState(
     () => localStorage.getItem("focusCloaking") !== "false",
   );
+  const [chatLocalTimezone, setChatLocalTimezone] = useState(
+    () => localStorage.getItem("chatLocalTimezone") !== "false",
+  );
   const [betaHomepageDecorations, setBetaHomepageDecorations] = useState(
     () => localStorage.getItem("betaHomepageDecorations") === "true",
   );
@@ -402,6 +405,7 @@ export default function SettingsMenu() {
   const tabs = [
     { id: "preferences", icon: "fa-sliders", label: "preferences" },
     { id: "appearance", icon: "fa-palette", label: "appearance" },
+    { id: "chat", icon: "fa-comments", label: "chat" },
     { id: "cloaking", icon: "fa-ghost", label: "cloaking" },
     { id: "advanced", icon: "fa-server", label: "advanced" },
     { id: "legal", icon: "fa-scale-balanced", label: "legal" },
@@ -666,6 +670,30 @@ export default function SettingsMenu() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+
+          <div
+            class={`tab-content${activeTab === "chat" ? " active" : ""}`}
+          >
+            <div class="settings-item">
+              <label>local timezone timestamps</label>
+              <p>display all chat message times in your local timezone instead of the sender's timezone.</p>
+              <Toggle
+                id="chat-local-timezone-toggle"
+                checked={chatLocalTimezone}
+                onChange={(v) => {
+                  setChatLocalTimezone(v);
+                  try {
+                    localStorage.setItem("chatLocalTimezone", String(v));
+                  } catch {}
+                  window.dispatchEvent(
+                    new CustomEvent("sunshine-chat-settings-changed", {
+                      detail: { chatLocalTimezone: v },
+                    })
+                  );
+                }}
+              />
             </div>
           </div>
 
