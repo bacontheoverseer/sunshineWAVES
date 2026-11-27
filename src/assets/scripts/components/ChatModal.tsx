@@ -1332,6 +1332,8 @@ export default function ChatModal() {
     Array<{ tag: string; count: number; lastUsed: number }>
   >([]);
   const chatSearchInputRef = useRef<HTMLInputElement>(null);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
   const [chIcon, setChIcon] = useState("fa-hashtag");
   const [chVisibility, setChVisibility] = useState<"all" | "staff">("all");
   const [chWriteAccess, setChWriteAccess] = useState<"all" | "staff">("all");
@@ -5180,6 +5182,21 @@ export default function ChatModal() {
     window.setTimeout(() => chatSearchInputRef.current?.focus(), 40);
   }, []);
 
+  useEffect(() => {
+    setHeaderMenuOpen(false);
+  }, [activeChannel]);
+
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (headerMenuRef.current && !headerMenuRef.current.contains(e.target as Node)) {
+        setHeaderMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocDown);
+    return () => document.removeEventListener("mousedown", onDocDown);
+  }, [headerMenuOpen]);
+
   const isChatSearchActive =
     chatSearchQuery.trim().length > 0 || chatSearchFilter !== "all";
 
@@ -6132,35 +6149,20 @@ export default function ChatModal() {
             </div>
 
             <div class="chat-main-header-actions">
-              {/* DM Header Actions: View Profile, Voice Call & Block/Unblock */}
+              {/* Primary contextual quick-actions (compact icons to keep header uncluttered) */}
               {activeChannelDef.isDm && currentDmPartner && (
                 <>
                   <button
                     type="button"
-                    class="chat-header-btn"
-                    title={`View @${currentDmPartner}'s profile`}
-                    onClick={() => openUserProfile(currentDmPartner)}
-                  >
-                    <i class="fa-solid fa-id-card"></i>
-                    <span>profile</span>
-                  </button>
-                  <button
-                    type="button"
-                    class={`chat-header-btn ${chatBackgrounds[activeChannel] ? "voice-active" : ""}`}
-                    title="Set or remove DM chat background (image or GIF)"
-                    onClick={() => {
-                      setBgEditorChannel(activeChannel);
-                      setBgEditorDraftUrl(chatBackgrounds[activeChannel] || "");
-                    }}
-                  >
-                    <i class="fa-solid fa-image"></i>
-                    <span>background</span>
-                  </button>
-                  <button
-                    type="button"
-                    class={`chat-header-btn ${
+                    class={`chat-header-icon-btn ${
                       activeVoiceRoom === `voice:${activeChannel}` ? "voice-active" : ""
                     }`}
+                    title={
+                      activeVoiceRoom === `voice:${activeChannel}`
+                        ? "Leave voice call"
+                        : `Voice call @${currentDmPartner}`
+                    }
+                    aria-label="Voice call"
                     onClick={() => {
                       const dmVoiceId = `voice:${activeChannel}`;
                       if (activeVoiceRoom === dmVoiceId) {
@@ -6171,105 +6173,35 @@ export default function ChatModal() {
                     }}
                   >
                     <i class="fa-solid fa-phone-volume"></i>
-                    <span>
-                      {activeVoiceRoom === `voice:${activeChannel}`
-                        ? "in call"
-                        : "voice call"}
-                    </span>
                   </button>
                   <button
                     type="button"
-                    class={`chat-header-btn ${isCurrentDmBlocked ? "danger" : ""}`}
-                    onClick={() => toggleBlockUser(currentDmPartner)}
+                    class="chat-header-icon-btn"
+                    title={`View @${currentDmPartner}'s profile`}
+                    aria-label="View profile"
+                    onClick={() => openUserProfile(currentDmPartner)}
                   >
-                    <i class="fa-solid fa-ban"></i>
-                    <span>{isCurrentDmBlocked ? "unblock" : "block"}</span>
-                  </button>
-                  <button
-                    type="button"
-                    class="chat-header-btn danger"
-                    title={`Delete chat with @${currentDmPartner}`}
-                    onClick={() => setConfirmDeleteChat(activeChannel)}
-                  >
-                    <i class="fa-solid fa-trash-can"></i>
-                    <span>delete chat</span>
+                    <i class="fa-solid fa-id-card"></i>
                   </button>
                 </>
               )}
 
-              {/* Group Chat Header Actions */}
               {activeChannelDef.isGroup && activeChannelDef.groupDef && cloudUser && (
-                <>
-                  <button
-                    type="button"
-                    class="chat-header-btn"
-                    title="View or manage group members"
-                    onClick={() => setGroupModalMode("members")}
-                  >
-                    <i class="fa-solid fa-users"></i>
-                    <span>members ({activeChannelDef.groupDef.members.length})</span>
-                  </button>
-                  <button
-                    type="button"
-                    class={`chat-header-btn ${chatBackgrounds[activeChannel] ? "voice-active" : ""}`}
-                    title="Set or remove group chat background (image or GIF)"
-                    onClick={() => {
-                      setBgEditorChannel(activeChannel);
-                      setBgEditorDraftUrl(chatBackgrounds[activeChannel] || "");
-                    }}
-                  >
-                    <i class="fa-solid fa-image"></i>
-                    <span>background</span>
-                  </button>
-                  {(activeChannelDef.groupDef.creator.toLowerCase() === cloudUser.toLowerCase() ||
-                    selfRole === "owner") && (
-                    <button
-                      type="button"
-                      class="chat-header-btn danger"
-                      title={`Delete group "${activeChannelDef.name}"`}
-                      onClick={() => setConfirmDeleteChat(activeChannel)}
-                    >
-                      <i class="fa-solid fa-trash-can"></i>
-                      <span>delete group</span>
-                    </button>
-                  )}
-                </>
+                <button
+                  type="button"
+                  class="chat-header-btn is-compact"
+                  title="View or manage group members"
+                  onClick={() => setGroupModalMode("members")}
+                >
+                  <i class="fa-solid fa-users"></i>
+                  <span>{activeChannelDef.groupDef.members.length}</span>
+                </button>
               )}
 
-              {/* Public Channel Edit & Clear Chat Actions for Owner/Mod */}
-              {!activeChannelDef.isDm &&
-                !activeChannelDef.isGroup &&
-                !activeChannelDef.isVoice &&
-                isStaffUser && (
-                  <>
-                    {activeChannelCfg && (
-                      <button
-                        type="button"
-                        class="chat-header-btn"
-                        title={`Edit #${activeChannelDef.name} visibility & permissions`}
-                        onClick={() => openEditChannelModal(activeChannelCfg)}
-                      >
-                        <i class="fa-solid fa-sliders"></i>
-                        <span>edit channel</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      class="chat-header-btn danger"
-                      title={`Clear all messages in #${activeChannelDef.name}`}
-                      onClick={() => setConfirmDeleteChat(activeChannel)}
-                    >
-                      <i class="fa-solid fa-broom"></i>
-                      <span>clear chat</span>
-                    </button>
-                  </>
-                )}
-
-              {/* Voice Channel Header Action */}
               {activeChannelDef.isVoice && (
                 <button
                   type="button"
-                  class={`chat-header-btn ${
+                  class={`chat-header-btn is-compact ${
                     activeVoiceRoom === activeChannelDef.id ? "danger" : "voice-active"
                   }`}
                   onClick={() => {
@@ -6288,9 +6220,7 @@ export default function ChatModal() {
                     }`}
                   ></i>
                   <span>
-                    {activeVoiceRoom === activeChannelDef.id
-                      ? "disconnect"
-                      : "join voice"}
+                    {activeVoiceRoom === activeChannelDef.id ? "leave" : "join"}
                   </span>
                 </button>
               )}
@@ -6298,25 +6228,156 @@ export default function ChatModal() {
               {cloudUser && (selfRole === "owner" || selfRole === "mod") && (
                 <button
                   type="button"
-                  class="chat-header-btn"
-                  title="Manage staff moderators & timeouts"
+                  class="chat-header-icon-btn"
+                  title="Staff & moderation"
+                  aria-label="Staff & moderation"
                   onClick={() => setShowStaffModal(true)}
                 >
                   <i class="fa-solid fa-shield-halved"></i>
-                  <span>staff</span>
                 </button>
               )}
 
               {cloudUser && (
                 <button
                   type="button"
-                  class="chat-header-btn is-round-pill"
-                  title="Customize profile, banner, avatar frame & card effects"
+                  class="chat-header-icon-btn"
+                  title="Customize profile, banner, frames & effects"
+                  aria-label="Customize profile"
                   onClick={() => void handleOpenCustomizer()}
                 >
                   <i class="fa-solid fa-wand-magic-sparkles"></i>
-                  <span>customize</span>
                 </button>
+              )}
+
+              {/* Overflow menu for secondary / destructive channel & DM actions */}
+              {((activeChannelDef.isDm && currentDmPartner) ||
+                (activeChannelDef.isGroup && activeChannelDef.groupDef && cloudUser) ||
+                (!activeChannelDef.isDm &&
+                  !activeChannelDef.isGroup &&
+                  !activeChannelDef.isVoice &&
+                  isStaffUser)) && (
+                <div class="chat-header-menu-wrap" ref={headerMenuRef}>
+                  <button
+                    type="button"
+                    class={`chat-header-icon-btn ${headerMenuOpen ? "is-open" : ""}`}
+                    title="More actions"
+                    aria-label="More actions"
+                    aria-expanded={headerMenuOpen}
+                    onClick={() => setHeaderMenuOpen((v) => !v)}
+                  >
+                    <i class="fa-solid fa-ellipsis-vertical"></i>
+                  </button>
+
+                  {headerMenuOpen && (
+                    <div class="chat-header-overflow-menu" role="menu">
+                      {activeChannelDef.isDm && currentDmPartner && (
+                        <>
+                          <button
+                            type="button"
+                            class="chat-header-menu-item"
+                            onClick={() => {
+                              setHeaderMenuOpen(false);
+                              setBgEditorChannel(activeChannel);
+                              setBgEditorDraftUrl(chatBackgrounds[activeChannel] || "");
+                            }}
+                          >
+                            <i class="fa-solid fa-image"></i>
+                            <span>
+                              {chatBackgrounds[activeChannel] ? "edit background" : "set background"}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            class={`chat-header-menu-item ${isCurrentDmBlocked ? "danger" : ""}`}
+                            onClick={() => {
+                              setHeaderMenuOpen(false);
+                              toggleBlockUser(currentDmPartner);
+                            }}
+                          >
+                            <i class="fa-solid fa-ban"></i>
+                            <span>{isCurrentDmBlocked ? "unblock user" : "block user"}</span>
+                          </button>
+                          <button
+                            type="button"
+                            class="chat-header-menu-item danger"
+                            onClick={() => {
+                              setHeaderMenuOpen(false);
+                              setConfirmDeleteChat(activeChannel);
+                            }}
+                          >
+                            <i class="fa-solid fa-trash-can"></i>
+                            <span>delete chat</span>
+                          </button>
+                        </>
+                      )}
+
+                      {activeChannelDef.isGroup && activeChannelDef.groupDef && cloudUser && (
+                        <>
+                          <button
+                            type="button"
+                            class="chat-header-menu-item"
+                            onClick={() => {
+                              setHeaderMenuOpen(false);
+                              setBgEditorChannel(activeChannel);
+                              setBgEditorDraftUrl(chatBackgrounds[activeChannel] || "");
+                            }}
+                          >
+                            <i class="fa-solid fa-image"></i>
+                            <span>
+                              {chatBackgrounds[activeChannel] ? "edit background" : "set background"}
+                            </span>
+                          </button>
+                          {(activeChannelDef.groupDef.creator.toLowerCase() === cloudUser.toLowerCase() ||
+                            selfRole === "owner") && (
+                            <button
+                              type="button"
+                              class="chat-header-menu-item danger"
+                              onClick={() => {
+                                setHeaderMenuOpen(false);
+                                setConfirmDeleteChat(activeChannel);
+                              }}
+                            >
+                              <i class="fa-solid fa-trash-can"></i>
+                              <span>delete group</span>
+                            </button>
+                          )}
+                        </>
+                      )}
+
+                      {!activeChannelDef.isDm &&
+                        !activeChannelDef.isGroup &&
+                        !activeChannelDef.isVoice &&
+                        isStaffUser && (
+                          <>
+                            {activeChannelCfg && (
+                              <button
+                                type="button"
+                                class="chat-header-menu-item"
+                                onClick={() => {
+                                  setHeaderMenuOpen(false);
+                                  openEditChannelModal(activeChannelCfg);
+                                }}
+                              >
+                                <i class="fa-solid fa-sliders"></i>
+                                <span>edit channel</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              class="chat-header-menu-item danger"
+                              onClick={() => {
+                                setHeaderMenuOpen(false);
+                                setConfirmDeleteChat(activeChannel);
+                              }}
+                            >
+                              <i class="fa-solid fa-broom"></i>
+                              <span>clear chat</span>
+                            </button>
+                          </>
+                        )}
+                    </div>
+                  )}
+                </div>
               )}
 
               <button
