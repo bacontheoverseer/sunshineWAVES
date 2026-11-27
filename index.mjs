@@ -9168,6 +9168,200 @@ app.post("/api/chat/partners/embed-preview", async (req, res) => {
   }
 });
 
+// ── SCRAPED STICKERS CATALOG (Discord Official Sticker Packs + GitHub Animated 3D Emojis + BTTV Memes) ──
+let chatStickersCache = { expiresAt: 0, packs: [] };
+
+async function scrapeStickerPacks() {
+  const packs = [];
+  const proxyImg = (rawUrl) => `/api/chat/image-proxy?url=${encodeURIComponent(rawUrl)}`;
+
+  const [discordRes, ghSmiliesRes, ghAnimalsRes, ghHandsRes, bttvRes] = await Promise.all([
+    fetch("https://discord.com/api/v9/sticker-packs", {
+      headers: { "User-Agent": "OperationCookie/1.0" },
+      signal: AbortSignal.timeout(7000),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+    fetch("https://api.github.com/repos/Tarikul-Islam-Anik/Animated-Fluent-Emojis/contents/Emojis/Smilies", {
+      headers: { "User-Agent": "OperationCookie/1.0", Accept: "application/vnd.github.v3+json" },
+      signal: AbortSignal.timeout(7000),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+    fetch("https://api.github.com/repos/Tarikul-Islam-Anik/Animated-Fluent-Emojis/contents/Emojis/Animals", {
+      headers: { "User-Agent": "OperationCookie/1.0", Accept: "application/vnd.github.v3+json" },
+      signal: AbortSignal.timeout(7000),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+    fetch("https://api.github.com/repos/Tarikul-Islam-Anik/Animated-Fluent-Emojis/contents/Emojis/Hand%20gestures", {
+      headers: { "User-Agent": "OperationCookie/1.0", Accept: "application/vnd.github.v3+json" },
+      signal: AbortSignal.timeout(7000),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+    fetch("https://api.betterttv.net/3/cached/emotes/global", {
+      headers: { "User-Agent": "OperationCookie/1.0" },
+      signal: AbortSignal.timeout(6000),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+  ]);
+
+  // 1. Discord official sticker packs (PNG / APNG / GIF; skip Lottie format_type 3)
+  if (Array.isArray(discordRes?.sticker_packs)) {
+    for (const pack of discordRes.sticker_packs.slice(0, 8)) {
+      const packName = String(pack?.name || "Discord").trim();
+      const rawStickers = Array.isArray(pack?.stickers) ? pack.stickers : [];
+      const stickers = rawStickers
+        .filter((s) => s && s.id && Number(s.format_type) !== 3)
+        .slice(0, 24)
+        .map((s) => {
+          const ext = Number(s.format_type) === 4 ? "gif" : "png";
+          const cdnUrl = `https://media.discordapp.net/stickers/${s.id}.${ext}?size=160`;
+          return {
+            id: `dc_${s.id}`,
+            name: String(s.name || "sticker").trim().slice(0, 60),
+            tags: String(s.tags || "").trim().slice(0, 100),
+            url: proxyImg(cdnUrl),
+            pack: packName,
+          };
+        });
+      if (stickers.length > 0) {
+        packs.push({
+          id: `dc_${pack.id}`,
+          name: packName.toLowerCase(),
+          source: "discord",
+          stickers,
+        });
+      }
+    }
+  }
+
+  // 2. GitHub Animated Fluent 3D Stickers
+  const addGhPack = (id, name, list) => {
+    if (!Array.isArray(list)) return;
+    const stickers = list
+      .filter((f) => f && f.type === "file" && f.download_url && /\.(png|webp|gif)$/i.test(String(f.name || "")))
+      .slice(0, 48)
+      .map((f) => {
+        const cleanName = String(f.name).replace(/\.(png|webp|gif)$/i, "").trim();
+        return {
+          id: `gh_${id}_${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+          name: cleanName.toLowerCase(),
+          tags: `${name} ${cleanName}`.toLowerCase(),
+          url: proxyImg(String(f.download_url)),
+          pack: name,
+        };
+      });
+    if (stickers.length > 0) {
+      packs.push({ id: `gh_${id}`, name, source: "github", stickers });
+    }
+  };
+  addGhPack("smilies", "3d animated", ghSmiliesRes);
+  addGhPack("animals", "3d animals", ghAnimalsRes);
+  addGhPack("hands", "3d hands", ghHandsRes);
+
+  // 3. BetterTTV Global Reaction Memes
+  if (Array.isArray(bttvRes)) {
+    const stickers = bttvRes
+      .filter((e) => e && e.id && e.code)
+      .slice(0, 48)
+      .map((e) => {
+        const ext = e.imageType === "gif" ? "gif" : "png";
+        const cdnUrl = `https://cdn.betterttv.net/emote/${e.id}/3x.${ext}`;
+        return {
+          id: `bttv_${e.id}`,
+          name: String(e.code).trim(),
+          tags: `meme twitch discord ${String(e.code)}`.toLowerCase(),
+          url: proxyImg(cdnUrl),
+          pack: "memes",
+        };
+      });
+    if (stickers.length > 0) {
+      packs.push({ id: "bttv_global", name: "memes", source: "bttv", stickers });
+    }
+  }
+
+  return packs;
+}
+
+app.get("/api/chat/stickers", async (req, res) => {
+  try {
+    const q = String(req.query?.q || "").trim().toLowerCase();
+    if (!chatStickersCache.packs.length || Date.now() > chatStickersCache.expiresAt) {
+      const scraped = await scrapeStickerPacks();
+      if (scraped.length > 0) {
+        chatStickersCache = { expiresAt: Date.now() + 6 * 60 * 60 * 1000, packs: scraped };
+      }
+    }
+    let packs = chatStickersCache.packs;
+    if (q) {
+      packs = packs
+        .map((p) => ({
+          ...p,
+          stickers: p.stickers.filter(
+            (s) =>
+              s.name.toLowerCase().includes(q) ||
+              s.tags.toLowerCase().includes(q) ||
+              p.name.toLowerCase().includes(q)
+          ),
+        }))
+        .filter((p) => p.stickers.length > 0);
+    }
+    res.setHeader("Cache-Control", "public, max-age=300");
+    return res.json({ success: true, packs });
+  } catch (err) {
+    return res.status(500).json({ success: false, packs: [], error: err?.message || "failed to load stickers" });
+  }
+});
+
+function isAllowedStickerUrl(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s || s.length > 1000) return false;
+  if (s.startsWith("/api/chat/image-proxy?url=")) {
+    try {
+      const inner = decodeURIComponent(s.slice("/api/chat/image-proxy?url=".length));
+      const u = new URL(inner);
+      const h = u.hostname.toLowerCase();
+      return (
+        u.protocol === "https:" &&
+        (h === "media.discordapp.net" ||
+          h === "cdn.discordapp.com" ||
+          h === "raw.githubusercontent.com" ||
+          h === "cdn.betterttv.net")
+      );
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function sanitizeChatPoll(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const question = String(raw.question || "").trim().slice(0, 140);
+  if (question.length < 2) return null;
+  const rawOpts = Array.isArray(raw.options) ? raw.options : [];
+  const options = [];
+  for (let i = 0; i < rawOpts.length && options.length < 5; i++) {
+    const item = rawOpts[i];
+    const txt = String(typeof item === "string" ? item : item?.text || "").trim().slice(0, 70);
+    if (!txt) continue;
+    options.push({
+      id: `opt_${options.length}`,
+      text: txt,
+      votes: [],
+    });
+  }
+  if (options.length < 2) return null;
+  return {
+    question,
+    options,
+    createdAt: Date.now(),
+  };
+}
+
 function sanitizePartnerCard(raw) {
   if (!raw || typeof raw !== "object") return null;
   const type = String(raw.type || "").trim().toLowerCase();
@@ -9239,6 +9433,9 @@ app.post("/api/chat/send", async (req, res) => {
     const hasValidGif = Boolean(rawGifUrl && isAllowedKlipyMediaUrl(rawGifUrl));
     const rawImageUrl = typeof message?.imageUrl === "string" ? message.imageUrl.trim() : "";
     const hasValidImage = Boolean(rawImageUrl && isAllowedChatImageUrl(rawImageUrl));
+    const rawStickerUrl = typeof message?.stickerUrl === "string" ? message.stickerUrl.trim() : "";
+    const hasValidSticker = Boolean(rawStickerUrl && isAllowedStickerUrl(rawStickerUrl));
+    const cleanPoll = sanitizeChatPoll(message?.poll);
     const parsedPartnerCard = sanitizePartnerCard(message?.partnerCard);
     if (parsedPartnerCard?._blocked) {
       return res.status(403).json({
@@ -9254,7 +9451,15 @@ app.post("/api/chat/send", async (req, res) => {
     if (rawImageUrl && !hasValidImage) {
       return res.status(400).json({ success: false, error: "Invalid chat image URL" });
     }
-    if (!message || !message.author || !message.channel || (!cleanText && !hasValidGif && !hasValidImage && !cleanPartnerCard)) {
+    if (rawStickerUrl && !hasValidSticker) {
+      return res.status(400).json({ success: false, error: "Invalid sticker URL" });
+    }
+    if (
+      !message ||
+      !message.author ||
+      !message.channel ||
+      (!cleanText && !hasValidGif && !hasValidImage && !cleanPartnerCard && !hasValidSticker && !cleanPoll)
+    ) {
       return res.status(400).json({ success: false, error: "Invalid message" });
     }
 
@@ -9363,6 +9568,13 @@ app.post("/api/chat/send", async (req, res) => {
             imageName: typeof message?.imageName === "string" ? message.imageName.trim().slice(0, 80) : "image",
           }
         : {}),
+      ...(hasValidSticker
+        ? {
+            stickerUrl: rawStickerUrl,
+            stickerName: typeof message?.stickerName === "string" ? message.stickerName.trim().slice(0, 60) : "sticker",
+          }
+        : {}),
+      ...(cleanPoll ? { poll: cleanPoll } : {}),
       ...(cleanPartnerCard ? { partnerCard: cleanPartnerCard } : {}),
       ...(cleanReplyTo ? { replyTo: cleanReplyTo } : {}),
       channel: String(message.channel).trim().slice(0, 120),
@@ -9555,8 +9767,14 @@ app.post("/api/chat/send", async (req, res) => {
       return res.status(200).json({ success: true, message: sanitizedMsg });
     }
 
-    if (sanitizedMsg.text) {
-      const mod = await moderateTextWithOpenAI(sanitizedMsg.text);
+    const textToModerate = [
+      sanitizedMsg.text || "",
+      cleanPoll ? `${cleanPoll.question} ${cleanPoll.options.map((o) => o.text).join(" ")}` : "",
+    ]
+      .join(" ")
+      .trim();
+    if (textToModerate) {
+      const mod = await moderateTextWithOpenAI(textToModerate);
       if (mod.flagged) {
         return res.status(400).json({
           success: false,
@@ -9582,6 +9800,62 @@ app.post("/api/chat/send", async (req, res) => {
     res.json({ success: true, message: sanitizedMsg });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/poll-vote", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    if (!authUser) {
+      return res.status(401).json({ success: false, error: "Sign in to vote on polls" });
+    }
+    const messageId = String(req.body?.messageId || "").trim();
+    const optionId = String(req.body?.optionId || "").trim();
+    if (!messageId || !optionId) {
+      return res.status(400).json({ success: false, error: "messageId and optionId required" });
+    }
+    const idx = chatHistory.findIndex((m) => m && m.id === messageId);
+    if (idx === -1 || !chatHistory[idx]?.poll || !Array.isArray(chatHistory[idx].poll.options)) {
+      return res.status(404).json({ success: false, error: "Poll not found" });
+    }
+    const targetMsg = chatHistory[idx];
+    const userKey = authUser.username.toLowerCase();
+    if (!canAccessChatChannel(targetMsg.channel, userKey)) {
+      return res.status(403).json({ success: false, error: "Cannot vote on a poll in this channel" });
+    }
+    const targetOpt = targetMsg.poll.options.find((o) => o.id === optionId);
+    if (!targetOpt) {
+      return res.status(400).json({ success: false, error: "Invalid poll option" });
+    }
+
+    const alreadyVotedThis = Array.isArray(targetOpt.votes) && targetOpt.votes.includes(userKey);
+    const nextOptions = targetMsg.poll.options.map((opt) => {
+      const cleaned = Array.isArray(opt.votes) ? opt.votes.filter((u) => u !== userKey) : [];
+      if (opt.id === optionId && !alreadyVotedThis) {
+        cleaned.push(userKey);
+      }
+      return { ...opt, votes: cleaned };
+    });
+
+    const nextPoll = {
+      ...targetMsg.poll,
+      options: nextOptions,
+    };
+    chatHistory[idx] = { ...targetMsg, poll: nextPoll };
+    persistChatHistory();
+
+    broadcastChatPayload(targetMsg.channel, {
+      type: "chat-event",
+      event: "POLL_UPDATED",
+      messageId,
+      channel: targetMsg.channel,
+      poll: nextPoll,
+    });
+
+    return res.json({ success: true, poll: nextPoll });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err?.message || "Failed to vote" });
   }
 });
 

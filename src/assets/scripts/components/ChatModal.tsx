@@ -64,6 +64,13 @@ import ChatPartnersPopover, {
   type ChatPartnerCardPayload,
 } from "./ChatPartnersPopover.tsx";
 import {
+  ChatPollCard,
+  ChatPollCreator,
+  ChatStickerPicker,
+  type ChatPollData,
+  type ChatStickerItem,
+} from "./ChatStickersAndPolls.tsx";
+import {
   type CompressedImageResult,
   compressImageFile,
   formatBytesLabel,
@@ -96,6 +103,9 @@ interface ChatMessage {
   text: string;
   gift?: ChatGiftPayload | null;
   partnerCard?: ChatPartnerCardPayload | null;
+  stickerUrl?: string;
+  stickerName?: string;
+  poll?: ChatPollData | null;
   gifUrl?: string;
   gifTitle?: string;
   imageUrl?: string;
@@ -504,6 +514,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onOpenDirectMessage,
   onToggleBlockUser,
   onDeleteMessage,
+  onVotePoll,
   onOpenImageLightbox,
   onCloseChat,
 }: ChatMessageRowProps) {
@@ -713,6 +724,27 @@ const ChatMessageRow = memo(function ChatMessageRow({
               card={msg.partnerCard}
               onOpenImageLightbox={onOpenImageLightbox}
               onCloseChat={onCloseChat}
+            />
+          )}
+          {msg.stickerUrl && (
+            <div class="chat-entry-sticker-wrap">
+              <img
+                class="chat-entry-sticker"
+                src={msg.stickerUrl}
+                alt={msg.stickerName || "sticker"}
+                title={msg.stickerName || "sticker"}
+                loading="lazy"
+                decoding="async"
+                onClick={() => onOpenImageLightbox(msg.stickerUrl!, msg.stickerName || "sticker")}
+              />
+            </div>
+          )}
+          {msg.poll && (
+            <ChatPollCard
+              poll={msg.poll}
+              currentUserLower={(cloudUser || "").toLowerCase()}
+              disabled={!cloudUser}
+              onVote={(optId) => onVotePoll(msg.id, optId)}
             />
           )}
           {isAllowedKlipyUrl(msg.gifUrl) && (
@@ -1046,6 +1078,10 @@ export default function ChatModal() {
   const partnersPopoverRef = useRef<HTMLDivElement>(null);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const plusMenuRef = useRef<HTMLDivElement>(null);
+  const [showStickerPicker, setShowStickerPicker] = useState(false);
+  const stickerPickerRef = useRef<HTMLDivElement>(null);
+  const [showPollCreator, setShowPollCreator] = useState(false);
+  const pollCreatorRef = useRef<HTMLFormElement>(null);
   const [giftTab, setGiftTab] = useState<"coins" | "cookie_master">("coins");
   const [giftRecipient, setGiftRecipient] = useState("");
   const [giftAmount, setGiftAmount] = useState("100");
@@ -2654,12 +2690,15 @@ export default function ChatModal() {
                   const reactionsChanged =
                     JSON.stringify(existing.reactions || {}) !==
                     JSON.stringify(srv.reactions || {});
+                  const pollChanged =
+                    JSON.stringify(existing.poll || null) !==
+                    JSON.stringify(srv.poll || null);
                   const metaChanged =
                     existing.role !== srv.role ||
                     existing.avatarColor !== srv.avatarColor ||
                     JSON.stringify(existing.customization || null) !==
                       JSON.stringify(srv.customization || null);
-                  if (editChanged || reactionsChanged || metaChanged) {
+                  if (editChanged || reactionsChanged || pollChanged || metaChanged) {
                     changed = true;
                     kept.push({
                       ...existing,
@@ -2667,6 +2706,7 @@ export default function ChatModal() {
                       ...(srv.edited !== undefined ? { edited: srv.edited } : {}),
                       ...(srv.editedAt !== undefined ? { editedAt: srv.editedAt } : {}),
                       reactions: srv.reactions || {},
+                      ...(srv.poll ? { poll: srv.poll } : {}),
                       ...(srv.role ? { role: srv.role } : {}),
                       ...(srv.avatarColor ? { avatarColor: srv.avatarColor } : {}),
                       ...(srv.customization ? { customization: srv.customization } : {}),
@@ -3085,6 +3125,16 @@ export default function ChatModal() {
           if (nextUrl) copy[targetCh] = nextUrl;
           else delete copy[targetCh];
           return copy;
+        });
+      } else if (evtKind === "POLL_UPDATED" && detail.messageId && detail.poll) {
+        const mid = String(detail.messageId);
+        const nextPoll = detail.poll as ChatPollData;
+        setMessages((prev) => {
+          const next = prev.map((m) => (m.id === mid ? { ...m, poll: nextPoll } : m));
+          try {
+            batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(next));
+          } catch {}
+          return next;
         });
       } else if (evtKind === "GOAT_UPDATED") {
         if (Array.isArray(detail.goatUsers)) setGoatUsers(detail.goatUsers);
@@ -3508,6 +3558,20 @@ export default function ChatModal() {
         setShowPlusMenu(false);
       }
       if (
+        showStickerPicker &&
+        !stickerPickerRef.current?.contains(target) &&
+        !target.closest(".chat-plus-menu")
+      ) {
+        setShowStickerPicker(false);
+      }
+      if (
+        showPollCreator &&
+        !pollCreatorRef.current?.contains(target) &&
+        !target.closest(".chat-plus-menu")
+      ) {
+        setShowPollCreator(false);
+      }
+      if (
         reactingMessageId &&
         !target.closest(".chat-quick-react-bar") &&
         !target.closest(".chat-react-toggle-btn")
@@ -3524,7 +3588,7 @@ export default function ChatModal() {
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [showGifPicker, showEmojiPicker, showGiftPicker, showPartnersPopover, showPlusMenu, reactingMessageId, reactPickerMessageId]);
+  }, [showGifPicker, showEmojiPicker, showGiftPicker, showPartnersPopover, showPlusMenu, showStickerPicker, showPollCreator, reactingMessageId, reactPickerMessageId]);
 
   const isOwnerUser = Boolean(
     cloudUser &&
@@ -3814,13 +3878,16 @@ export default function ChatModal() {
     rawText: string,
     gif?: { url: string; title?: string },
     imageOverride?: CompressedImageResult | null,
-    partnerCard?: ChatPartnerCardPayload | null
+    partnerCard?: ChatPartnerCardPayload | null,
+    extra?: { sticker?: ChatStickerItem; poll?: ChatPollData }
   ) => {
     if (!cloudUser || isSending) return;
     const text = rawText.trim();
     const validGif = gif && isAllowedKlipyUrl(gif.url) ? gif : undefined;
     const imageToSend = imageOverride !== undefined ? imageOverride : pendingImage;
-    if (!text && !validGif && !imageToSend && !partnerCard) return;
+    const stickerToSend = extra?.sticker || null;
+    const pollToSend = extra?.poll || null;
+    if (!text && !validGif && !imageToSend && !partnerCard && !stickerToSend && !pollToSend) return;
 
     // Prevent sending DM to a user you have blocked
     if (activeChannel.startsWith("dm:")) {
@@ -3892,6 +3959,10 @@ export default function ChatModal() {
             }
           : {}),
         ...(partnerCard ? { partnerCard } : {}),
+        ...(stickerToSend
+          ? { stickerUrl: stickerToSend.url, stickerName: stickerToSend.name }
+          : {}),
+        ...(pollToSend ? { poll: pollToSend } : {}),
         ...(activeReply
           ? {
               replyTo: {
@@ -4533,6 +4604,62 @@ export default function ChatModal() {
     }
     await sendChatMessage("", { url: gif.url, title: gif.title });
   };
+
+  const handleVotePoll = useCallback(
+    async (messageId: string, optionId: string) => {
+      if (!cloudUser) {
+        notifyToast("sign in to vote on polls", "error");
+        return;
+      }
+      const userLower = cloudUser.toLowerCase();
+      // Optimistic toggle
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId || !m.poll) return m;
+          const curOpt = m.poll.options.find((o) => o.id === optionId);
+          const already = Boolean(curOpt?.votes?.includes(userLower));
+          return {
+            ...m,
+            poll: {
+              ...m.poll,
+              options: m.poll.options.map((o) => {
+                const cleaned = (o.votes || []).filter((u) => u !== userLower);
+                if (o.id === optionId && !already) cleaned.push(userLower);
+                return { ...o, votes: cleaned };
+              }),
+            },
+          };
+        })
+      );
+
+      try {
+        let token = "";
+        try { token = localStorage.getItem("auth_token") || ""; } catch {}
+        const res = await fetch("/api/chat/poll-vote", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ messageId, optionId }),
+        });
+        const data = await res.json().catch(() => null);
+        if (res.ok && data?.success && data.poll) {
+          setMessages((prev) => {
+            const next = prev.map((m) => (m.id === messageId ? { ...m, poll: data.poll } : m));
+            try {
+              batchedLocalStorageSet("cookie_chat_messages_v2", JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+        } else if (data?.error) {
+          notifyToast(String(data.error).toLowerCase(), "error");
+        }
+      } catch {}
+    },
+    [cloudUser]
+  );
 
   const handleOpenCloudSyncModal = () => {
     document.dispatchEvent(new CustomEvent("toggleAuthModal"));
@@ -6186,6 +6313,7 @@ export default function ChatModal() {
                     onOpenDirectMessage={openDirectMessage}
                     onToggleBlockUser={toggleBlockUser}
                     onDeleteMessage={handleDeleteMessage}
+                    onVotePoll={handleVotePoll}
                     onOpenImageLightbox={handleOpenImageLightbox}
                     onCloseChat={() => setIsOpen(false)}
                   />
@@ -6349,14 +6477,18 @@ export default function ChatModal() {
                   <button
                     type="button"
                     class={`chat-media-toggle-btn chat-plus-toggle-btn${
-                      showPlusMenu || showPartnersPopover || showGiftPicker ? " active" : ""
+                      showPlusMenu || showPartnersPopover || showGiftPicker || showStickerPicker || showPollCreator
+                        ? " active"
+                        : ""
                     }`}
-                    title="Add (Images, Add-ons, Gifts)"
+                    title="Add"
                     aria-label="Open add menu"
                     disabled={isSending}
                     onClick={() => {
                       setShowGifPicker(false);
                       setShowEmojiPicker(false);
+                      setShowStickerPicker(false);
+                      setShowPollCreator(false);
                       if (showPartnersPopover) {
                         stopPickerSnippetAudio(false);
                         setShowPartnersPopover(false);
@@ -6472,13 +6604,30 @@ export default function ChatModal() {
                     imageFileInputRef.current?.click();
                   }}
                 >
-                  <span class="chat-plus-menu-icon" style={{ color: "#38bdf8", background: "rgba(56, 189, 248, 0.14)" }}>
-                    <i class="fa-solid fa-image"></i>
-                  </span>
-                  <span class="chat-plus-menu-text">
-                    <strong>images</strong>
-                    <span>upload a photo or image</span>
-                  </span>
+                  <i class="fa-solid fa-image"></i>
+                  <span>image</span>
+                </button>
+                <button
+                  type="button"
+                  class="chat-plus-menu-item"
+                  onClick={() => {
+                    setShowPlusMenu(false);
+                    setShowStickerPicker(true);
+                  }}
+                >
+                  <i class="fa-solid fa-note-sticky"></i>
+                  <span>stickers</span>
+                </button>
+                <button
+                  type="button"
+                  class="chat-plus-menu-item"
+                  onClick={() => {
+                    setShowPlusMenu(false);
+                    setShowPollCreator(true);
+                  }}
+                >
+                  <i class="fa-solid fa-square-poll-horizontal"></i>
+                  <span>poll</span>
                 </button>
                 <button
                   type="button"
@@ -6488,13 +6637,8 @@ export default function ChatModal() {
                     setShowPartnersPopover(true);
                   }}
                 >
-                  <span class="chat-plus-menu-icon" style={{ color: "#c084fc", background: "rgba(192, 132, 252, 0.14)" }}>
-                    <i class="fa-solid fa-link"></i>
-                  </span>
-                  <span class="chat-plus-menu-text">
-                    <strong>add-ons</strong>
-                    <span>music, embeds, draw &amp; apps</span>
-                  </span>
+                  <i class="fa-solid fa-link"></i>
+                  <span>add-ons</span>
                 </button>
                 <button
                   type="button"
@@ -6507,15 +6651,39 @@ export default function ChatModal() {
                     setShowGiftPicker(true);
                   }}
                 >
-                  <span class="chat-plus-menu-icon" style={{ color: "#facc15", background: "rgba(250, 204, 21, 0.14)" }}>
-                    <i class="fa-solid fa-gift"></i>
-                  </span>
-                  <span class="chat-plus-menu-text">
-                    <strong>gifts</strong>
-                    <span>cookie coins or cookie master</span>
-                  </span>
+                  <i class="fa-solid fa-gift"></i>
+                  <span>gift</span>
                 </button>
               </div>
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showStickerPicker && (
+              <ChatStickerPicker
+                pickerRef={stickerPickerRef}
+                onSelect={(sticker) => {
+                  if (!canTypeInActiveChannel) {
+                    notifyToast("only owners and mods can post in this channel", "error");
+                    return;
+                  }
+                  void sendChatMessage("", undefined, null, null, { sticker });
+                }}
+                onClose={() => setShowStickerPicker(false)}
+              />
+            )}
+
+            {cloudUser && !isCurrentDmBlocked && showPollCreator && (
+              <ChatPollCreator
+                popoverRef={pollCreatorRef}
+                disabled={isSending}
+                onCreatePoll={async (poll) => {
+                  if (!canTypeInActiveChannel) {
+                    notifyToast("only owners and mods can post in this channel", "error");
+                    return;
+                  }
+                  await sendChatMessage("", undefined, null, null, { poll });
+                }}
+                onClose={() => setShowPollCreator(false)}
+              />
             )}
 
             {cloudUser && !isCurrentDmBlocked && showPartnersPopover && (
