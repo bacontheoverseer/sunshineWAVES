@@ -13,6 +13,7 @@ import {
 } from "../core/cookieCoins.ts";
 import { moderateChatMessage } from "../core/contentFilter.ts";
 import { awardGamePassXp } from "../core/gamePass.ts";
+import { checkGameplayMilestoneAchievements } from "../core/achievements.ts";
 import { getClientId } from "../core/liveClient.ts";
 import { isChromebookModeEnabled, useChromebookMode } from "../core/chromebookMode.ts";
 
@@ -646,7 +647,7 @@ export default function GameSpaceModal() {
         });
       }
 
-      // Every 60 seconds of active play, award Cookie Coins & Cookie Pass XP!
+      // Every 60 seconds of active play, award Cookie Coins, Cookie Pass XP, and check game milestones!
       if (playSeconds % 60 === 0) {
         const mult = getCoinMultiplier();
         if (playSeconds % 300 === 0) {
@@ -656,6 +657,23 @@ export default function GameSpaceModal() {
           addCookieCoins(10 * mult, `playing ${gName}`);
           awardGamePassXp(10, "game", { silent: true });
         }
+        try {
+          const me = getActiveUser().toLowerCase();
+          const myEntry = localUpdated.find((e) => e.username.toLowerCase() === me);
+          const allBoardsRaw = localStorage.getItem("cookie_game_leaderboards_v2");
+          let uniqueCount = 1;
+          if (allBoardsRaw) {
+            const parsed = JSON.parse(allBoardsRaw) as Record<string, LeaderboardEntry[]>;
+            uniqueCount = Object.values(parsed).filter(
+              (arr) => Array.isArray(arr) && arr.some((e) => e.username.toLowerCase() === me)
+            ).length;
+          }
+          checkGameplayMilestoneAchievements(
+            gName,
+            Math.max(playSeconds, Number(myEntry?.seconds) || 0),
+            uniqueCount
+          );
+        } catch {}
       }
     }, 1000);
 

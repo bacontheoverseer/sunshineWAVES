@@ -1,3 +1,4 @@
+import { useState, useEffect } from "preact/hooks";
 import {
   getSafeMediaProxySrc,
 } from "../core/profileCustomization.ts";
@@ -33,19 +34,65 @@ const CONFETTI_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#38bdf8", "#a855f7"];
 export function ProfileEffectLayer({
   effect,
   effectUrl,
+  preview = false,
 }: {
   effect?: string | undefined;
   effectUrl?: string | undefined;
+  preview?: boolean;
 }) {
   const mediaLayers = effectUrl
     ? findProfileEffectLayers(effectUrl)
         .map((u) => getSafeMediaProxySrc(u))
         .filter(Boolean)
     : [];
+
+  // Play full-frame media effects briefly on open (2.6s), then settle to a subtle
+  // resting ambient layer so profile text is always crisp and readable; only pulse
+  // gently again every 35s if the card stays open.
+  const [effectPhase, setEffectPhase] = useState<"intro" | "resting" | "pulse">("intro");
+
+  useEffect(() => {
+    if (preview || mediaLayers.length === 0) {
+      setEffectPhase("intro");
+      return;
+    }
+    setEffectPhase("intro");
+    let pulseTimer: number | null = null;
+    let settleTimer: number | null = null;
+
+    const scheduleNextPulse = () => {
+      pulseTimer = window.setTimeout(() => {
+        setEffectPhase("pulse");
+        settleTimer = window.setTimeout(() => {
+          setEffectPhase("resting");
+          scheduleNextPulse();
+        }, 2400);
+      }, 35000);
+    };
+
+    const introTimer = window.setTimeout(() => {
+      setEffectPhase("resting");
+      scheduleNextPulse();
+    }, 2600);
+
+    return () => {
+      window.clearTimeout(introTimer);
+      if (pulseTimer !== null) window.clearTimeout(pulseTimer);
+      if (settleTimer !== null) window.clearTimeout(settleTimer);
+    };
+  }, [effectUrl, preview, mediaLayers.length]);
+
   if (mediaLayers.length > 0) {
+    const phaseClass = preview
+      ? "is-preview"
+      : effectPhase === "resting"
+      ? "is-resting"
+      : effectPhase === "pulse"
+      ? "is-pulse"
+      : "is-intro";
     return (
       <div
-        class="chat-profile-effect-layer chat-profile-effect-media"
+        class={`chat-profile-effect-layer chat-profile-effect-media ${phaseClass}`}
         aria-hidden="true"
       >
         {mediaLayers.map((src) => (

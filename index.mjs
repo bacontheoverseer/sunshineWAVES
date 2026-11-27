@@ -1318,6 +1318,7 @@ const LIVE_SSE_PRESENCE_TTL_MS = 360000; // Covers Chrome 5-min background throt
 const HTTP_HEARTBEAT_PRESENCE_TTL_MS = 65000; // Keeps HTTP-heartbeating tabs online across throttled timers or SSE reconnects
 const knownUsers = new Map(); // usernameLower -> { username, lastSeen, game, isPlayingGame, gameStartedAt }
 const userProfiles = new Map(); // usernameLower -> { bio, statusText, customization, updatedAt }
+const userAchievements = new Map(); // usernameLower -> Array<{ id, game, title, description, source, icon, unlockedAt }>
 const staffModerators = new Set(ENV_STAFF_MODS); // Set<usernameLower>
 const goatUsers = new Set(); // Set<usernameLower> - golden GOAT title honorees
 const chatTimeouts = new Map(); // usernameLower -> { until, reason, by, updatedAt }
@@ -1488,6 +1489,7 @@ const CHAT_META_KV_KEYS = [
   "staff_moderators_v1",
   "goat_users_v1",
   "user_profiles_v2",
+  "user_achievements_v1",
   "chat_timeouts_v1",
   "chat_groups_v1",
   "chat_channels_v1",
@@ -2191,6 +2193,27 @@ function applyChatMetaKvMap(kvMap) {
       );
     }
   }
+  const achs = kvMap.user_achievements_v1;
+  if (achs && typeof achs === "object") {
+    for (const [k, list] of Object.entries(achs)) {
+      const lower = String(k || "").trim().toLowerCase();
+      if (!lower || !Array.isArray(list)) continue;
+      const existing = userAchievements.get(lower) || [];
+      const byId = new Map();
+      for (const item of existing) {
+        if (item && item.id) byId.set(item.id, item);
+      }
+      for (const item of list) {
+        if (item && typeof item.id === "string" && typeof item.title === "string" && !byId.has(item.id)) {
+          byId.set(item.id, item);
+        }
+      }
+      const merged = Array.from(byId.values())
+        .sort((a, b) => (Number(b.unlockedAt) || 0) - (Number(a.unlockedAt) || 0))
+        .slice(0, 250);
+      userAchievements.set(lower, merged);
+    }
+  }
   const tms = kvMap.chat_timeouts_v1;
   if (tms && typeof tms === "object") {
     const now = Date.now();
@@ -2407,6 +2430,7 @@ function ensureChatMetaLoaded() {
     staff_moderators_v1: kvGetJson("staff_moderators_v1", []),
     goat_users_v1: kvGetJson("goat_users_v1", []),
     user_profiles_v2: kvGetJson("user_profiles_v2", {}),
+    user_achievements_v1: kvGetJson("user_achievements_v1", {}),
     chat_timeouts_v1: kvGetJson("chat_timeouts_v1", {}),
     chat_history_v1: kvGetJson("chat_history_v1", []),
     chat_groups_v1: kvGetJson("chat_groups_v1", {}),
@@ -3509,6 +3533,46 @@ function persistUserProfiles({ updatedKey = "", deletedKey = "" } = {}) {
     }
   }
   kvSetJson("user_profiles_v2", buildUserProfilesObject());
+}
+
+function getAchievementThresholdServer(level) {
+  const lv = Math.max(0, Math.floor(level));
+  if (lv <= 10) return (lv * (lv + 1)) / 2;
+  return 55 + (lv - 10) * 10;
+}
+
+function computeAchievementProgressServer(rawCount) {
+  const count = Math.max(0, Math.floor(Number(rawCount) || 0));
+  let level = 0;
+  while (getAchievementThresholdServer(level + 1) <= count) {
+    level++;
+    if (level >= 999) break;
+  }
+  const currentLevelAt = getAchievementThresholdServer(level);
+  const nextLevelAt = getAchievementThresholdServer(level + 1);
+  return { count, level, currentLevelAt, nextLevelAt };
+}
+
+function getUserAchievementsSummaryServer(usernameKey) {
+  const k = String(usernameKey || "").trim().toLowerCase();
+  const list = (k && userAchievements.get(k)) || [];
+  const prog = computeAchievementProgressServer(list.length);
+  return {
+    ...prog,
+    items: list.slice(0, 60),
+  };
+}
+
+function persistUserAchievements() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of userAchievements.entries()) {
+    if (Array.isArray(v) && v.length > 0) {
+      out[k] = v.slice(0, 250);
+      if (++count >= 5000) break;
+    }
+  }
+  kvSetJson("user_achievements_v1", out);
 }
 
 function persistChatTimeouts() {
@@ -8578,6 +8642,7 @@ app.get("/api/chat/user-profile", async (req, res) => {
           }
         : null,
       publishedGamesCount: userPublishedGames.length,
+      achievements: getUserAchievementsSummaryServer(canonicalKey || key),
       ...(actor.isMod
         ? {
             isShadowbanned: isAccountShadowbanned(canonicalKey),
@@ -11876,6 +11941,95 @@ app.get("/api/easyfun/games.json", async (_req, res) => {
       return res.json(easyfunGamesCache.data);
     }
     return res.json(EASYFUN_FALLBACK_GAMES);
+  }
+});
+
+app.get("/api/achievements", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  const username = String(req.query?.username || "").trim().toLowerCase();
+  if (!username) {
+    return res.status(400).json({ success: false, error: "username required" });
+  }
+  const summary = getUserAchievementsSummaryServer(username);
+  res.json({ success: true, ...summary });
+});
+
+app.post("/api/achievements/unlock", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const authUser = await getAuthenticatedCloudSyncUser(req);
+    const body = req.body || {};
+    const targetUsername = (authUser?.username || body.username || "").toString().trim();
+    if (!targetUsername || /^guest/i.test(targetUsername)) {
+      return res.status(401).json({ success: false, error: "Sign in to CloudSync to log achievements" });
+    }
+    if (authUser && authUser.username.toLowerCase() !== targetUsername.toLowerCase()) {
+      return res.status(403).json({ success: false, error: "Cannot unlock achievements for another user" });
+    }
+
+    const cleanGame = String(body.game || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase()
+      .slice(0, 64);
+    const cleanTitle = String(body.title || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+    const cleanDesc = String(body.description || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160);
+    const source = ["scraped", "sdk", "milestone"].includes(String(body.source))
+      ? String(body.source)
+      : "scraped";
+    const icon = /^fa-[a-z0-9-]+$/i.test(String(body.icon || ""))
+      ? String(body.icon)
+      : "fa-trophy";
+
+    if (!cleanGame || !cleanTitle || cleanTitle.length < 2) {
+      return res.status(400).json({ success: false, error: "Invalid achievement game or title" });
+    }
+
+    const slug = (s) =>
+      String(s || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 64);
+    const id = `${slug(cleanGame)}:${slug(cleanTitle)}`;
+    if (!id || id === ":") {
+      return res.status(400).json({ success: false, error: "Invalid achievement id" });
+    }
+
+    const key = targetUsername.toLowerCase();
+    const existing = userAchievements.get(key) || [];
+    if (existing.some((a) => a && a.id === id)) {
+      const summary = getUserAchievementsSummaryServer(key);
+      return res.json({ success: true, unlocked: false, ...summary });
+    }
+
+    const entry = {
+      id,
+      game: cleanGame,
+      title: cleanTitle,
+      description: cleanDesc || undefined,
+      source,
+      icon,
+      unlockedAt: Number(body.unlockedAt) > 0 ? Number(body.unlockedAt) : Date.now(),
+    };
+
+    const next = [entry, ...existing].slice(0, 250);
+    userAchievements.set(key, next);
+    persistUserAchievements();
+
+    const summary = getUserAchievementsSummaryServer(key);
+    res.json({ success: true, unlocked: true, achievement: entry, ...summary });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Failed to log achievement" });
   }
 });
 

@@ -1065,6 +1065,7 @@ export default function ProfileCustomizerModal({
               <ProfileEffectLayer
                 effect={custom.profileEffect}
                 effectUrl={custom.profileEffectUrl}
+                preview
               />
               <ProfileFrameLayer
                 frameId={custom.cardFrameId}

@@ -21,6 +21,12 @@ import {
   spendCookieCoins,
 } from "../core/cookieCoins.ts";
 import { awardGamePassXp } from "../core/gamePass.ts";
+import {
+  computeAchievementProgress,
+  getLocalAchievements,
+  type UserAchievement,
+  type UserAchievementsSummary,
+} from "../core/achievements.ts";
 import { getDeviceSignature } from "../core/deviceSignature.ts";
 import {
   ChatRole,
@@ -205,6 +211,7 @@ interface UserProfileDetails {
     icon: string;
   } | null;
   publishedGamesCount: number;
+  achievements?: UserAchievementsSummary;
   isShadowbanned?: boolean;
   staffNotes?: StaffNoteRecord[];
   staffLogs?: StaffActionLogRecord[];
@@ -1262,6 +1269,7 @@ export default function ChatModal() {
   const [showCustomizer, setShowCustomizer] = useState(false);
   const [showStaffModal, setShowStaffModal] = useState(false);
   const [profileAuditTab, setProfileAuditTab] = useState<"notes" | "logs">("notes");
+  const [profileAchievementsOpen, setProfileAchievementsOpen] = useState(false);
   const [profileNoteDraft, setProfileNoteDraft] = useState("");
   const [profileNoteCategory, setProfileNoteCategory] = useState<StaffNoteCategory>("general");
   const [savingProfileNote, setSavingProfileNote] = useState(false);
@@ -1390,6 +1398,7 @@ export default function ChatModal() {
     setProfileData(null);
     setProfileLoading(false);
     setProfileNoteDraft("");
+    setProfileAchievementsOpen(false);
   }, []);
 
   useEffect(() => {
@@ -7295,22 +7304,74 @@ export default function ChatModal() {
                         <div class="chat-profile-handle-row">
                           <span>@{targetName}</span>
                           {custom.pronouns && <span>· {custom.pronouns}</span>}
+                          {verifiedProfile?.createdAt && (
+                            <span class="chat-profile-joined-inline">
+                              · <i class="fa-solid fa-calendar-days"></i>{" "}
+                              {new Date(verifiedProfile.createdAt).toLocaleDateString()}
+                            </span>
+                          )}
                         </div>
                         {verifiedProfile?.statusText && !isViewingSelf && (
                           <div class="chat-profile-custom-status">{verifiedProfile.statusText}</div>
                         )}
                       </div>
 
-                      {/* Live Game Activity Section */}
+                      {/* Quick Actions Row for other users — right under identity */}
+                      {!isViewingSelf && (
+                        <div class="chat-profile-quick-actions">
+                          <button
+                            type="button"
+                            class="chat-profile-act-btn primary"
+                            onClick={() => openDirectMessage(targetName)}
+                          >
+                            <i class="fa-solid fa-paper-plane"></i> message
+                          </button>
+                          <button
+                            type="button"
+                            class="chat-profile-act-btn"
+                            onClick={() => {
+                              setInputText((prev) =>
+                                prev.includes(`@${targetName}`)
+                                  ? prev
+                                  : `@${targetName} ${prev}`
+                              );
+                              closeUserProfile();
+                            }}
+                          >
+                            mention
+                          </button>
+                          <button
+                            type="button"
+                            class="chat-profile-act-btn call"
+                            title={`voice call @${targetName}`}
+                            onClick={() => {
+                              const dmChan = makeDmChannelId(cloudUser || "guest", targetName);
+                              setActiveChannel(dmChan);
+                              closeUserProfile();
+                              joinVoiceRoom(`voice:${dmChan}`);
+                            }}
+                          >
+                            <i class="fa-solid fa-phone-volume"></i> call
+                          </button>
+                          <button
+                            type="button"
+                            class={`chat-profile-act-btn ${blocked ? "danger" : "subtle"}`}
+                            onClick={() => toggleBlockUser(targetName)}
+                          >
+                            {blocked ? "unblock" : "block"}
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Live Game Activity Strip */}
                       {activeGameName && activeGameName !== "browsing" && (
                         <div class="chat-profile-activity-box">
-                          <div class="chat-profile-activity-label">
-                            <i class="fa-solid fa-gamepad"></i> currently playing
-                          </div>
                           <div class="chat-profile-activity-main">
-                            <span class="chat-profile-activity-game">{activeGameName}</span>
+                            <span class="chat-profile-activity-game">
+                              <i class="fa-solid fa-gamepad"></i> {activeGameName}
+                            </span>
                             <span class="chat-profile-activity-time">
-                              {formatElapsedDuration(activeGameStart, nowMs)} elapsed
+                              {formatElapsedDuration(activeGameStart, nowMs)}
                             </span>
                           </div>
                         </div>
@@ -7345,10 +7406,10 @@ export default function ChatModal() {
                         );
                       })()}
 
-                      {/* Bio / About Section (Editable for Own Profile + Joined Date) */}
+                      {/* Bio / About (Editable for Own Profile) */}
                       {isViewingSelf ? (
                         <form class="chat-profile-edit-form" onSubmit={handleSaveMyProfile}>
-                          <div class="chat-profile-section-title">your status, bio &amp; last.fm</div>
+                          <div class="chat-profile-section-title">status, bio &amp; last.fm</div>
                           <input
                             type="text"
                             class="chat-mod-input"
@@ -7428,250 +7489,305 @@ export default function ChatModal() {
                           </div>
                         </form>
                       ) : (
-                        <div class={`chat-profile-section chat-profile-bio-card bio-${custom.bioStyle}`}>
+                        <div class={`chat-profile-bio-strip bio-${custom.bioStyle}`}>
                           <div class="chat-profile-bio-text">
                             {verifiedProfile?.bio || "no bio set yet."}
                           </div>
-                          {verifiedProfile?.createdAt && (
-                            <div class="chat-profile-joined">
-                              <i class="fa-solid fa-calendar-days"></i> member since{" "}
-                              {new Date(verifiedProfile.createdAt).toLocaleDateString()}
-                            </div>
-                          )}
                         </div>
                       )}
 
-                      {/* Game & Leaderboard Stats */}
-                      <div class="chat-profile-section">
-                        <div class="chat-profile-section-title">game & studio stats</div>
-                        {profileLoading && !verifiedProfile ? (
-                          <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
-                            loading profile stats...
-                          </div>
-                        ) : (
+                      {/* 2-Column Bento Row: Achievements Level Ring (Left Half) + Game & Studio Stats (Right Half) */}
+                      {(() => {
+                        const serverAchItems: UserAchievement[] = Array.isArray(
+                          verifiedProfile?.achievements?.items
+                        )
+                          ? verifiedProfile.achievements.items
+                          : [];
+                        const localAchItems = isViewingSelf
+                          ? getLocalAchievements(targetName)
+                          : [];
+                        const mergedById = new Map<string, UserAchievement>();
+                        for (const item of serverAchItems) {
+                          if (item?.id) mergedById.set(item.id, item);
+                        }
+                        for (const item of localAchItems) {
+                          if (item?.id && !mergedById.has(item.id)) {
+                            mergedById.set(item.id, item);
+                          }
+                        }
+                        const achItems = Array.from(mergedById.values()).sort(
+                          (a, b) => (b.unlockedAt || 0) - (a.unlockedAt || 0)
+                        );
+                        const totalAchCount = Math.max(
+                          verifiedProfile?.achievements?.count || 0,
+                          achItems.length
+                        );
+                        const achProg = computeAchievementProgress(totalAchCount);
+                        const ringRadius = 29;
+                        const ringCirc = 2 * Math.PI * ringRadius;
+                        const ringOffset = ringCirc * (1 - achProg.progressPct / 100);
+
+                        return (
                           <>
-                            <div class="chat-profile-stats-grid">
-                              <div class="chat-profile-stat-pill">
-                                <span class="chat-profile-stat-val">
-                                  {formatPlayTime(verifiedProfile?.stats?.totalSeconds || 0)}
-                                </span>
-                                <span class="chat-profile-stat-lbl">total time played</span>
-                              </div>
-                              <div class="chat-profile-stat-pill">
-                                <span class="chat-profile-stat-val">
-                                  {verifiedProfile?.stats?.totalPlays || 0}
-                                </span>
-                                <span class="chat-profile-stat-lbl">total game sessions</span>
-                              </div>
-                              <div class="chat-profile-stat-pill">
-                                <span class="chat-profile-stat-val">
-                                  {verifiedProfile?.publishedGamesCount || 0}
-                                </span>
-                                <span class="chat-profile-stat-lbl">published games</span>
+                            <div class="chat-profile-bento-row">
+                              <button
+                                type="button"
+                                class={`chat-profile-bento-tile chat-profile-ach-tile tier-${achProg.tier} ${
+                                  profileAchievementsOpen ? "is-open" : ""
+                                }`}
+                                aria-expanded={profileAchievementsOpen}
+                                onClick={() => setProfileAchievementsOpen((v) => !v)}
+                                title="Click to inspect unlocked achievements"
+                              >
+                                <div class="chat-profile-tile-head">
+                                  <span>achievements</span>
+                                  <i
+                                    class={`fa-solid ${
+                                      profileAchievementsOpen ? "fa-chevron-up" : "fa-chevron-down"
+                                    }`}
+                                  ></i>
+                                </div>
+                                <div class="chat-profile-ach-ring-wrap">
+                                  <svg
+                                    class="chat-profile-ach-ring"
+                                    viewBox="0 0 72 72"
+                                    aria-hidden="true"
+                                  >
+                                    <circle
+                                      class="chat-profile-ach-track"
+                                      cx="36"
+                                      cy="36"
+                                      r={ringRadius}
+                                    />
+                                    <circle
+                                      class="chat-profile-ach-arc"
+                                      cx="36"
+                                      cy="36"
+                                      r={ringRadius}
+                                      stroke-dasharray={ringCirc}
+                                      stroke-dashoffset={ringOffset}
+                                    />
+                                  </svg>
+                                  <div class="chat-profile-ach-center">
+                                    <span class="chat-profile-ach-lvl">{achProg.level}</span>
+                                    <span class="chat-profile-ach-lvl-lbl">level</span>
+                                  </div>
+                                </div>
+                                <div class="chat-profile-ach-meta">
+                                  <span class="chat-profile-ach-count">
+                                    {achProg.count} unlocked
+                                  </span>
+                                  <span class="chat-profile-ach-next">
+                                    {achProg.remainingToNext} to lv {achProg.level + 1}
+                                  </span>
+                                </div>
+                              </button>
+
+                              <div class="chat-profile-bento-tile chat-profile-stats-tile">
+                                <div class="chat-profile-tile-head">
+                                  <span>game &amp; studio</span>
+                                </div>
+                                {profileLoading && !verifiedProfile ? (
+                                  <div class="chat-profile-tile-loading">loading stats...</div>
+                                ) : (
+                                  <div class="chat-profile-stat-list">
+                                    <div class="chat-profile-stat-row">
+                                      <span class="chat-profile-stat-key">time played</span>
+                                      <span class="chat-profile-stat-num">
+                                        {formatPlayTime(verifiedProfile?.stats?.totalSeconds || 0)}
+                                      </span>
+                                    </div>
+                                    <div class="chat-profile-stat-row">
+                                      <span class="chat-profile-stat-key">game sessions</span>
+                                      <span class="chat-profile-stat-num">
+                                        {verifiedProfile?.stats?.totalPlays || 0}
+                                      </span>
+                                    </div>
+                                    <div class="chat-profile-stat-row">
+                                      <span class="chat-profile-stat-key">published games</span>
+                                      <span class="chat-profile-stat-num">
+                                        {verifiedProfile?.publishedGamesCount || 0}
+                                      </span>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             </div>
 
-                            {verifiedProfile?.studio && (
-                              <div class="chat-profile-studio-row">
-                                <i
-                                  class={`fa-solid ${verifiedProfile.studio.icon || "fa-rocket"}`}
-                                  style={{ color: verifiedProfile.studio.color || "#60a5fa" }}
-                                ></i>
-                                <div>
-                                  <div style={{ fontWeight: 600, fontSize: "12px" }}>
-                                    {verifiedProfile.studio.name}
-                                  </div>
-                                  <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
-                                    {verifiedProfile.studio.tagline}
-                                  </div>
+                            {profileAchievementsOpen && (
+                              <div class="chat-profile-ach-drawer">
+                                <div class="chat-profile-ach-drawer-head">
+                                  <span>
+                                    <i class="fa-solid fa-trophy"></i> unlocked achievements ({achProg.count})
+                                  </span>
+                                  <span class="chat-profile-ach-drawer-sub">
+                                    auto-logged from games played
+                                  </span>
                                 </div>
+                                {achItems.length === 0 ? (
+                                  <div class="chat-profile-ach-empty">
+                                    no achievements logged yet — play games on operation cookie to unlock &amp; level up.
+                                  </div>
+                                ) : (
+                                  <div class="chat-profile-ach-list">
+                                    {achItems.slice(0, 25).map((ach) => (
+                                      <div key={ach.id} class="chat-profile-ach-item">
+                                        <span class="chat-profile-ach-icon">
+                                          <i class={`fa-solid ${ach.icon || "fa-trophy"}`}></i>
+                                        </span>
+                                        <div class="chat-profile-ach-info">
+                                          <div class="chat-profile-ach-title">{ach.title}</div>
+                                          <div class="chat-profile-ach-sub">
+                                            <span>{ach.game}</span>
+                                            {ach.description ? <span> · {ach.description}</span> : null}
+                                          </div>
+                                        </div>
+                                        <span class="chat-profile-ach-date">
+                                          {ach.unlockedAt
+                                            ? new Date(ach.unlockedAt).toLocaleDateString()
+                                            : ""}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
                             )}
-
-                            {verifiedProfile?.stats?.topGames &&
-                              verifiedProfile.stats.topGames.length > 0 && (
-                                <div class="chat-profile-top-games">
-                                  {verifiedProfile.stats.topGames.slice(0, 3).map((g) => (
-                                    <div key={g.game} class="chat-profile-top-game-row">
-                                      <span class="chat-profile-top-game-name">{g.game}</span>
-                                      <span class="chat-profile-top-game-time">
-                                        {formatPlayTime(g.seconds)}
-                                        {g.highScore > 0 ? ` · score ${g.highScore}` : ""}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
                           </>
-                        )}
-                      </div>
+                        );
+                      })()}
 
-                      {/* Actions for other users (mention / message / block + call) */}
-                      {!isViewingSelf && (
-                        <>
-                          <div class="chat-profile-actions-grid">
-                            <button
-                              type="button"
-                              class="chat-profile-pill-btn"
-                              onClick={() => {
-                                setInputText((prev) =>
-                                  prev.includes(`@${targetName}`)
-                                    ? prev
-                                    : `@${targetName} ${prev}`
-                                );
-                                closeUserProfile();
-                              }}
-                            >
-                              mention
-                            </button>
-                            <button
-                              type="button"
-                              class="chat-profile-pill-btn primary"
-                              onClick={() => openDirectMessage(targetName)}
-                            >
-                              message
-                            </button>
-                            <button
-                              type="button"
-                              class={`chat-profile-pill-btn ${blocked ? "danger" : ""}`}
-                              onClick={() => toggleBlockUser(targetName)}
-                            >
-                              {blocked ? "unblock" : "block"}
-                            </button>
-                          </div>
+                      {/* Dynamic Studio & Top Games (only shown when data exists) */}
+                      {(verifiedProfile?.studio ||
+                        (verifiedProfile?.stats?.topGames &&
+                          verifiedProfile.stats.topGames.length > 0)) && (
+                        <div class="chat-profile-extras-block">
+                          {verifiedProfile?.studio && (
+                            <div class="chat-profile-studio-row">
+                              <i
+                                class={`fa-solid ${verifiedProfile.studio.icon || "fa-rocket"}`}
+                                style={{ color: verifiedProfile.studio.color || "#60a5fa" }}
+                              ></i>
+                              <div class="chat-profile-studio-info">
+                                <div class="chat-profile-studio-name">
+                                  {verifiedProfile.studio.name}
+                                </div>
+                                {verifiedProfile.studio.tagline && (
+                                  <div class="chat-profile-studio-tag">
+                                    {verifiedProfile.studio.tagline}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
 
-                          <button
-                            type="button"
-                            class="chat-header-btn voice-active"
-                            style={{ width: "100%", justifyContent: "center" }}
-                            onClick={() => {
-                              const dmChan = makeDmChannelId(cloudUser || "guest", targetName);
-                              setActiveChannel(dmChan);
-                              closeUserProfile();
-                              joinVoiceRoom(`voice:${dmChan}`);
-                            }}
-                          >
-                            <i class="fa-solid fa-phone-volume"></i> voice call @{targetName}
-                          </button>
-
-                        </>
+                          {verifiedProfile?.stats?.topGames &&
+                            verifiedProfile.stats.topGames.length > 0 && (
+                              <div class="chat-profile-top-games">
+                                {verifiedProfile.stats.topGames.slice(0, 3).map((g) => (
+                                  <div key={g.game} class="chat-profile-top-game-row">
+                                    <span class="chat-profile-top-game-name">{g.game}</span>
+                                    <span class="chat-profile-top-game-time">
+                                      {formatPlayTime(g.seconds)}
+                                      {g.highScore > 0 ? ` · score ${g.highScore}` : ""}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                        </div>
                       )}
 
                       {(canModTarget || canGrantGoat) && (
-                        <div
-                          class="chat-profile-section"
-                          style={{
-                            borderColor: canModTarget
-                              ? "rgba(45, 212, 191, 0.28)"
-                              : "rgba(250, 204, 21, 0.35)",
-                          }}
-                        >
-                          <div
-                            class="chat-profile-section-title"
-                            style={{ color: canModTarget ? "#5eead4" : "#fde047" }}
-                          >
+                        <div class="chat-profile-staff-block">
+                          <div class="chat-profile-staff-head">
                             <i class="fa-solid fa-shield-halved"></i> staff moderation
                           </div>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+                          <div class="chat-profile-staff-row">
                             {canGrantGoat && (
                               <button
                                 type="button"
-                                class="chat-profile-pill-btn"
-                                style={
-                                  targetIsGoat
-                                    ? {
-                                        color: "#fca5a5",
-                                        borderColor: "rgba(239, 68, 68, 0.42)",
-                                      }
-                                    : {
-                                        color: "#fef08a",
-                                        borderColor: "rgba(250, 204, 21, 0.58)",
-                                        background: "rgba(234, 179, 8, 0.22)",
-                                      }
-                                }
+                                class={`chat-profile-mod-chip ${targetIsGoat ? "danger" : "gold"}`}
                                 onClick={() =>
                                   void handleToggleGoatUser(targetName, !targetIsGoat)
                                 }
                               >
                                 <i class="fa-solid fa-trophy"></i>{" "}
-                                {targetIsGoat ? "remove GOAT" : "award GOAT"}
+                                {targetIsGoat ? "remove goat" : "award goat"}
+                              </button>
+                            )}
+                            {canModTarget && !activeChannel.startsWith("dm:") && (
+                              <button
+                                type="button"
+                                class="chat-profile-mod-chip danger"
+                                onClick={() => void handlePurgeUserMessages(targetName)}
+                              >
+                                purge #{activeChannel}
                               </button>
                             )}
                             {canModTarget && (
-                              <>
-                                {targetTimedOut ? (
-                                  <button
-                                    type="button"
-                                    class="chat-profile-pill-btn"
-                                    onClick={() => void handleTimeoutUser(targetName, 0)}
-                                  >
-                                    unmute
-                                  </button>
-                                ) : (
-                                  <>
-                                    {[
-                                      [1, "1m"],
-                                      [5, "5m"],
-                                      [15, "15m"],
-                                      [60, "1h"],
-                                      [525600, "perm"],
-                                    ].map(([mins, label]) => (
-                                      <button
-                                        key={String(mins)}
-                                        type="button"
-                                        class="chat-profile-pill-btn danger"
-                                        onClick={() =>
-                                          void handleTimeoutUser(targetName, Number(mins))
-                                        }
-                                      >
-                                        mute {label}
-                                      </button>
-                                    ))}
-                                  </>
-                                )}
-                                {!activeChannel.startsWith("dm:") && (
-                                  <button
-                                    type="button"
-                                    class="chat-profile-pill-btn danger"
-                                    onClick={() => void handlePurgeUserMessages(targetName)}
-                                  >
-                                    purge #{activeChannel}
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  class={`chat-profile-pill-btn ${
-                                    verifiedProfile?.isShadowbanned ? "" : "danger"
-                                  }`}
-                                  title="Device-ban & shadowban user (invalidates sessions & blocks device)"
-                                  onClick={() =>
-                                    void handleDeviceBanUser(
-                                      targetName,
-                                      Boolean(verifiedProfile?.isShadowbanned)
-                                    )
-                                  }
-                                >
-                                  <i class="fa-solid fa-fingerprint"></i>{" "}
-                                  {verifiedProfile?.isShadowbanned
-                                    ? "unban device / shadowban"
-                                    : "device ban & shadowban"}
-                                </button>
-                              </>
+                              <button
+                                type="button"
+                                class={`chat-profile-mod-chip ${
+                                  verifiedProfile?.isShadowbanned ? "" : "danger"
+                                }`}
+                                title="Device-ban & shadowban user (invalidates sessions & blocks device)"
+                                onClick={() =>
+                                  void handleDeviceBanUser(
+                                    targetName,
+                                    Boolean(verifiedProfile?.isShadowbanned)
+                                  )
+                                }
+                              >
+                                <i class="fa-solid fa-fingerprint"></i>{" "}
+                                {verifiedProfile?.isShadowbanned
+                                  ? "unban device"
+                                  : "device ban"}
+                              </button>
                             )}
                           </div>
+                          {canModTarget && (
+                            <div class="chat-profile-mute-strip">
+                              <span class="chat-profile-mute-lbl">mute</span>
+                              {targetTimedOut ? (
+                                <button
+                                  type="button"
+                                  class="chat-profile-mod-chip"
+                                  onClick={() => void handleTimeoutUser(targetName, 0)}
+                                >
+                                  unmute
+                                </button>
+                              ) : (
+                                <div class="chat-profile-mute-chips">
+                                  {[
+                                    [1, "1m"],
+                                    [5, "5m"],
+                                    [15, "15m"],
+                                    [60, "1h"],
+                                    [525600, "perm"],
+                                  ].map(([mins, label]) => (
+                                    <button
+                                      key={String(mins)}
+                                      type="button"
+                                      class="chat-profile-mod-chip danger"
+                                      onClick={() =>
+                                        void handleTimeoutUser(targetName, Number(mins))
+                                      }
+                                    >
+                                      {label}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
 
                       {canViewStaffAudit && (
-                        <div
-                          class="chat-profile-section chat-profile-staff-audit"
-                          style={{
-                            borderColor: "rgba(167, 139, 250, 0.35)",
-                            background: "rgba(30, 27, 46, 0.65)",
-                          }}
-                        >
-                          <div class="chat-profile-section-title" style={{ color: "#c4b5fd" }}>
-                            <i class="fa-solid fa-lock"></i> staff notes &amp; action log · admins/staff only
+                        <div class="chat-profile-staff-block chat-profile-staff-audit">
+                          <div class="chat-profile-staff-head">
+                            <i class="fa-solid fa-lock"></i> staff notes &amp; log
                           </div>
 
                           <div class="chat-staff-tabs" style={{ marginBottom: "6px" }}>
