@@ -68,6 +68,9 @@ const ACTION_META_MAP: Record<
   note_deleted: { label: "removed note", tone: "warn" },
   ban_device: { label: "device banned", tone: "danger" },
   unban_device: { label: "unbanned device", tone: "success" },
+  ban_account: { label: "account banned", tone: "danger" },
+  unban_account: { label: "account unbanned", tone: "success" },
+  delete_account: { label: "deleted account", tone: "danger" },
 };
 
 export function formatStaffLogActionMeta(action: string): {
@@ -110,6 +113,13 @@ interface ShadowbannedUserRecord {
   deviceCount?: number;
 }
 
+interface BannedAccountRecord {
+  username: string;
+  reason?: string;
+  by?: string;
+  createdAt?: string;
+}
+
 interface BannedDeviceRecord {
   id: string;
   username?: string;
@@ -136,10 +146,15 @@ export function StaffManagerContent({
   const [goatUsers, setGoatUsers] = useState<string[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<string[]>([]);
   const [timeouts, setTimeouts] = useState<TimeoutRecord[]>([]);
+  const [bannedAccounts, setBannedAccounts] = useState<BannedAccountRecord[]>([]);
   const [shadowbannedUsers, setShadowbannedUsers] = useState<ShadowbannedUserRecord[]>([]);
   const [bannedDevices, setBannedDevices] = useState<BannedDeviceRecord[]>([]);
   const [banFilter, setBanFilter] = useState("");
   const [manualUnbanUser, setManualUnbanUser] = useState("");
+  const [accountBanUser, setAccountBanUser] = useState("");
+  const [accountBanReason, setAccountBanReason] = useState("");
+  const [deleteAccountUser, setDeleteAccountUser] = useState("");
+  const [confirmDeleteUser, setConfirmDeleteUser] = useState<string | null>(null);
   const [recentLogs, setRecentLogs] = useState<StaffActionLogRecord[]>([]);
   const [recentNotes, setRecentNotes] = useState<StaffNoteRecord[]>([]);
   const [logUserFilter, setLogUserFilter] = useState("");
@@ -191,6 +206,9 @@ export function StaffManagerContent({
         }
         if (Array.isArray(data.recentNotes)) {
           setRecentNotes(data.recentNotes);
+        }
+        if (Array.isArray(data.bannedAccounts)) {
+          setBannedAccounts(data.bannedAccounts);
         }
         if (Array.isArray(data.shadowbannedUsers)) {
           setShadowbannedUsers(data.shadowbannedUsers);
@@ -407,6 +425,75 @@ export function StaffManagerContent({
     }
   };
 
+  const handleAccountBanAction = async (
+    username: string,
+    action: "ban" | "unban",
+    reason?: string
+  ) => {
+    const clean = username.trim().replace(/^@/, "");
+    if (!clean || busyUser) return;
+    setBusyUser(`acctban:${clean.toLowerCase()}`);
+    try {
+      const res = await fetch("/api/chat/mod/ban-account", {
+        method: "POST",
+        headers: buildHeaders(),
+        body: JSON.stringify({
+          username: clean,
+          action,
+          reason: (reason || "").trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notify?.("error", data?.error || `could not ${action} account`);
+        return;
+      }
+      if (action === "ban") {
+        setAccountBanUser("");
+        setAccountBanReason("");
+      }
+      notify?.(
+        "success",
+        action === "ban"
+          ? `banned account @${data.username || clean} (account only — no shadowban)`
+          : `unbanned account @${data.username || clean}`
+      );
+      await loadStaff();
+      onChanged?.();
+    } catch {
+      notify?.("error", "request failed");
+    } finally {
+      setBusyUser(null);
+    }
+  };
+
+  const handleDeleteSpecificAccount = async (username: string) => {
+    const clean = username.trim().replace(/^@/, "");
+    if (!clean || busyUser) return;
+    setBusyUser(`delacct:${clean.toLowerCase()}`);
+    try {
+      const res = await fetch("/api/chat/mod/delete-account", {
+        method: "POST",
+        headers: buildHeaders(),
+        body: JSON.stringify({ username: clean, reason: "deleted via staff panel" }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notify?.("error", data?.error || "could not delete account");
+        return;
+      }
+      setDeleteAccountUser("");
+      setConfirmDeleteUser(null);
+      notify?.("success", `permanently deleted account @${data.username || clean}`);
+      await loadStaff();
+      onChanged?.();
+    } catch {
+      notify?.("error", "request failed");
+    } finally {
+      setBusyUser(null);
+    }
+  };
+
   const inspectUserAudit = (username: string, tab: "logs" | "notes") => {
     const clean = username.trim().replace(/^@/, "");
     if (!clean) return;
@@ -480,7 +567,7 @@ export function StaffManagerContent({
               void loadStaff();
             }}
           >
-            <i class="fa-solid fa-fingerprint" /> bans ({shadowbannedUsers.length + bannedDevices.filter((d) => !shadowbannedUsers.some((s) => s.username.toLowerCase() === (d.username || "").toLowerCase())).length})
+            <i class="fa-solid fa-fingerprint" /> bans ({bannedAccounts.length + shadowbannedUsers.length + bannedDevices.filter((d) => !shadowbannedUsers.some((s) => s.username.toLowerCase() === (d.username || "").toLowerCase())).length})
           </button>
           <button
             type="button"
@@ -949,6 +1036,13 @@ export function StaffManagerContent({
       {isMod && activeSubTab === "bans" && (() => {
         const qBan = banFilter.trim().replace(/^@/, "").toLowerCase();
         const shadowSet = new Set(shadowbannedUsers.map((s) => s.username.toLowerCase()));
+        const filteredAccountBans = bannedAccounts.filter((b) => {
+          if (!qBan) return true;
+          return (
+            b.username.toLowerCase().includes(qBan) ||
+            String(b.reason || "").toLowerCase().includes(qBan)
+          );
+        });
         const filteredShadowbanned = shadowbannedUsers.filter((s) => {
           if (!qBan) return true;
           return (
@@ -968,7 +1062,181 @@ export function StaffManagerContent({
         });
 
         return (
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {/* Account-only Ban (no shadowban, no device ban) */}
+            <form
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px",
+                padding: "9px 10px",
+                borderRadius: "9px",
+                background: "rgba(255,255,255,0.03)",
+                border: "1px solid rgba(255,255,255,0.08)",
+              }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (accountBanUser.trim()) {
+                  void handleAccountBanAction(accountBanUser, "ban", accountBanReason);
+                }
+              }}
+            >
+              <div class="chat-profile-section-title" style={{ marginBottom: 0 }}>
+                <i class="fa-solid fa-ban" /> ban account (account only · no shadowban)
+              </div>
+              <div style={{ display: "flex", gap: "5px" }}>
+                <input
+                  type="text"
+                  class="chat-mod-input"
+                  style={{ flex: 1 }}
+                  placeholder="@username to ban..."
+                  value={accountBanUser}
+                  onInput={(e) => setAccountBanUser((e.target as HTMLInputElement).value)}
+                />
+                <input
+                  type="text"
+                  class="chat-mod-input"
+                  style={{ flex: 1.2 }}
+                  placeholder="reason (optional)..."
+                  value={accountBanReason}
+                  onInput={(e) => setAccountBanReason((e.target as HTMLInputElement).value)}
+                />
+                <button
+                  type="submit"
+                  class="chat-profile-pill-btn danger"
+                  disabled={!accountBanUser.trim() || Boolean(busyUser)}
+                  style={{ flexShrink: 0 }}
+                >
+                  ban
+                </button>
+              </div>
+            </form>
+
+            {/* Specific Account Deletion */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px",
+                padding: "9px 10px",
+                borderRadius: "9px",
+                background: "rgba(239, 68, 68, 0.05)",
+                border: "1px solid rgba(239, 68, 68, 0.22)",
+              }}
+            >
+              <div class="chat-profile-section-title" style={{ marginBottom: 0, color: "#fca5a5" }}>
+                <i class="fa-solid fa-user-xmark" /> delete specific account (permanent)
+              </div>
+              <div style={{ display: "flex", gap: "5px", alignItems: "center" }}>
+                <input
+                  type="text"
+                  class="chat-mod-input"
+                  placeholder="exact @username to permanently delete..."
+                  value={deleteAccountUser}
+                  onInput={(e) => {
+                    setDeleteAccountUser((e.target as HTMLInputElement).value);
+                    setConfirmDeleteUser(null);
+                  }}
+                />
+                {confirmDeleteUser &&
+                confirmDeleteUser.toLowerCase() === deleteAccountUser.trim().replace(/^@/, "").toLowerCase() ? (
+                  <>
+                    <button
+                      type="button"
+                      class="chat-profile-pill-btn danger"
+                      style={{ flexShrink: 0, background: "rgba(239, 68, 68, 0.28)" }}
+                      disabled={Boolean(busyUser)}
+                      onClick={() => void handleDeleteSpecificAccount(confirmDeleteUser)}
+                    >
+                      confirm delete
+                    </button>
+                    <button
+                      type="button"
+                      class="chat-profile-pill-btn"
+                      style={{ flexShrink: 0 }}
+                      onClick={() => setConfirmDeleteUser(null)}
+                    >
+                      cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    class="chat-profile-pill-btn danger"
+                    disabled={!deleteAccountUser.trim() || Boolean(busyUser)}
+                    style={{ flexShrink: 0 }}
+                    onClick={() => {
+                      const clean = deleteAccountUser.trim().replace(/^@/, "");
+                      if (clean) setConfirmDeleteUser(clean);
+                    }}
+                  >
+                    delete
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <input
+              type="text"
+              class="chat-mod-input"
+              placeholder="filter banned accounts, shadowbans, or devices..."
+              value={banFilter}
+              onInput={(e) => setBanFilter((e.target as HTMLInputElement).value)}
+            />
+
+            {/* Account-only Bans List */}
+            <div>
+              <div class="chat-profile-section-title" style={{ marginBottom: "6px" }}>
+                <i class="fa-solid fa-ban" /> banned accounts ({filteredAccountBans.length})
+              </div>
+              {filteredAccountBans.length === 0 ? (
+                <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                  no account-only bans active.
+                </div>
+              ) : (
+                <div class="chat-staff-log-list">
+                  {filteredAccountBans.map((b) => (
+                    <div
+                      key={b.username.toLowerCase()}
+                      class="chat-staff-log-item"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "8px",
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div class="chat-staff-log-top">
+                          <span class="chat-staff-log-target">@{b.username}</span>
+                          <span class="chat-action-badge danger">account ban</span>
+                          {b.createdAt && (
+                            <span class="chat-staff-log-time">
+                              {new Date(b.createdAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <div class="chat-staff-log-meta">
+                          <span>{b.reason || "account banned by staff"}</span>
+                          {b.by ? <span> · by @{b.by}</span> : null}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="chat-profile-pill-btn"
+                        style={{ flexShrink: 0, color: "#86efac", borderColor: "rgba(34, 197, 94, 0.35)" }}
+                        disabled={busyUser === `acctban:${b.username.toLowerCase()}`}
+                        onClick={() => void handleAccountBanAction(b.username, "unban")}
+                      >
+                        {busyUser === `acctban:${b.username.toLowerCase()}` ? "..." : "unban"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Manual Un-shadowban / Un-device-ban */}
             <form
               style={{ display: "flex", gap: "6px" }}
               onSubmit={(e) => {
@@ -981,7 +1249,7 @@ export function StaffManagerContent({
               <input
                 type="text"
                 class="chat-mod-input"
-                placeholder="unban @username (removes shadowban & device ban)..."
+                placeholder="un-shadowban / un-device-ban @username..."
                 value={manualUnbanUser}
                 onInput={(e) => setManualUnbanUser((e.target as HTMLInputElement).value)}
               />
@@ -991,17 +1259,9 @@ export function StaffManagerContent({
                 disabled={!manualUnbanUser.trim() || Boolean(busyUser)}
                 style={{ flexShrink: 0 }}
               >
-                unban user
+                un-shadowban
               </button>
             </form>
-
-            <input
-              type="text"
-              class="chat-mod-input"
-              placeholder="filter banned users or devices..."
-              value={banFilter}
-              onInput={(e) => setBanFilter((e.target as HTMLInputElement).value)}
-            />
 
             <div>
               <div class="chat-profile-section-title" style={{ marginBottom: "6px" }}>

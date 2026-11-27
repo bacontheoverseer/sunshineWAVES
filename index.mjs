@@ -1421,6 +1421,7 @@ const deletedStaffNoteIds = new Set(); // Set<noteId>
 const deletedChatMessageIds = new Set(); // Set<messageId>
 const bannedDevices = []; // Array<{ id, fingerprint_id, storage_token, banned_username, banned_reason, high_confidence_spam, created_at }>
 const shadowbannedUsers = new Set(); // Set<usernameLower>
+const bannedAccounts = new Map(); // usernameLower -> { username, reason, by, createdAt }
 const userDeviceMap = new Map(); // usernameLower -> { fingerprint_id, storage_token, updatedAt }
 const userCreatedAtMap = new Map(); // usernameLower -> timestampMs
 const userRecoveryMap = new Map(); // usernameLower -> { questionId, answerNorm, updatedAt }
@@ -1577,6 +1578,7 @@ const CHAT_META_KV_KEYS = [
   "staff_user_notes_deleted_v1",
   "banned_devices_v1",
   "shadowbanned_users_v1",
+  "banned_accounts_v1",
   "user_device_map_v1",
   "user_created_at_v1",
   "user_last_active_v1",
@@ -2494,6 +2496,19 @@ function applyChatMetaKvMap(kvMap) {
       if (clean && !OWNER_USERNAMES.has(clean)) shadowbannedUsers.add(clean);
     }
   }
+  const sBannedAccts = kvMap.banned_accounts_v1;
+  if (sBannedAccts && typeof sBannedAccts === "object") {
+    for (const [k, v] of Object.entries(sBannedAccts)) {
+      const clean = String(k || "").trim().toLowerCase();
+      if (!clean || OWNER_USERNAMES.has(clean) || !v || typeof v !== "object") continue;
+      bannedAccounts.set(clean, {
+        username: String(v.username || clean).trim(),
+        reason: String(v.reason || "account banned by staff").trim().slice(0, 160),
+        by: String(v.by || "staff").trim(),
+        createdAt: String(v.createdAt || ""),
+      });
+    }
+  }
   const sDevMap = kvMap.user_device_map_v1;
   if (sDevMap && typeof sDevMap === "object") {
     for (const [uk, val] of Object.entries(sDevMap)) {
@@ -2565,6 +2580,7 @@ function ensureChatMetaLoaded() {
     staff_user_notes_deleted_v1: kvGetJson("staff_user_notes_deleted_v1", []),
     banned_devices_v1: kvGetJson("banned_devices_v1", []),
     shadowbanned_users_v1: kvGetJson("shadowbanned_users_v1", []),
+    banned_accounts_v1: kvGetJson("banned_accounts_v1", {}),
     user_device_map_v1: kvGetJson("user_device_map_v1", {}),
     user_created_at_v1: kvGetJson("user_created_at_v1", {}),
     user_last_active_v1: kvGetJson("user_last_active_v1", {}),
@@ -2625,6 +2641,16 @@ function persistBannedDevices() {
 
 function persistShadowbannedUsers() {
   kvSetJson("shadowbanned_users_v1", Array.from(shadowbannedUsers));
+}
+
+function persistBannedAccounts() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of bannedAccounts.entries()) {
+    out[k] = v;
+    if (++count >= 5000) break;
+  }
+  kvSetJson("banned_accounts_v1", out);
 }
 
 function persistUserDeviceMap() {
@@ -4863,6 +4889,7 @@ async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false }
   const claimsLower = claimsUsername.toLowerCase();
   if (!claimsUsername || isReservedSystemUsername(claimsUsername)) return null;
   if (getDeletedUsersSet().has(claimsLower)) return null;
+  if (bannedAccounts.has(claimsLower) && !OWNER_USERNAMES.has(claimsLower)) return null;
 
   try {
     const byIdRow = await dbFindUserById(claims.id);
@@ -5091,6 +5118,15 @@ app.post(["/api/auth/login", "/login"], async (req, res) => {
     const userId = Number(row.id);
     const canonicalUsername = String(row.username);
     const tokenVersion = Number(row.token_version || 1);
+    const canonicalKey = canonicalUsername.toLowerCase();
+    if (bannedAccounts.has(canonicalKey) && !OWNER_USERNAMES.has(canonicalKey)) {
+      const banInfo = bannedAccounts.get(canonicalKey);
+      return res.status(403).json({
+        success: false,
+        user: null,
+        error: `this account has been banned${banInfo?.reason ? `: ${banInfo.reason}` : ""}`,
+      });
+    }
     touchUserLastActive(canonicalUsername);
     if (fingerprintId || storageToken) {
       recordUserDeviceSignature(canonicalUsername, {
@@ -10655,6 +10691,128 @@ app.post(["/api/chat/mod/ban-device", "/api/admin/ban-user"], async (req, res) =
   }
 });
 
+// Account-only ban/unban (NO shadowban, NO device ban)
+app.post("/api/chat/mod/ban-account", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff moderator permissions required" });
+    }
+    const targetUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const targetKey = targetUsername.toLowerCase();
+    if (!targetKey) {
+      return res.status(400).json({ success: false, error: "username required" });
+    }
+    if (OWNER_USERNAMES.has(targetKey)) {
+      return res.status(403).json({ success: false, error: "Cannot ban the site owner" });
+    }
+    if (staffModerators.has(targetKey) && !actor.isOwner) {
+      return res.status(403).json({ success: false, error: "Only the owner can ban another moderator" });
+    }
+
+    const unban = req.body?.action === "unban" || req.body?.banned === false;
+    const reason = String(req.body?.reason || "account banned by staff").trim().slice(0, 160);
+    const csMap = await getCloudSyncUsersMapAsync().catch(() => new Map());
+    const canonicalName = csMap.get(targetKey)?.username || targetUsername;
+
+    if (unban) {
+      bannedAccounts.delete(targetKey);
+      persistBannedAccounts();
+      recordStaffAction({
+        action: "unban_account",
+        actor,
+        targetUsername: canonicalName,
+        details: "unbanned account",
+      });
+      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+      return res.json({ success: true, username: canonicalName, isBanned: false });
+    }
+
+    const entry = {
+      username: canonicalName,
+      reason,
+      by: actor.username || "staff",
+      createdAt: new Date().toISOString(),
+    };
+    bannedAccounts.set(targetKey, entry);
+    persistBannedAccounts();
+    recordStaffAction({
+      action: "ban_account",
+      actor,
+      targetUsername: canonicalName,
+      details: reason,
+    });
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    return res.json({ success: true, username: canonicalName, isBanned: true, ban: entry });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Failed to update account ban" });
+  }
+});
+
+// Staff specific account deletion (permanently removes account from CloudSync & chat)
+app.post("/api/chat/mod/delete-account", async (req, res) => {
+  await ensureChatMetaReadyAsync();
+  try {
+    const actor = await getModActor(req);
+    if (!actor.isMod) {
+      return res.status(403).json({ success: false, error: "Staff moderator permissions required" });
+    }
+    const targetUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const targetKey = targetUsername.toLowerCase();
+    if (!targetKey) {
+      return res.status(400).json({ success: false, error: "username required" });
+    }
+    if (OWNER_USERNAMES.has(targetKey)) {
+      return res.status(403).json({ success: false, error: "Cannot delete the site owner account" });
+    }
+    if (staffModerators.has(targetKey) && !actor.isOwner) {
+      return res.status(403).json({ success: false, error: "Only the owner can delete a moderator account" });
+    }
+    if (isReservedSystemUsername(targetKey)) {
+      return res.status(400).json({ success: false, error: "Cannot delete system account" });
+    }
+
+    const csMap = await getCloudSyncUsersMapAsync().catch(() => new Map());
+    const csRec = csMap.get(targetKey);
+    const dbRow = csRec || (await dbFindUserByUsername(targetUsername).catch(() => null));
+    const canonicalName = String(dbRow?.username || targetUsername);
+    const userId = Number(dbRow?.id) || 0;
+
+    if (!dbRow && !userProfiles.has(targetKey) && !knownUsers.has(targetKey)) {
+      return res.status(404).json({ success: false, error: `Account @${targetUsername} not found` });
+    }
+
+    // If owner is deleting a mod/GOAT, remove their role first so purgeUserAccountCompletely proceeds
+    if (actor.isOwner) {
+      if (staffModerators.delete(targetKey)) persistStaffMods();
+      if (goatUsers.delete(targetKey)) persistGoatUsers();
+    }
+
+    const reason = String(req.body?.reason || "deleted by staff").trim().slice(0, 160);
+    await purgeUserAccountCompletely(userId, canonicalName, `staff delete by @${actor.username}: ${reason}`);
+    if (bannedAccounts.delete(targetKey)) {
+      persistBannedAccounts();
+    }
+    persistUserLastActiveMap();
+    persistUserAchievements();
+    persistChatTimeouts();
+    persistShadowbannedUsers();
+    invalidateCloudSyncUsersCache();
+
+    recordStaffAction({
+      action: "delete_account",
+      actor,
+      targetUsername: canonicalName,
+      details: reason,
+    });
+    broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+    return res.json({ success: true, username: canonicalName, deleted: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Failed to delete account" });
+  }
+});
+
 app.post("/api/chat/groups/create", async (req, res) => {
   ensureChatMetaLoaded();
   try {
@@ -10928,6 +11086,7 @@ app.get("/api/chat/staff", async (req, res) => {
       ? {
           recentLogs: staffActionLogs.slice(-80).reverse(),
           recentNotes: getAllStaffNotesList(100),
+          bannedAccounts: Array.from(bannedAccounts.values()).reverse(),
           shadowbannedUsers: Array.from(shadowbannedUsers).map((uk) => {
             const matchedDevices = bannedDevices.filter(
               (b) => String(b?.banned_username || "").trim().toLowerCase() === uk
