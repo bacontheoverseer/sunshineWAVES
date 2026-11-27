@@ -2675,7 +2675,7 @@ function persistUserCreatedAtMap() {
 
 const userLastActiveMap = new Map(); // usernameLower -> epochMs
 let userLastActivePersistTimer = null;
-const INACTIVE_ACCOUNT_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+const INACTIVE_ACCOUNT_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; // 1 year
 
 function persistUserLastActiveMap() {
   const out = {};
@@ -14967,7 +14967,7 @@ async function runAutomaticAccountHygieneAsync() {
         continue;
       }
 
-      // 2) Auto-delete accounts with no activity for 60+ days
+      // 2) Auto-delete accounts with no activity for 1 year (365+ days)
       const prof = userProfiles.get(key);
       const known = knownUsers.get(key);
       const lastActiveMs = Math.max(
@@ -15006,7 +15006,7 @@ async function runAutomaticAccountHygieneAsync() {
       invalidateCloudSyncUsersCache();
       broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
       console.log(
-        `[account-hygiene] Cleanup complete: removed ${deletedSpam} spam/gibberish account(s), ${deletedInactive} inactive (60d+) account(s).`
+        `[account-hygiene] Cleanup complete: removed ${deletedSpam} spam/gibberish account(s), ${deletedInactive} inactive (1y+) account(s).`
       );
     }
   } catch (err) {
