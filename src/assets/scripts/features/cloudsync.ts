@@ -1809,9 +1809,16 @@ export class CloudSync {
       );
 
     try {
+      let token = "";
+      try {
+        token = localStorage.getItem("auth_token") || "";
+      } catch {}
       const res = await fetch("/api/auth/me", {
         method: "DELETE",
         credentials: "same-origin",
+        headers: token
+          ? { Authorization: `Bearer ${token}`, "x-cloudsync-token": token }
+          : undefined,
       });
 
       if (res.ok) {

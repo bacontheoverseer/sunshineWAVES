@@ -46,8 +46,15 @@ export function buildModAuthHeaders(adminKey?: string): Record<string, string> {
     headers["x-admin-key"] = resolvedAdminKey;
   }
   try {
-    const token = localStorage.getItem("auth_token");
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const token =
+      localStorage.getItem("auth_token") ||
+      localStorage.getItem("cloudsync_token") ||
+      localStorage.getItem("sunshine_cloudsync_token") ||
+      "";
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+      headers["x-cloudsync-token"] = token;
+    }
   } catch {}
   return headers;
 }
@@ -474,6 +481,7 @@ export function StaffManagerContent({
     try {
       const res = await fetch("/api/chat/mod/delete-account", {
         method: "POST",
+        credentials: "same-origin",
         headers: buildHeaders(),
         body: JSON.stringify({ username: clean, reason: "deleted via staff panel" }),
       });

@@ -420,6 +420,11 @@ self.addEventListener("fetch", (event) => {
     dest === "frame";
   const url = new URL(request.url);
 
+  // Never intercept Operation Cookie's own /api/* calls (especially POST/DELETE/PUT)
+  if (url.origin === self.location.origin && url.pathname.startsWith("/api/")) {
+    return;
+  }
+
   if (adBlocked(adTarget(request.url), isNavigate)) {
     return event.respondWith(adBlockedResponse(request, url, isNavigate));
   }
@@ -580,8 +585,11 @@ self.addEventListener("fetch", (event) => {
           return new Response("proxy initializing", { status: 503 });
         }
 
-        if (url.origin === self.location.origin && request.method === "GET") {
-          return await handleLocalOriginGet(event, request, url, preloadPromise);
+        if (url.origin === self.location.origin) {
+          if (request.method === "GET") {
+            return await handleLocalOriginGet(event, request, url, preloadPromise);
+          }
+          return await fetch(request);
         }
 
         return new Response(":3", { status: 403 });

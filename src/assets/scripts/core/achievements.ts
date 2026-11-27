@@ -134,6 +134,7 @@ function getCloudAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   try {
     const token =
+      localStorage.getItem("auth_token") ||
       localStorage.getItem("cloudsync_token") ||
       localStorage.getItem("sunshine_cloudsync_token") ||
       "";
