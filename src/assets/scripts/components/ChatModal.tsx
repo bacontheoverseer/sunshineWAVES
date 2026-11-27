@@ -4277,7 +4277,7 @@ export default function ChatModal() {
 
     setIsSending(true);
     try {
-      if (text) {
+      if (text && selfRole !== "owner") {
         const modResult = await moderateChatMessage(text);
         if (modResult.blocked) {
           notifyToast(modResult.reason || "message blocked by openai moderation", "error");
@@ -4474,7 +4474,7 @@ export default function ChatModal() {
       }
       setSavingEdit(true);
       try {
-        if (cleanText) {
+        if (cleanText && selfRole !== "owner") {
           const modResult = await moderateChatMessage(cleanText);
           if (modResult.blocked) {
             notifyToast(modResult.reason || "edited message blocked by moderation", "error");

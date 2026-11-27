@@ -8938,7 +8938,7 @@ app.post("/api/chat/user-profile", async (req, res) => {
       .filter(Boolean)
       .join(" ");
 
-    if (textToModerate) {
+    if (textToModerate && !OWNER_USERNAMES.has(authUser.username.toLowerCase())) {
       const modCheck = await moderateTextWithOpenAI(textToModerate);
       if (modCheck.blocked || modCheck.flagged) {
         return res.status(400).json({
@@ -10081,7 +10081,8 @@ app.post("/api/chat/send", async (req, res) => {
     ]
       .join(" ")
       .trim();
-    if (textToModerate) {
+    const isOwnerSender = Boolean(authUser && OWNER_USERNAMES.has(authUser.username.toLowerCase()));
+    if (textToModerate && !isOwnerSender) {
       const mod = await moderateTextWithOpenAI(textToModerate);
       if (mod.flagged) {
         return res.status(400).json({
@@ -10315,7 +10316,8 @@ app.post("/api/chat/edit", async (req, res) => {
       return res.status(400).json({ success: false, error: "Edited message cannot be empty" });
     }
 
-    if (cleanText) {
+    const isOwnerEditor = OWNER_USERNAMES.has(authUser.username.toLowerCase());
+    if (cleanText && !isOwnerEditor) {
       const mod = await moderateTextWithOpenAI(cleanText);
       if (mod.flagged) {
         return res.status(400).json({
