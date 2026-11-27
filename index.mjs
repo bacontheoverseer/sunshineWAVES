@@ -1579,6 +1579,7 @@ const CHAT_META_KV_KEYS = [
   "shadowbanned_users_v1",
   "user_device_map_v1",
   "user_created_at_v1",
+  "user_last_active_v1",
   "user_recovery_questions_v1",
   "pending_coin_grants_v1",
   "coin_claim_cooldowns_v1",
@@ -2513,6 +2514,16 @@ function applyChatMetaKvMap(kvMap) {
       if (cleanK && numTs > 0) userCreatedAtMap.set(cleanK, numTs);
     }
   }
+  const sLastActiveMap = kvMap.user_last_active_v1;
+  if (sLastActiveMap && typeof sLastActiveMap === "object") {
+    for (const [uk, ts] of Object.entries(sLastActiveMap)) {
+      const cleanK = String(uk || "").trim().toLowerCase();
+      const numTs = Number(ts) || 0;
+      if (cleanK && numTs > 0) {
+        userLastActiveMap.set(cleanK, Math.max(Number(userLastActiveMap.get(cleanK)) || 0, numTs));
+      }
+    }
+  }
   const sRecoveryMap = kvMap.user_recovery_questions_v1;
   if (sRecoveryMap && typeof sRecoveryMap === "object") {
     for (const [uk, entry] of Object.entries(sRecoveryMap)) {
@@ -2556,6 +2567,7 @@ function ensureChatMetaLoaded() {
     shadowbanned_users_v1: kvGetJson("shadowbanned_users_v1", []),
     user_device_map_v1: kvGetJson("user_device_map_v1", {}),
     user_created_at_v1: kvGetJson("user_created_at_v1", {}),
+    user_last_active_v1: kvGetJson("user_last_active_v1", {}),
     user_recovery_questions_v1: kvGetJson("user_recovery_questions_v1", {}),
     [STUDIO_GAMES_KV_KEY]: kvGetJson(STUDIO_GAMES_KV_KEY, []),
     [STUDIO_PROFILES_KV_KEY]: kvGetJson(STUDIO_PROFILES_KV_KEY, []),
@@ -2633,6 +2645,82 @@ function persistUserCreatedAtMap() {
     if (++count >= 5000) break;
   }
   kvSetJson("user_created_at_v1", out);
+}
+
+const userLastActiveMap = new Map(); // usernameLower -> epochMs
+let userLastActivePersistTimer = null;
+const INACTIVE_ACCOUNT_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+
+function persistUserLastActiveMap() {
+  const out = {};
+  let count = 0;
+  for (const [k, v] of userLastActiveMap.entries()) {
+    if (Number(v) > 0) {
+      out[k] = Number(v);
+      if (++count >= 10000) break;
+    }
+  }
+  kvSetJson("user_last_active_v1", out);
+}
+
+function touchUserLastActive(username, tsMs = Date.now()) {
+  const key = String(username || "").trim().toLowerCase();
+  if (!key || isReservedSystemUsername(key) || isTemporaryGuestName(key)) return;
+  const prev = Number(userLastActiveMap.get(key)) || 0;
+  if (tsMs - prev < 10 * 60 * 1000) return; // Throttle writes to once per 10 mins per user
+  userLastActiveMap.set(key, tsMs);
+  if (!userLastActivePersistTimer) {
+    userLastActivePersistTimer = setTimeout(() => {
+      userLastActivePersistTimer = null;
+      persistUserLastActiveMap();
+    }, 15000);
+  }
+}
+
+const COMMON_USERNAME_BIGRAMS = new Set(
+  "th he in er an re on at en nd ti es or te of ed is it al ar st to nt ng se ha as ou io le ve co me de hi ri ro ic ne ea ra ce li ch ll be ma si om ur ca el ta la ns di fo ho pe ec pr no ct us ac ot il tr ly nc et ut ss so rs un lo wa ge ie wh ee wi em ad ol rt po we na ul ni ts mo ow pa im mi ai sh ir su id os iv ia am fi ci vi pl ig tu ev ld ry mp fe bl ab gh ty op wo sa ay ex ke fr oo av ag if ap up ck ub lu pi br cr gr dr sp sc sk sl sm sn sw tw kn wr ph qu ba bo bu bi da do du fa ga go gu hu ja je ji jo ju ka ki ko ku mu nu pu ru va vo vu yo yu za ze zi zo zy nn tt rr pp dd gg bb ff mm kk cc zz oy ey uy aw ew ok ak ik uk ek by cy dy fy gy hy ky my ny py sy vy wy".split(
+    /\s+/
+  )
+);
+const KEYBOARD_MASH_ROWS = [
+  "qwertyuiop",
+  "poiuytrewq",
+  "asdfghjkl",
+  "lkjhgfdsa",
+  "zxcvbnm",
+  "mnbvcxz",
+];
+
+function isSpamGibberishUsername(rawUsername) {
+  const clean = String(rawUsername || "").trim().toLowerCase();
+  if (!clean) return false;
+  // 5+ identical consecutive characters (e.g. eeeeeee, aaaaa, 11111)
+  if (/(.)\1{4,}/.test(clean)) return true;
+  const letters = clean.replace(/[^a-z]/g, "");
+  // 5+ letters of only 1 unique character, or 7+ letters of only 2 unique characters
+  if (letters.length >= 5 && new Set(letters).size <= 1) return true;
+  if (letters.length >= 7 && new Set(letters).size <= 2) return true;
+  // 6+ char sequential keyboard row mash (qwerty, asdfgh, zxcvbn, etc.)
+  for (const row of KEYBOARD_MASH_ROWS) {
+    for (let i = 0; i <= row.length - 6; i++) {
+      if (clean.includes(row.slice(i, i + 6))) return true;
+    }
+  }
+  // 6+ consecutive strict consonants or 2+ hard 4-consonant clusters (e.g. euihgsroxidzfh, dskjfoisjfsjio)
+  if (/[bcdfghjklmnpqrstvwxz]{6,}/.test(letters)) return true;
+  const hardClusters = letters.match(/[bcdfghjklmnpqrstvwxz]{4,}/g) || [];
+  if (hardClusters.length >= 2) return true;
+  // Low English/pronounceable bigram density on long letter runs
+  if (letters.length >= 8) {
+    let common = 0;
+    const total = letters.length - 1;
+    for (let i = 0; i < total; i++) {
+      if (COMMON_USERNAME_BIGRAMS.has(letters.slice(i, i + 2))) common++;
+    }
+    const ratio = common / total;
+    if (ratio < (letters.length >= 10 ? 0.42 : 0.36)) return true;
+  }
+  return false;
 }
 
 const DISPOSABLE_EMAIL_DOMAINS = new Set([
@@ -4866,6 +4954,15 @@ app.post(["/api/auth/register", "/api/auth/signup", "/signup"], async (req, res)
         .status(400)
         .json({ success: false, user: null, error: "username must be alphanumeric" });
     }
+    if (isSpamGibberishUsername(username)) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          user: null,
+          error: "please choose a real username (no spammed letters or keyboard mash)",
+        });
+    }
     if (password.length < 8) {
       return res
         .status(400)
@@ -4994,6 +5091,7 @@ app.post(["/api/auth/login", "/login"], async (req, res) => {
     const userId = Number(row.id);
     const canonicalUsername = String(row.username);
     const tokenVersion = Number(row.token_version || 1);
+    touchUserLastActive(canonicalUsername);
     if (fingerprintId || storageToken) {
       recordUserDeviceSignature(canonicalUsername, {
         fingerprint_id: fingerprintId,
@@ -9966,6 +10064,7 @@ app.post("/api/chat/send", async (req, res) => {
     chatHistory.push(sanitizedMsg);
     persistChatHistory();
     indexMessageHashtags(sanitizedMsg, { persist: true });
+    touchUserLastActive(sanitizedMsg.author);
 
     // Broadcast via SSE to connected clients
     const eventPayload = {
@@ -14644,12 +14743,132 @@ process.on("uncaughtException", (err) => {
   console.error("Uncaught exception (kept alive):", err);
 });
 
+function parseTimestampMsSafe(val) {
+  if (!val) return 0;
+  if (typeof val === "number") return Number.isFinite(val) && val > 0 ? val : 0;
+  const parsed = Date.parse(String(val));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+async function purgeUserAccountCompletely(userId, username, reason = "") {
+  const clean = String(username || "").trim();
+  const key = clean.toLowerCase();
+  if (!key || OWNER_USERNAMES.has(key) || staffModerators.has(key) || goatUsers.has(key) || isReservedSystemUsername(key)) {
+    return false;
+  }
+  await dbDeleteUser(Number(userId) || 0, clean);
+  userProfiles.delete(key);
+  userAchievements.delete(key);
+  knownUsers.delete(key);
+  userLastActiveMap.delete(key);
+  userCreatedAtMap.delete(key);
+  chatTimeouts.delete(key);
+  shadowbannedUsers.delete(key);
+  persistUserProfiles({ deletedKey: key });
+  console.log(`[account-hygiene] Deleted account @${clean} (${reason})`);
+  return true;
+}
+
+let accountHygieneRunning = false;
+async function runAutomaticAccountHygieneAsync() {
+  if (accountHygieneRunning) return;
+  accountHygieneRunning = true;
+  try {
+    await ensureChatMetaReadyAsync();
+    const csMap = await getCloudSyncUsersMapAsync().catch(() => null);
+    if (!csMap || csMap.size === 0) return;
+
+    const now = Date.now();
+    let deletedInactive = 0;
+    let deletedSpam = 0;
+    let seededTimestamps = false;
+
+    for (const [uk, rec] of Array.from(csMap.entries())) {
+      const username = String(rec?.username || uk || "").trim();
+      const key = username.toLowerCase();
+      if (
+        !key ||
+        OWNER_USERNAMES.has(key) ||
+        staffModerators.has(key) ||
+        goatUsers.has(key) ||
+        isReservedSystemUsername(key) ||
+        isTemporaryGuestName(key)
+      ) {
+        continue;
+      }
+
+      // 1) Auto-remove spam-letter / keyboard-mash usernames (e.g. eeeeeee, euihgsroxidzfh)
+      if (isSpamGibberishUsername(username)) {
+        const removed = await purgeUserAccountCompletely(
+          rec?.id || 0,
+          username,
+          "spammed letters / keyboard mash username"
+        );
+        if (removed) deletedSpam++;
+        continue;
+      }
+
+      // 2) Auto-delete accounts with no activity for 60+ days
+      const prof = userProfiles.get(key);
+      const known = knownUsers.get(key);
+      const lastActiveMs = Math.max(
+        Number(userLastActiveMap.get(key)) || 0,
+        Number(known?.lastSeen) || 0,
+        parseTimestampMsSafe(prof?.updatedAt),
+        parseTimestampMsSafe(rec?.updatedAt),
+        parseTimestampMsSafe(rec?.createdAt),
+        Number(userCreatedAtMap.get(key)) || 0
+      );
+
+      if (lastActiveMs <= 0) {
+        // Seed missing timestamp rather than deleting accounts with no recorded date yet
+        userLastActiveMap.set(key, now);
+        seededTimestamps = true;
+        continue;
+      }
+
+      if (now - lastActiveMs >= INACTIVE_ACCOUNT_MAX_AGE_MS) {
+        const removed = await purgeUserAccountCompletely(
+          rec?.id || 0,
+          username,
+          `inactive for ${Math.floor((now - lastActiveMs) / (24 * 60 * 60 * 1000))} days`
+        );
+        if (removed) deletedInactive++;
+      }
+    }
+
+    if (seededTimestamps || deletedInactive > 0 || deletedSpam > 0) {
+      persistUserLastActiveMap();
+    }
+    if (deletedInactive > 0 || deletedSpam > 0) {
+      persistUserAchievements();
+      persistChatTimeouts();
+      persistShadowbannedUsers();
+      invalidateCloudSyncUsersCache();
+      broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
+      console.log(
+        `[account-hygiene] Cleanup complete: removed ${deletedSpam} spam/gibberish account(s), ${deletedInactive} inactive (60d+) account(s).`
+      );
+    }
+  } catch (err) {
+    console.warn("[account-hygiene] Cleanup pass warning:", err?.message || err);
+  } finally {
+    accountHygieneRunning = false;
+  }
+}
+
 server.listen(PORT, () => {
   console.log(
     `server listening on ${PORT}!! ~ caching: ${CACHING_ENABLED ? "yes" : "no"} ~ cloudsync: ${USE_SUPABASE_CLOUDSYNC ? "supabase" : "sqlite"}`,
   );
   void getCloudSyncUsersMapAsync().catch(() => {});
   void ensureChatMetaReadyAsync().catch(() => {});
+  setTimeout(() => {
+    void runAutomaticAccountHygieneAsync();
+  }, 20000);
+  setInterval(() => {
+    void runAutomaticAccountHygieneAsync();
+  }, 6 * 60 * 60 * 1000);
 
   if (NODE_ENV === "development") {
     spawnServices();
