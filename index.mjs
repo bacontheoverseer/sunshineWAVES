@@ -10252,45 +10252,61 @@ app.post(["/api/chat/mod/ban-device", "/api/admin/ban-user"], async (req, res) =
       return res.status(403).json({ success: false, error: "Staff moderator permissions required" });
     }
     const targetUsername = String(req.body?.username || "").trim().replace(/^@/, "");
+    const targetDeviceId = String(req.body?.deviceId || "").trim();
     const targetKey = targetUsername.toLowerCase();
-    if (!targetKey) {
+    const unban = req.body?.action === "unban" || req.body?.shadowbanned === false;
+    if (!targetKey && !(unban && targetDeviceId)) {
       return res.status(400).json({ success: false, error: "username required" });
     }
-    if (OWNER_USERNAMES.has(targetKey)) {
+    if (targetKey && OWNER_USERNAMES.has(targetKey)) {
       return res.status(403).json({ success: false, error: "Cannot ban the site owner" });
     }
-    if (staffModerators.has(targetKey) && !actor.isOwner) {
+    if (targetKey && staffModerators.has(targetKey) && !actor.isOwner) {
       return res.status(403).json({ success: false, error: "Only the owner can ban another moderator" });
     }
 
-    const unban = req.body?.action === "unban" || req.body?.shadowbanned === false;
     const reason = String(req.body?.reason || "device & shadowban by staff").trim().slice(0, 160);
     if (unban) {
-      setAccountShadowbanned(targetUsername, false);
-      const sig = userDeviceMap.get(targetKey);
-      if (sig) {
-        for (let i = bannedDevices.length - 1; i >= 0; i--) {
-          const b = bannedDevices[i];
-          if (
-            b.banned_username.toLowerCase() === targetKey ||
-            (sig.storage_token && b.storage_token === sig.storage_token)
-          ) {
-            bannedDevices.splice(i, 1);
-          }
+      let resolvedName = targetUsername;
+      if (targetDeviceId) {
+        const matchDev = bannedDevices.find((b) => String(b?.id || "") === targetDeviceId);
+        if (matchDev && !resolvedName && matchDev.banned_username) {
+          resolvedName = String(matchDev.banned_username).trim();
         }
+      }
+      const resolvedKey = resolvedName.toLowerCase();
+      if (resolvedKey) {
+        setAccountShadowbanned(resolvedName, false);
+      }
+      const sig = resolvedKey ? userDeviceMap.get(resolvedKey) : null;
+      let removedDevices = 0;
+      for (let i = bannedDevices.length - 1; i >= 0; i--) {
+        const b = bannedDevices[i];
+        const bUser = String(b?.banned_username || "").trim().toLowerCase();
+        const matchesId = Boolean(targetDeviceId && String(b?.id || "") === targetDeviceId);
+        const matchesUser = Boolean(resolvedKey && bUser === resolvedKey);
+        const matchesToken = Boolean(sig?.storage_token && b?.storage_token === sig.storage_token);
+        const matchesFp = Boolean(sig?.fingerprint_id && b?.fingerprint_id === sig.fingerprint_id);
+        if (matchesId || matchesUser || matchesToken || matchesFp) {
+          bannedDevices.splice(i, 1);
+          removedDevices++;
+        }
+      }
+      if (removedDevices > 0) {
         persistBannedDevices();
       }
       recordStaffAction({
         action: "unban_device",
         actor,
-        targetUsername,
-        details: "removed shadowban & device ban",
+        targetUsername: resolvedName || targetDeviceId,
+        details: `removed shadowban & ${removedDevices} device ban(s)`,
       });
       invalidateCloudSyncUsersCache();
       broadcastToClients({ type: "presence-event", ...getPresenceSnapshot() }, "all");
       return res.json({
         success: true,
-        username: targetUsername,
+        username: resolvedName,
+        removedDevices,
         isShadowbanned: false,
       });
     }
@@ -10589,6 +10605,29 @@ app.get("/api/chat/staff", async (req, res) => {
       ? {
           recentLogs: staffActionLogs.slice(-80).reverse(),
           recentNotes: getAllStaffNotesList(100),
+          shadowbannedUsers: Array.from(shadowbannedUsers).map((uk) => {
+            const matchedDevices = bannedDevices.filter(
+              (b) => String(b?.banned_username || "").trim().toLowerCase() === uk
+            );
+            const latestDev = matchedDevices[matchedDevices.length - 1] || null;
+            return {
+              username: csMap.get(uk)?.username || latestDev?.banned_username || uk,
+              reason: latestDev?.banned_reason || "shadowbanned by staff",
+              createdAt: latestDev?.created_at || "",
+              deviceCount: matchedDevices.length,
+            };
+          }),
+          bannedDevices: bannedDevices
+            .slice(-200)
+            .reverse()
+            .map((b) => ({
+              id: String(b?.id || ""),
+              username: String(b?.banned_username || "").trim(),
+              reason: String(b?.banned_reason || "device banned").trim(),
+              createdAt: String(b?.created_at || ""),
+              hasFingerprint: Boolean(b?.fingerprint_id),
+              hasStorageToken: Boolean(b?.storage_token),
+            })),
         }
       : {}),
   });

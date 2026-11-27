@@ -103,6 +103,22 @@ interface TimeoutRecord {
   by?: string;
 }
 
+interface ShadowbannedUserRecord {
+  username: string;
+  reason?: string;
+  createdAt?: string;
+  deviceCount?: number;
+}
+
+interface BannedDeviceRecord {
+  id: string;
+  username?: string;
+  reason?: string;
+  createdAt?: string;
+  hasFingerprint?: boolean;
+  hasStorageToken?: boolean;
+}
+
 interface StaffManagerContentProps {
   adminKey?: string | undefined;
   onChanged?: (() => void) | undefined;
@@ -114,12 +130,16 @@ export function StaffManagerContent({
   onChanged,
   notify,
 }: StaffManagerContentProps) {
-  const [activeSubTab, setActiveSubTab] = useState<"roster" | "logs" | "notes">("roster");
+  const [activeSubTab, setActiveSubTab] = useState<"roster" | "bans" | "logs" | "notes">("roster");
   const [owners, setOwners] = useState<string[]>([]);
   const [staffMods, setStaffMods] = useState<string[]>([]);
   const [goatUsers, setGoatUsers] = useState<string[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<string[]>([]);
   const [timeouts, setTimeouts] = useState<TimeoutRecord[]>([]);
+  const [shadowbannedUsers, setShadowbannedUsers] = useState<ShadowbannedUserRecord[]>([]);
+  const [bannedDevices, setBannedDevices] = useState<BannedDeviceRecord[]>([]);
+  const [banFilter, setBanFilter] = useState("");
+  const [manualUnbanUser, setManualUnbanUser] = useState("");
   const [recentLogs, setRecentLogs] = useState<StaffActionLogRecord[]>([]);
   const [recentNotes, setRecentNotes] = useState<StaffNoteRecord[]>([]);
   const [logUserFilter, setLogUserFilter] = useState("");
@@ -171,6 +191,12 @@ export function StaffManagerContent({
         }
         if (Array.isArray(data.recentNotes)) {
           setRecentNotes(data.recentNotes);
+        }
+        if (Array.isArray(data.shadowbannedUsers)) {
+          setShadowbannedUsers(data.shadowbannedUsers);
+        }
+        if (Array.isArray(data.bannedDevices)) {
+          setBannedDevices(data.bannedDevices);
         }
       }
     } catch {} finally {
@@ -344,6 +370,43 @@ export function StaffManagerContent({
     }
   };
 
+  const handleUnbanDeviceOrShadowban = async (opts: { username?: string; deviceId?: string }) => {
+    const cleanUser = (opts.username || "").trim().replace(/^@/, "");
+    const cleanDeviceId = (opts.deviceId || "").trim();
+    const busyKey = cleanDeviceId || cleanUser.toLowerCase();
+    if (!busyKey || busyUser) return;
+    setBusyUser(busyKey);
+    try {
+      const res = await fetch("/api/chat/mod/ban-device", {
+        method: "POST",
+        headers: buildHeaders(),
+        body: JSON.stringify({
+          username: cleanUser || undefined,
+          deviceId: cleanDeviceId || undefined,
+          action: "unban",
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        notify?.("error", data?.error || "could not unban user/device");
+        return;
+      }
+      setManualUnbanUser("");
+      notify?.(
+        "success",
+        cleanUser
+          ? `unbanned @${cleanUser} (removed shadowban & device ban)`
+          : `removed banned device entry`
+      );
+      await loadStaff();
+      onChanged?.();
+    } catch {
+      notify?.("error", "request failed");
+    } finally {
+      setBusyUser(null);
+    }
+  };
+
   const inspectUserAudit = (username: string, tab: "logs" | "notes") => {
     const clean = username.trim().replace(/^@/, "");
     if (!clean) return;
@@ -408,6 +471,16 @@ export function StaffManagerContent({
             onClick={() => setActiveSubTab("roster")}
           >
             <i class="fa-solid fa-users-gear" /> roster &amp; mutes
+          </button>
+          <button
+            type="button"
+            class={`chat-staff-tab ${activeSubTab === "bans" ? "active" : ""}`}
+            onClick={() => {
+              setActiveSubTab("bans");
+              void loadStaff();
+            }}
+          >
+            <i class="fa-solid fa-fingerprint" /> bans ({shadowbannedUsers.length + bannedDevices.filter((d) => !shadowbannedUsers.some((s) => s.username.toLowerCase() === (d.username || "").toLowerCase())).length})
           </button>
           <button
             type="button"
@@ -872,6 +945,179 @@ export function StaffManagerContent({
           )}
         </div>
       )}
+
+      {isMod && activeSubTab === "bans" && (() => {
+        const qBan = banFilter.trim().replace(/^@/, "").toLowerCase();
+        const shadowSet = new Set(shadowbannedUsers.map((s) => s.username.toLowerCase()));
+        const filteredShadowbanned = shadowbannedUsers.filter((s) => {
+          if (!qBan) return true;
+          return (
+            s.username.toLowerCase().includes(qBan) ||
+            String(s.reason || "").toLowerCase().includes(qBan)
+          );
+        });
+        const standaloneDevices = bannedDevices.filter((d) => {
+          const uKey = String(d.username || "").trim().toLowerCase();
+          if (uKey && shadowSet.has(uKey)) return false;
+          if (!qBan) return true;
+          return (
+            uKey.includes(qBan) ||
+            String(d.reason || "").toLowerCase().includes(qBan) ||
+            String(d.id || "").toLowerCase().includes(qBan)
+          );
+        });
+
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <form
+              style={{ display: "flex", gap: "6px" }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (manualUnbanUser.trim()) {
+                  void handleUnbanDeviceOrShadowban({ username: manualUnbanUser });
+                }
+              }}
+            >
+              <input
+                type="text"
+                class="chat-mod-input"
+                placeholder="unban @username (removes shadowban & device ban)..."
+                value={manualUnbanUser}
+                onInput={(e) => setManualUnbanUser((e.target as HTMLInputElement).value)}
+              />
+              <button
+                type="submit"
+                class="chat-profile-pill-btn primary"
+                disabled={!manualUnbanUser.trim() || Boolean(busyUser)}
+                style={{ flexShrink: 0 }}
+              >
+                unban user
+              </button>
+            </form>
+
+            <input
+              type="text"
+              class="chat-mod-input"
+              placeholder="filter banned users or devices..."
+              value={banFilter}
+              onInput={(e) => setBanFilter((e.target as HTMLInputElement).value)}
+            />
+
+            <div>
+              <div class="chat-profile-section-title" style={{ marginBottom: "6px" }}>
+                <i class="fa-solid fa-user-slash" /> shadowbanned &amp; device-banned accounts ({filteredShadowbanned.length})
+              </div>
+              {filteredShadowbanned.length === 0 ? (
+                <div style={{ fontSize: "11px", color: "var(--color-sublabel)" }}>
+                  no shadowbanned accounts found.
+                </div>
+              ) : (
+                <div class="chat-staff-log-list">
+                  {filteredShadowbanned.map((u) => (
+                    <div
+                      key={u.username.toLowerCase()}
+                      class="chat-staff-log-item"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "8px",
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div class="chat-staff-log-top">
+                          <span class="chat-staff-log-target">@{u.username}</span>
+                          {Number(u.deviceCount) > 0 && (
+                            <span class="chat-action-badge danger">
+                              {u.deviceCount} device{u.deviceCount === 1 ? "" : "s"}
+                            </span>
+                          )}
+                          {u.createdAt && (
+                            <span class="chat-staff-log-time">
+                              {new Date(u.createdAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <div class="chat-staff-log-meta">
+                          <span>{u.reason || "shadowbanned & device banned"}</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="chat-profile-pill-btn"
+                        style={{ flexShrink: 0, color: "#86efac", borderColor: "rgba(34, 197, 94, 0.35)" }}
+                        disabled={busyUser === u.username.toLowerCase()}
+                        onClick={() => void handleUnbanDeviceOrShadowban({ username: u.username })}
+                      >
+                        {busyUser === u.username.toLowerCase() ? "..." : "unban"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {standaloneDevices.length > 0 && (
+              <div>
+                <div class="chat-profile-section-title" style={{ marginBottom: "6px" }}>
+                  <i class="fa-solid fa-fingerprint" /> standalone banned devices ({standaloneDevices.length})
+                </div>
+                <div class="chat-staff-log-list">
+                  {standaloneDevices.map((dev) => (
+                    <div
+                      key={dev.id}
+                      class="chat-staff-log-item"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "8px",
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div class="chat-staff-log-top">
+                          <span class="chat-staff-log-target">
+                            {dev.username ? `@${dev.username}` : `device ${dev.id.slice(0, 10)}`}
+                          </span>
+                          <span class="chat-action-badge warn">
+                            {dev.hasFingerprint && dev.hasStorageToken
+                              ? "fp + token"
+                              : dev.hasFingerprint
+                              ? "fingerprint"
+                              : "storage token"}
+                          </span>
+                          {dev.createdAt && (
+                            <span class="chat-staff-log-time">
+                              {new Date(dev.createdAt).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <div class="chat-staff-log-meta">
+                          <span>{dev.reason || "device banned"}</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="chat-profile-pill-btn"
+                        style={{ flexShrink: 0, color: "#86efac", borderColor: "rgba(34, 197, 94, 0.35)" }}
+                        disabled={busyUser === dev.id}
+                        onClick={() =>
+                          void handleUnbanDeviceOrShadowban({
+                            username: dev.username || undefined,
+                            deviceId: dev.id,
+                          })
+                        }
+                      >
+                        {busyUser === dev.id ? "..." : "unban device"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
