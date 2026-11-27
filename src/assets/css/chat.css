@@ -4946,7 +4946,7 @@ html.chromebook-mode .chat-media-toggle-btn {
   position: absolute;
   bottom: calc(100% + 10px);
   left: 0;
-  width: min(440px, calc(100% - 4px));
+  width: min(468px, calc(100% - 4px));
   max-height: 420px;
   display: flex;
   flex-direction: column;
@@ -4965,18 +4965,20 @@ html.chromebook-mode .chat-media-toggle-btn {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--bg-surface-10, rgba(255, 255, 255, 0.08));
 }
 
 .chat-partners-title {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   font-size: 12.5px;
   font-weight: 700;
   color: var(--text-white);
   text-transform: lowercase;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chat-partners-title i {
@@ -4987,22 +4989,24 @@ html.chromebook-mode .chat-media-toggle-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .chat-partners-tab {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
+  gap: 4px;
+  padding: 4px 9px;
   border-radius: 999px;
   border: 1px solid var(--bg-surface-10, rgba(255, 255, 255, 0.08));
   background: var(--bg-surface-4, rgba(255, 255, 255, 0.04));
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
   text-transform: lowercase;
+  white-space: nowrap;
   transition: all 0.14s ease;
 }
 
