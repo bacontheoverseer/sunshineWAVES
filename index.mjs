@@ -2874,10 +2874,6 @@ function detectTextSpamViolation(rawText) {
   if (/\b(\S+)(?:\s+\1){5,}/i.test(text)) {
     return "AutoMod: Please don't spam repeated words.";
   }
-  const newlineCount = (text.match(/\n/g) || []).length;
-  if (newlineCount >= 8) {
-    return "AutoMod: Too many line breaks in one message.";
-  }
   const tokens = text.split(/\s+/);
   for (const tok of tokens) {
     if (tok.length >= 55 && !/^https?:\/\//i.test(tok)) {

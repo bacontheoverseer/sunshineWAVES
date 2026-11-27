@@ -180,13 +180,6 @@ export function checkSpamAutomod(rawText: string): FilterResult {
       reason: "AutoMod: Please don't spam repeated words.",
     };
   }
-  if ((text.match(/\n/g) || []).length >= 8) {
-    return {
-      blocked: true,
-      category: "spam-newlines",
-      reason: "AutoMod: Too many line breaks in one message.",
-    };
-  }
   for (const tok of text.split(/\s+/)) {
     if (tok.length >= 55 && !/^https?:\/\//i.test(tok)) {
       return {
