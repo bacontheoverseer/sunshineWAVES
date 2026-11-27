@@ -5455,7 +5455,7 @@ export default function ChatModal() {
     if (!el) return;
     el.style.height = "auto";
     const nextH = Math.min(el.scrollHeight, 160);
-    el.style.height = `${Math.max(22, nextH)}px`;
+    el.style.height = `${Math.max(32, nextH)}px`;
   }, [inputText, activeChannel, isOpen]);
 
   useEffect(() => {
