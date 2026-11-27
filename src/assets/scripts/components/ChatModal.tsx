@@ -444,28 +444,147 @@ function formatElapsedDuration(startedAtMs: number | undefined, nowMs: number): 
   return `${secs}s`;
 }
 
-function renderFormattedText(text: string, onHashtagClick?: (tag: string) => void) {
-  const parts = text.split(/(\bhttps?:\/\/[^\s]+|@[a-zA-Z0-9_.-]+|#[a-zA-Z][a-zA-Z0-9_-]{1,31}\b)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith("http://") || part.startsWith("https://")) {
-      return (
-        <a key={i} href={part} target="_blank" rel="noopener noreferrer">
-          {part}
+function ChatSpoiler({ children }: { children: preact.ComponentChildren }) {
+  const [revealed, setRevealed] = useState(false);
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      class={`chat-md-spoiler${revealed ? " is-revealed" : ""}`}
+      title={revealed ? undefined : "Click to reveal spoiler"}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!revealed) setRevealed(true);
+      }}
+      onKeyDown={(e) => {
+        if ((e.key === "Enter" || e.key === " ") && !revealed) {
+          e.preventDefault();
+          setRevealed(true);
+        }
+      }}
+    >
+      <span class="chat-md-spoiler-inner">{children}</span>
+    </span>
+  );
+}
+
+function renderInlineMarkdown(
+  text: string,
+  onHashtagClick?: (tag: string) => void,
+  depth = 0
+): preact.ComponentChildren {
+  if (!text) return null;
+  if (depth > 4) return text;
+
+  const nodes: preact.ComponentChildren[] = [];
+  // Order matters: code -> masked link -> raw url -> spoiler -> bold+italic -> bold -> underline -> strikethrough -> italic -> mention -> hashtag
+  const tokenRe =
+    /(`[^`\n]+`)|(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\))|(\bhttps?:\/\/[^\s<>()]+)|(\|\|([^|\n]+?)\|\|)|(\*\*\*([^*\n]+?)\*\*\*)|(\*\*([^*\n]+?)\*\*)|(__([^_\n]+?)__)|(~~([^~\n]+?)~~)|(\*([^*\n]+?)\*)|((?<![a-zA-Z0-9_])_([^_\n]+?)_(?![a-zA-Z0-9_]))|(@[a-zA-Z0-9_.-]+)|(#[a-zA-Z][a-zA-Z0-9_-]{1,31}\b)/g;
+
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+  let k = 0;
+
+  while ((match = tokenRe.exec(text)) !== null) {
+    if (match.index > lastIdx) {
+      nodes.push(text.slice(lastIdx, match.index));
+    }
+    const [
+      full,
+      inlineCode,
+      ,
+      linkLabel,
+      linkUrl,
+      rawUrl,
+      ,
+      spoilerInner,
+      ,
+      boldItalicInner,
+      ,
+      boldInner,
+      ,
+      underlineInner,
+      ,
+      strikeInner,
+      ,
+      italicStarInner,
+      ,
+      italicUnderInner,
+      mention,
+      hashtag,
+    ] = match;
+
+    if (inlineCode) {
+      nodes.push(
+        <code key={`ic-${k++}`} class="chat-md-inline-code">
+          {inlineCode.slice(1, -1)}
+        </code>
+      );
+    } else if (linkLabel && linkUrl) {
+      nodes.push(
+        <a key={`ml-${k++}`} href={linkUrl} target="_blank" rel="noopener noreferrer">
+          {renderInlineMarkdown(linkLabel, onHashtagClick, depth + 1)}
         </a>
       );
-    }
-    if (part.startsWith("@")) {
-      return (
-        <span key={i} class="chat-mention">
-          {part}
+    } else if (rawUrl) {
+      nodes.push(
+        <a key={`ru-${k++}`} href={rawUrl} target="_blank" rel="noopener noreferrer">
+          {rawUrl}
+        </a>
+      );
+    } else if (spoilerInner !== undefined) {
+      nodes.push(
+        <ChatSpoiler key={`sp-${k++}`}>
+          {renderInlineMarkdown(spoilerInner, onHashtagClick, depth + 1)}
+        </ChatSpoiler>
+      );
+    } else if (boldItalicInner !== undefined) {
+      nodes.push(
+        <strong key={`bi-${k++}`}>
+          <em>{renderInlineMarkdown(boldItalicInner, onHashtagClick, depth + 1)}</em>
+        </strong>
+      );
+    } else if (boldInner !== undefined) {
+      nodes.push(
+        <strong key={`b-${k++}`}>
+          {renderInlineMarkdown(boldInner, onHashtagClick, depth + 1)}
+        </strong>
+      );
+    } else if (underlineInner !== undefined) {
+      nodes.push(
+        <u key={`u-${k++}`}>
+          {renderInlineMarkdown(underlineInner, onHashtagClick, depth + 1)}
+        </u>
+      );
+    } else if (strikeInner !== undefined) {
+      nodes.push(
+        <del key={`s-${k++}`}>
+          {renderInlineMarkdown(strikeInner, onHashtagClick, depth + 1)}
+        </del>
+      );
+    } else if (italicStarInner !== undefined) {
+      nodes.push(
+        <em key={`is-${k++}`}>
+          {renderInlineMarkdown(italicStarInner, onHashtagClick, depth + 1)}
+        </em>
+      );
+    } else if (italicUnderInner !== undefined) {
+      nodes.push(
+        <em key={`iu-${k++}`}>
+          {renderInlineMarkdown(italicUnderInner, onHashtagClick, depth + 1)}
+        </em>
+      );
+    } else if (mention) {
+      nodes.push(
+        <span key={`m-${k++}`} class="chat-mention">
+          {mention}
         </span>
       );
-    }
-    if (part.startsWith("#") && part.length >= 3) {
-      const tag = part.slice(1).toLowerCase();
-      return (
+    } else if (hashtag && hashtag.length >= 3) {
+      const tag = hashtag.slice(1).toLowerCase();
+      nodes.push(
         <button
-          key={i}
+          key={`ht-${k++}`}
           type="button"
           class="chat-hashtag-pill"
           title={`Search #${tag}`}
@@ -474,12 +593,161 @@ function renderFormattedText(text: string, onHashtagClick?: (tag: string) => voi
             onHashtagClick?.(tag);
           }}
         >
-          {part}
+          {hashtag}
         </button>
       );
+    } else {
+      nodes.push(full);
     }
-    return part;
-  });
+    lastIdx = tokenRe.lastIndex;
+  }
+
+  if (lastIdx < text.length) {
+    nodes.push(text.slice(lastIdx));
+  }
+  return nodes;
+}
+
+function renderFormattedText(text: string, onHashtagClick?: (tag: string) => void) {
+  if (!text) return null;
+  const normalized = text.replace(/\r\n/g, "\n");
+  // Split out fenced code blocks ```lang\n...\n```
+  const segments = normalized.split(/(```[\s\S]*?```)/g);
+  const out: preact.ComponentChildren[] = [];
+  let keyIdx = 0;
+
+  for (const seg of segments) {
+    if (!seg) continue;
+    if (seg.startsWith("```") && seg.endsWith("```") && seg.length >= 6) {
+      const inner = seg.slice(3, -3);
+      const firstNl = inner.indexOf("\n");
+      let lang = "";
+      let code = inner;
+      if (firstNl !== -1) {
+        const maybeLang = inner.slice(0, firstNl).trim();
+        if (/^[a-zA-Z0-9_+#.-]{1,20}$/.test(maybeLang)) {
+          lang = maybeLang.toLowerCase();
+          code = inner.slice(firstNl + 1);
+        }
+      }
+      out.push(
+        <pre key={`cb-${keyIdx++}`} class="chat-md-codeblock">
+          {lang && <span class="chat-md-code-lang">{lang}</span>}
+          <code>{code.replace(/\n$/, "")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const lines = seg.split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // Multi-line blockquote >>> ... (rest of segment)
+      if (/^>>>\s?/.test(line)) {
+        const rest = [line.replace(/^>>>\s?/, ""), ...lines.slice(i + 1)];
+        out.push(
+          <blockquote key={`mq-${keyIdx++}`} class="chat-md-quote">
+            {rest.map((ql, qi) => (
+              <span key={qi} class="chat-md-line">
+                {renderInlineMarkdown(ql, onHashtagClick)}
+              </span>
+            ))}
+          </blockquote>
+        );
+        break;
+      }
+
+      // Single/consecutive > blockquote lines
+      if (/^>\s?/.test(line)) {
+        const quoteLines: string[] = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          quoteLines.push(lines[i].replace(/^>\s?/, ""));
+          i++;
+        }
+        out.push(
+          <blockquote key={`q-${keyIdx++}`} class="chat-md-quote">
+            {quoteLines.map((ql, qi) => (
+              <span key={qi} class="chat-md-line">
+                {renderInlineMarkdown(ql, onHashtagClick)}
+              </span>
+            ))}
+          </blockquote>
+        );
+        continue;
+      }
+
+      // Headings: # / ## / ### (requires space so #hashtag is unaffected)
+      const hMatch = line.match(/^(#{1,3})\s+(.+)$/);
+      if (hMatch) {
+        const level = hMatch[1].length;
+        out.push(
+          <div key={`h-${keyIdx++}`} class={`chat-md-h chat-md-h${level}`}>
+            {renderInlineMarkdown(hMatch[2], onHashtagClick)}
+          </div>
+        );
+        i++;
+        continue;
+      }
+
+      // Discord subtext: -# small muted line
+      const subMatch = line.match(/^-#\s+(.+)$/);
+      if (subMatch) {
+        out.push(
+          <div key={`sub-${keyIdx++}`} class="chat-md-subtext">
+            {renderInlineMarkdown(subMatch[1], onHashtagClick)}
+          </div>
+        );
+        i++;
+        continue;
+      }
+
+      // Unordered list (- item or * item)
+      if (/^[-*]\s+/.test(line)) {
+        const items: string[] = [];
+        while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^[-*]\s+/, ""));
+          i++;
+        }
+        out.push(
+          <ul key={`ul-${keyIdx++}`} class="chat-md-list">
+            {items.map((it, idx) => (
+              <li key={idx}>{renderInlineMarkdown(it, onHashtagClick)}</li>
+            ))}
+          </ul>
+        );
+        continue;
+      }
+
+      // Ordered list (1. item)
+      if (/^\d+\.\s+/.test(line)) {
+        const items: string[] = [];
+        while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\d+\.\s+/, ""));
+          i++;
+        }
+        out.push(
+          <ol key={`ol-${keyIdx++}`} class="chat-md-list">
+            {items.map((it, idx) => (
+              <li key={idx}>{renderInlineMarkdown(it, onHashtagClick)}</li>
+            ))}
+          </ol>
+        );
+        continue;
+      }
+
+      // Regular line (preserve line breaks!)
+      out.push(
+        <span key={`ln-${keyIdx++}`} class="chat-md-line">
+          {line ? renderInlineMarkdown(line, onHashtagClick) : "\u00A0"}
+        </span>
+      );
+      i++;
+    }
+  }
+
+  return out;
 }
 
 const CHROMEBOOK_INITIAL_MSG_CAP = 60;
@@ -1356,7 +1624,7 @@ export default function ChatModal() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
   const [confirmDeleteChat, setConfirmDeleteChat] = useState<string | null>(null);
-  const chatInputRef = useRef<HTMLInputElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   // Voice Chat state
   const [activeVoiceRoom, setActiveVoiceRoom] = useState<string | null>(null);
@@ -5183,6 +5451,14 @@ export default function ChatModal() {
   }, []);
 
   useEffect(() => {
+    const el = chatInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const nextH = Math.min(el.scrollHeight, 160);
+    el.style.height = `${Math.max(22, nextH)}px`;
+  }, [inputText, activeChannel, isOpen]);
+
+  useEffect(() => {
     setHeaderMenuOpen(false);
   }, [activeChannel]);
 
@@ -6917,10 +7193,10 @@ export default function ChatModal() {
                   >
                     <i class="fa-solid fa-plus"></i>
                   </button>
-                  <input
+                  <textarea
                     ref={chatInputRef}
-                    type="text"
-                    class="chat-input-field"
+                    rows={1}
+                    class="chat-input-field chat-input-textarea"
                     placeholder={
                       pendingImage
                         ? "add a caption or press enter to send photo..."
@@ -6930,9 +7206,21 @@ export default function ChatModal() {
                     }
                     value={inputText}
                     onInput={(e) => {
-                      const val = (e.target as HTMLInputElement).value;
+                      const el = e.target as HTMLTextAreaElement;
+                      const val = el.value;
                       setInputText(val);
                       handleTypingActivity(val);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+                        e.preventDefault();
+                        if ((inputText.trim() || pendingImage) && !isSending) {
+                          if (lastTypingChannelRef.current === activeChannel) {
+                            sendTypingSignal(activeChannel, false);
+                          }
+                          void handleSendMessage(e as unknown as Event);
+                        }
+                      }
                     }}
                     onPaste={(e) => {
                       const items = e.clipboardData?.items;
@@ -6948,7 +7236,7 @@ export default function ChatModal() {
                         }
                       }
                     }}
-                    maxLength={500}
+                    maxLength={2000}
                   />
                   <button
                     type="button"
