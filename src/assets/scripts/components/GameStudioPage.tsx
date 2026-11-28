@@ -1164,13 +1164,23 @@ export default function GameStudioPage() {
         setServerSyncLoaded(true);
         setCommunityGames((prev) => {
           const byId = new Map<string, StudioGameProject>();
+          const seenTitles = new Set<string>();
           for (const g of remoteList) {
-            if (g?.id) byId.set(g.id, g);
-          }
-          for (const g of prev) {
-            if (g?.id && !byId.has(g.id)) {
+            if (g?.id) {
               byId.set(g.id, g);
+              const tNorm = String(g.title || "").trim().toLowerCase().replace(/\s+/g, " ");
+              if (tNorm) seenTitles.add(tNorm);
             }
+          }
+          const myAuthor = getActiveAuthor().toLowerCase();
+          for (const g of prev) {
+            if (!g?.id || byId.has(g.id)) continue;
+            const tNorm = String(g.title || "").trim().toLowerCase().replace(/\s+/g, " ");
+            // Drop stale local duplicates of games already on the server or belonging to other users
+            if (tNorm && seenTitles.has(tNorm)) continue;
+            if (String(g.author || "").trim().toLowerCase() !== myAuthor) continue;
+            if (tNorm) seenTitles.add(tNorm);
+            byId.set(g.id, g);
           }
           const next = Array.from(byId.values()).slice(0, 80);
           try {

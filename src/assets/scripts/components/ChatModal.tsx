@@ -479,7 +479,7 @@ function renderInlineMarkdown(
   const nodes: preact.ComponentChildren[] = [];
   // Order matters: code -> masked link -> raw url -> spoiler -> bold+italic -> bold -> underline -> strikethrough -> italic -> mention -> hashtag
   const tokenRe =
-    /(`[^`\n]+`)|(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\))|(\bhttps?:\/\/[^\s<>()]+)|(\|\|([^|\n]+?)\|\|)|(\*\*\*([^*\n]+?)\*\*\*)|(\*\*([^*\n]+?)\*\*)|(__([^_\n]+?)__)|(~~([^~\n]+?)~~)|(\*([^*\n]+?)\*)|((?<![a-zA-Z0-9_])_([^_\n]+?)_(?![a-zA-Z0-9_]))|(@[a-zA-Z0-9_.-]+)|(#[a-zA-Z][a-zA-Z0-9_-]{1,31}\b)/g;
+    /(`[^`\n]+`)|(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\))|(\bhttps?:\/\/[^\s<>()]+)|(\|\|([^|\n]+?)\|\|)|(\*\*\*([^*\n]+?)\*\*\*)|(\*\*([^*\n]+?)\*\*)|(__([^_\n]+?)__)|(~~([^~\n]+?)~~)|(\*([^*\n]+?)\*)|((?<![a-zA-Z0-9_])_([^_\n]+?)_(?![a-zA-Z0-9_]))|(@[a-zA-Z0-9_.-]+)|((?<![a-zA-Z0-9_/&-])#[a-zA-Z][a-zA-Z0-9_-]{1,31}\b)/g;
 
   let lastIdx = 0;
   let match: RegExpExecArray | null;

@@ -1667,6 +1667,8 @@ function mergeStudioGamesLists(...lists) {
         ...contentWinner,
         id: existing.id,
         author: existing.author,
+        ...(existing.studioName ? { studioName: existing.studioName } : {}),
+        ...(existing.studioColor ? { studioColor: existing.studioColor } : {}),
         createdAt: existing.createdAt,
         updatedAt:
           (Date.parse(item.updatedAt || "") || 0) > (Date.parse(existing.updatedAt || "") || 0)
@@ -2051,6 +2053,51 @@ function mergeKvValueBeforeRemoteWrite(key, remoteVal, localVal) {
         .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
         .slice(0, MAX_NOTES_PER_USER);
       if (list.length > 0) merged[uk] = list;
+    }
+    return merged;
+  }
+  if (k === "user_achievements_v1" && typeof remoteVal === "object" && typeof localVal === "object") {
+    const merged = {};
+    const keys = new Set([...Object.keys(remoteVal || {}), ...Object.keys(localVal || {})]);
+    for (const uk of keys) {
+      const rArr = Array.isArray(remoteVal?.[uk]) ? remoteVal[uk] : [];
+      const lArr = Array.isArray(localVal?.[uk]) ? localVal[uk] : [];
+      const byId = new Map();
+      for (const item of [...rArr, ...lArr]) {
+        if (item && typeof item.id === "string" && typeof item.title === "string" && !byId.has(item.id)) {
+          byId.set(item.id, item);
+        }
+      }
+      const list = Array.from(byId.values())
+        .sort((a, b) => (Number(b.unlockedAt) || 0) - (Number(a.unlockedAt) || 0))
+        .slice(0, 250);
+      if (list.length > 0) merged[uk] = list;
+    }
+    return merged;
+  }
+  if (k === "chat_hashtags_v1" && typeof remoteVal === "object" && typeof localVal === "object") {
+    const merged = {};
+    const keys = new Set([...Object.keys(remoteVal || {}), ...Object.keys(localVal || {})]);
+    for (const tag of keys) {
+      const r = remoteVal?.[tag];
+      const l = localVal?.[tag];
+      const rc = Array.isArray(r) ? Number(r[0]) || 0 : Number(r?.c) || 0;
+      const rt = Array.isArray(r) ? Number(r[1]) || 0 : Number(r?.t) || 0;
+      const rm = Array.isArray(r) ? (Array.isArray(r[2]) ? r[2] : []) : (Array.isArray(r?.m) ? r.m : []);
+      const lc = Array.isArray(l) ? Number(l[0]) || 0 : Number(l?.c) || 0;
+      const lt = Array.isArray(l) ? Number(l[1]) || 0 : Number(l?.t) || 0;
+      const lm = Array.isArray(l) ? (Array.isArray(l[2]) ? l[2] : []) : (Array.isArray(l?.m) ? l.m : []);
+      const ids = Array.from(new Set([...rm, ...lm].map(String).filter(Boolean))).slice(-MAX_IDS_PER_HASHTAG);
+      merged[tag] = [Math.max(rc, lc, ids.length), Math.max(rt, lt), ids];
+    }
+    return merged;
+  }
+  if (k === "user_last_active_v1" && typeof remoteVal === "object" && typeof localVal === "object") {
+    const merged = {};
+    const keys = new Set([...Object.keys(remoteVal || {}), ...Object.keys(localVal || {})]);
+    for (const uk of keys) {
+      const ts = Math.max(Number(remoteVal?.[uk]) || 0, Number(localVal?.[uk]) || 0);
+      if (ts > 0) merged[uk] = ts;
     }
     return merged;
   }
@@ -10847,10 +10894,12 @@ app.post("/api/chat/mod/delete-account", async (req, res) => {
       return res.status(404).json({ success: false, error: `Account @${targetUsername} not found` });
     }
 
-    // If owner is deleting a mod/GOAT, remove their role first so purgeUserAccountCompletely proceeds
-    if (actor.isOwner) {
-      if (staffModerators.delete(targetKey)) persistStaffMods();
-      if (goatUsers.delete(targetKey)) persistGoatUsers();
+    // Remove mod/GOAT status before purging so purgeUserAccountCompletely proceeds cleanly
+    if (actor.isOwner && staffModerators.delete(targetKey)) {
+      persistStaffMods();
+    }
+    if (goatUsers.delete(targetKey)) {
+      persistGoatUsers();
     }
 
     const reason = String(req.body?.reason || "deleted by staff").trim().slice(0, 160);
