@@ -17,16 +17,43 @@ import {
   teardownIframeElement,
   useChromebookMode,
 } from "../core/chromebookMode.ts";
+import {
+  type GameMode,
+  type WorldSizePreset,
+  type WeaponType,
+  type WinConditionType,
+  type WeatherType,
+  type PaintToolMode,
+  type BrushCategory,
+  type RuleTriggerType,
+  type RuleActionType,
+  type StudioLogicRule,
+  type StudioGameLevel,
+  type StudioGameProject,
+  VIEWPORT_COLS,
+  VIEWPORT_ROWS,
+  TILE_SIZE,
+  WORLD_SIZE_PRESETS,
+  ENGINE_MODES,
+  STUDIO_BRUSHES,
+  WEAPON_OPTIONS,
+  RULE_TRIGGERS,
+  RULE_ACTIONS,
+  playStudioSfx,
+  getGridDimensions,
+  inferWorldSizePreset,
+  createSizedEmptyGrid,
+  resizeLevelGrid,
+  applyRectPaint,
+  applyLinePaint,
+  applyFloodFill,
+  generateProceduralLevel,
+  makeDefaultStudioLevels,
+  drawStudioTile2D,
+  buildAdvancedStandaloneGameHtml,
+} from "../core/studioEngineCore.ts";
 
-export type GameMode = "platformer" | "fps3d" | "topdown" | "shooter" | "flappy" | "custom_html";
-
-export interface StudioGameLevel {
-  id: string;
-  name: string;
-  grid: number[][];
-  bgColor?: string;
-  wallColor?: string;
-}
+export type { GameMode, StudioGameLevel, StudioGameProject };
 
 export interface CloudSyncPlayerProgress {
   username: string;
@@ -40,55 +67,9 @@ export interface CloudSyncPlayerProgress {
   lastUpdated: string;
 }
 
-export interface StudioGameProject {
-  id: string;
-  title: string;
-  description: string;
-  author: string;
-  studioName?: string;
-  studioColor?: string;
-  mode: GameMode;
-  grid: number[][];
-  levels?: StudioGameLevel[];
-  gravity: number;
-  jumpForce: number;
-  moveSpeed: number;
-  maxHp?: number;
-  enableDash?: boolean;
-  enableDoubleJump?: boolean;
-  enableBlaster?: boolean;
-  playerColor: string;
-  bgColor: string;
-  wallColor: string;
-  customScript: string;
-  isCustomHtml?: boolean;
-  customHtmlContent?: string;
-  likes: number;
-  likedBy?: string[];
-  plays: number;
-  createdAt: string;
-}
-
-const ROWS = 12;
-const COLS = 20;
-const TILE_SIZE = 34; // 680 x 408 canvas
 const CUSTOM_HTML_UPLOAD_COST = 1000;
-
-const BRUSH_TOOLS = [
-  { id: 1, name: "wall block", color: "#3b82f6", icon: "fa-square" },
-  { id: 2, name: "player spawn", color: "#22c55e", icon: "fa-user-astronaut" },
-  { id: 3, name: "coin (+10)", color: "#eab308", icon: "fa-coins" },
-  { id: 4, name: "lava / hazard", color: "#ef4444", icon: "fa-skull-crossbones" },
-  { id: 5, name: "patrol enemy", color: "#a855f7", icon: "fa-ghost" },
-  { id: 9, name: "boss / chaser", color: "#ec4899", icon: "fa-dragon" },
-  { id: 6, name: "bounce / boost", color: "#06b6d4", icon: "fa-angles-up" },
-  { id: 8, name: "moving platform", color: "#6366f1", icon: "fa-arrows-left-right" },
-  { id: 10, name: "checkpoint +hp", color: "#f43f5e", icon: "fa-heart-pulse" },
-  { id: 11, name: "golden key", color: "#f59e0b", icon: "fa-key" },
-  { id: 12, name: "locked gate", color: "#94a3b8", icon: "fa-lock" },
-  { id: 7, name: "level portal", color: "#10b981", icon: "fa-flag-checkered" },
-  { id: 0, name: "eraser", color: "#64748b", icon: "fa-eraser" },
-];
+const CANVAS_W = VIEWPORT_COLS * TILE_SIZE; // 680
+const CANVAS_H = VIEWPORT_ROWS * TILE_SIZE; // 408
 
 const STUDIO_ICONS = [
   "fa-rocket",
@@ -99,6 +80,14 @@ const STUDIO_ICONS = [
   "fa-fire",
   "fa-wand-magic-sparkles",
   "fa-ghost",
+];
+
+const THEME_PALETTES = [
+  { name: "cyberpunk", bg: "#090d16", wall: "#3b82f6", hero: "#22c55e" },
+  { name: "matrix", bg: "#04120b", wall: "#10b981", hero: "#bef264" },
+  { name: "volcanic", bg: "#170808", wall: "#ea580c", hero: "#facc15" },
+  { name: "void violet", bg: "#0d071b", wall: "#8b5cf6", hero: "#38bdf8" },
+  { name: "arctic", bg: "#081421", wall: "#06b6d4", hero: "#f43f5e" },
 ];
 
 const SAMPLE_CUSTOM_HTML_GAME = `<!DOCTYPE html>
@@ -122,7 +111,7 @@ const SAMPLE_CUSTOM_HTML_GAME = `<!DOCTYPE html>
   <script>
     const c = document.getElementById("game");
     const ctx = c.getContext("2d");
-    let score = 0, level = 1, orbs = [], particles = [], mx = 330, my = 195;
+    let score = 0, level = 1, orbs = [], mx = 330, my = 195;
     c.addEventListener("mousemove", e => {
       const r = c.getBoundingClientRect();
       mx = e.clientX - r.left; my = e.clientY - r.top;
@@ -166,137 +155,6 @@ const SAMPLE_CUSTOM_HTML_GAME = `<!DOCTYPE html>
 </body>
 </html>`;
 
-function createEmptyGrid(): number[][] {
-  return Array.from({ length: ROWS }, () => Array(COLS).fill(0));
-}
-
-function makePresetGrid(preset: GameMode, levelIndex = 0): number[][] {
-  const g = createEmptyGrid();
-  if (preset === "fps3d" || preset === "topdown") {
-    // Perimeter walls for 3D raycaster / top-down dungeon
-    for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        if (r === 0 || r === ROWS - 1 || c === 0 || c === COLS - 1) g[r][c] = 1;
-      }
-    }
-    if (levelIndex % 2 === 0) {
-      for (let r = 1; r < 8; r++) g[r][5] = 1;
-      for (let r = 4; r < ROWS - 1; r++) g[r][10] = 1;
-      for (let r = 1; r < 8; r++) g[r][15] = 1;
-      g[2][2] = 2; // Player spawn
-      g[2][8] = 3; // Coin
-      g[6][3] = 3;
-      g[9][7] = 3;
-      g[3][13] = 3;
-      g[5][8] = 5; // Enemy
-      g[8][13] = 9; // Boss/chaser
-      g[5][12] = 10; // Checkpoint / medkit
-      g[2][13] = 11; // Key
-      g[8][15] = 12; // Locked gate
-      g[9][18] = 7; // Goal portal
-    } else {
-      for (let c = 3; c < 16; c++) if (c !== 9) g[4][c] = 1;
-      for (let c = 4; c < 17; c++) if (c !== 11) g[8][c] = 1;
-      g[2][2] = 2;
-      g[2][12] = 3;
-      g[6][6] = 3;
-      g[6][14] = 9;
-      g[10][8] = 5;
-      g[6][10] = 10;
-      g[10][18] = 7;
-    }
-  } else if (preset === "platformer") {
-    for (let c = 0; c < COLS; c++) g[ROWS - 1][c] = 1;
-    if (levelIndex === 0) {
-      g[ROWS - 1][8] = 4;
-      g[ROWS - 1][9] = 4;
-      g[ROWS - 1][10] = 4;
-      g[8][4] = 1;
-      g[8][5] = 1;
-      g[8][6] = 1;
-      g[6][8] = 8; // Moving platform
-      g[6][9] = 1;
-      g[6][10] = 1;
-      g[5][13] = 1;
-      g[5][14] = 1;
-      g[5][15] = 1;
-      g[ROWS - 2][7] = 6;
-      g[ROWS - 2][2] = 2;
-      g[7][5] = 3;
-      g[5][9] = 3;
-      g[4][14] = 10; // Checkpoint +HP
-      g[ROWS - 2][12] = 3;
-      g[ROWS - 2][14] = 5;
-      g[4][18] = 7;
-      g[5][18] = 1;
-      g[5][17] = 1;
-    } else {
-      for (let c = 5; c < 15; c++) g[ROWS - 1][c] = 4;
-      g[ROWS - 2][2] = 2;
-      g[9][5] = 8;
-      g[7][9] = 8;
-      g[5][13] = 8;
-      g[8][5] = 3;
-      g[6][9] = 10;
-      g[4][13] = 3;
-      g[ROWS - 2][16] = 9;
-      g[4][18] = 7;
-      g[5][18] = 1;
-    }
-  } else if (preset === "shooter") {
-    for (let c = 0; c < COLS; c++) {
-      g[0][c] = 1;
-      g[ROWS - 1][c] = 1;
-    }
-    g[6][2] = 2;
-    g[3][12] = 5;
-    g[6][14] = 9;
-    g[9][12] = 5;
-    g[4][16] = 5;
-    g[8][16] = 9;
-    g[3][8] = 3;
-    g[8][8] = 3;
-    g[6][9] = 10;
-    g[6][18] = 7;
-  } else if (preset === "flappy") {
-    for (let c = 0; c < COLS; c++) {
-      g[0][c] = 4;
-      g[ROWS - 1][c] = 4;
-    }
-    g[5][2] = 2;
-    for (let r = 1; r <= 4; r++) g[r][7] = 1;
-    for (let r = 8; r <= 10; r++) g[r][7] = 1;
-    g[6][7] = 3;
-    for (let r = 1; r <= 3; r++) g[r][12] = 1;
-    for (let r = 7; r <= 10; r++) g[r][12] = 1;
-    g[5][12] = 3;
-    for (let r = 1; r <= 5; r++) g[r][16] = 1;
-    for (let r = 9; r <= 10; r++) g[r][16] = 1;
-    g[7][16] = 3;
-    g[6][19] = 7;
-  }
-  return g;
-}
-
-function makeDefaultLevels(preset: GameMode): StudioGameLevel[] {
-  return [
-    {
-      id: "lvl_1",
-      name: "level 1: neon entry",
-      grid: makePresetGrid(preset, 0),
-      bgColor: "#090d16",
-      wallColor: "#3b82f6",
-    },
-    {
-      id: "lvl_2",
-      name: "level 2: cyber core",
-      grid: makePresetGrid(preset, 1),
-      bgColor: "#0f091c",
-      wallColor: "#8b5cf6",
-    },
-  ];
-}
-
 function notifyToast(message: string, type: "success" | "error" | "info" = "info") {
   const w = window as unknown as { showToast?: (msg: string, t?: string) => void };
   if (typeof w.showToast === "function") {
@@ -321,7 +179,6 @@ function getCloudSyncState(): { username: string; isCloudSynced: boolean } {
 }
 
 function rewriteExternalHtmlAssetsForCoep(rawHtml: string): string {
-  // Rewrite external http(s) script/link/img/audio/video/source URLs through /!!/ so COEP (require-corp) never blocks CDN libraries
   return rawHtml.replace(
     /\b(src|href)\s*=\s*(["'])(https?:\/\/[^"']+)\2/gi,
     (match, attr, quote, url) => {
@@ -331,22 +188,12 @@ function rewriteExternalHtmlAssetsForCoep(rawHtml: string): string {
   );
 }
 
-function escapeStudioHtml(str: string): string {
-  return String(str || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 function injectCloudSyncBridgeIntoHtml(rawHtml: string, project: StudioGameProject): string {
   const { username, isCloudSynced } = getCloudSyncState();
   const coepSafeHtml = rewriteExternalHtmlAssetsForCoep(rawHtml || "");
   const bridgeScript = `
 <script>
 (function() {
-  // Provide isolated in-memory storage fallback when running inside sandbox without allow-same-origin
   try {
     void window.localStorage.length;
   } catch (e) {
@@ -365,7 +212,6 @@ function injectCloudSyncBridgeIntoHtml(rawHtml: string, project: StudioGameProje
     } catch (_) {}
   }
 
-  // Auto-proxy cross-origin fetch requests through /!!/ so COEP never blocks external game assets
   try {
     var origFetch = window.fetch;
     if (origFetch) {
@@ -412,149 +258,124 @@ function buildStandaloneGameHtml(project: StudioGameProject): string {
   if (project.isCustomHtml && project.customHtmlContent) {
     return injectCloudSyncBridgeIntoHtml(project.customHtmlContent, project);
   }
-  const serialized = JSON.stringify(project).replace(/</g, "\\u003c");
-  const safeTitle = escapeStudioHtml(project.title);
-  const safeCreator = escapeStudioHtml(project.studioName || project.author);
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${safeTitle} — ${safeCreator}</title>
-<style>
-  body { margin: 0; background: #070a12; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
-  .hud { display: flex; gap: 18px; align-items: center; margin-bottom: 10px; font-size: 13px; background: rgba(255,255,255,0.06); padding: 8px 18px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.12); }
-  canvas { border-radius: 12px; border: 2px solid rgba(255,255,255,0.18); box-shadow: 0 20px 60px rgba(0,0,0,0.7); }
-  .hint { margin-top: 10px; font-size: 12px; color: #94a3b8; }
-</style>
-</head>
-<body>
-  <div class="hud">
-    <strong>${safeTitle}</strong>
-    <span id="lvl">level 1</span>
-    <span id="hp">hp: ❤️❤️❤️</span>
-    <span id="score">score: 0</span>
-    <span id="status">playing</span>
-  </div>
-  <canvas id="c" width="680" height="408"></canvas>
-  <div class="hint">controls: WASD / Arrows to move · SPACE to jump / shoot · SHIFT to dash · R to restart</div>
-<script>
-const P = ${serialized};
-const levels = Array.isArray(P.levels) && P.levels.length > 0 ? P.levels : [{ name: "level 1", grid: P.grid }];
-let curLvl = 0;
-const ROWS = 12, COLS = 20, T = 34;
-const canvas = document.getElementById("c");
-const ctx = canvas.getContext("2d");
-const keys = {};
-window.addEventListener("keydown", e => { keys[e.code] = true; if (e.code === "KeyR") reset(0); });
-window.addEventListener("keyup", e => { keys[e.code] = false; });
+  return buildAdvancedStandaloneGameHtml(project);
+}
 
-let player, coins, enemies, bullets, score = 0, state = "playing";
-function reset(lvlIdx) {
-  curLvl = lvlIdx;
-  if (curLvl === 0) score = 0;
-  state = "playing"; coins = []; enemies = []; bullets = [];
-  const grid = levels[curLvl].grid;
-  player = { x: 68, y: 200, vx: 0, vy: 0, w: 24, h: 24, angle: 0, grounded: false, shootCd: 0, hp: P.maxHp || 3 };
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const id = grid[r][c];
-      if (id === 2) { player.x = c * T + 5; player.y = r * T + 5; }
-      else if (id === 3) coins.push({ x: c * T + 9, y: r * T + 9, w: 16, h: 16, taken: false });
-      else if (id === 5 || id === 9) enemies.push({ x: c * T + 4, y: r * T + 4, w: 26, h: 26, vx: id === 9 ? 2.1 : 1.5, hp: id === 9 ? 3 : 1, boss: id === 9, alive: true });
-    }
-  }
-  document.getElementById("lvl").textContent = levels[curLvl].name || ("level " + (curLvl + 1));
-}
-reset(0);
-function overlap(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-function loop() {
-  const grid = levels[curLvl].grid;
-  if (state === "playing") {
-    const left = keys["ArrowLeft"] || keys["KeyA"];
-    const right = keys["ArrowRight"] || keys["KeyD"];
-    const up = keys["ArrowUp"] || keys["KeyW"] || keys["Space"];
-    const down = keys["ArrowDown"] || keys["KeyS"];
-    if (P.mode === "platformer") {
-      player.vx = (right ? P.moveSpeed : 0) - (left ? P.moveSpeed : 0);
-      if (up && player.grounded) { player.vy = -P.jumpForce; player.grounded = false; }
-      player.vy += P.gravity;
-    } else {
-      player.vx = (right ? P.moveSpeed : 0) - (left ? P.moveSpeed : 0);
-      player.vy = (down ? P.moveSpeed : 0) - ((keys["ArrowUp"] || keys["KeyW"]) ? P.moveSpeed : 0);
-    }
-    if (keys["Space"] && player.shootCd <= 0) {
-      bullets.push({ x: player.x + 12, y: player.y + 10, w: 10, h: 4, vx: 9 });
-      player.shootCd = 14;
-    }
-    if (player.shootCd > 0) player.shootCd--;
-    player.x += player.vx;
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-      if ((grid[r][c] === 1 || grid[r][c] === 8) && overlap(player, { x: c*T, y: r*T, w: T, h: T })) {
-        if (player.vx > 0) player.x = c*T - player.w;
-        else if (player.vx < 0) player.x = (c+1)*T;
-      }
-    }
-    player.y += player.vy;
-    player.grounded = false;
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-      const id = grid[r][c];
-      const box = { x: c*T, y: r*T, w: T, h: T };
-      if (!overlap(player, box)) continue;
-      if (id === 1 || id === 8) {
-        if (player.vy > 0) { player.y = r*T - player.h; player.vy = 0; player.grounded = true; }
-        else if (player.vy < 0) { player.y = (r+1)*T; player.vy = 0; }
-      } else if (id === 4) state = "lost";
-      else if (id === 6) { player.vy = -P.jumpForce * 1.35; player.grounded = false; }
-      else if (id === 7) {
-        if (curLvl + 1 < levels.length) reset(curLvl + 1);
-        else state = "won";
-      }
-    }
-    for (const c of coins) if (!c.taken && overlap(player, c)) { c.taken = true; score += 10; }
-    for (const b of bullets) {
-      b.x += b.vx;
-      for (const en of enemies) if (en.alive && overlap(b, en)) { en.hp--; if (en.hp <= 0) en.alive = false; b.x = 9999; score += 25; }
-    }
-    for (const en of enemies) {
-      if (!en.alive) continue;
-      en.x += en.vx;
-      const tc = Math.floor((en.x + (en.vx > 0 ? en.w : 0)) / T);
-      const tr = Math.floor((en.y + 12) / T);
-      if (tc < 0 || tc >= COLS || (grid[tr] && grid[tr][tc] === 1)) en.vx *= -1;
-      if (overlap(player, en)) state = "lost";
-    }
-  }
-  document.getElementById("score").textContent = "score: " + score;
-  document.getElementById("status").textContent = state === "won" ? "🎉 ALL LEVELS CLEARED! (R)" : state === "lost" ? "💥 GAME OVER (R)" : "playing";
-  ctx.fillStyle = levels[curLvl].bgColor || P.bgColor; ctx.fillRect(0, 0, 680, 408);
-  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    const id = grid[r][c];
-    if (id === 1 || id === 8) { ctx.fillStyle = id === 8 ? "#6366f1" : (levels[curLvl].wallColor || P.wallColor); ctx.fillRect(c*T, r*T, T-1, T-1); }
-    else if (id === 4) { ctx.fillStyle = "#ef4444"; ctx.fillRect(c*T, r*T+10, T, T-10); }
-    else if (id === 6) { ctx.fillStyle = "#06b6d4"; ctx.fillRect(c*T+2, r*T+18, T-4, 16); }
-    else if (id === 7) { ctx.fillStyle = "#10b981"; ctx.fillRect(c*T+8, r*T+4, 18, 28); }
-  }
-  ctx.fillStyle = "#eab308";
-  for (const c of coins) if (!c.taken) { ctx.beginPath(); ctx.arc(c.x+8, c.y+8, 7, 0, Math.PI*2); ctx.fill(); }
-  for (const en of enemies) if (en.alive) { ctx.fillStyle = en.boss ? "#ec4899" : "#a855f7"; ctx.fillRect(en.x, en.y, en.w, en.h); }
-  ctx.fillStyle = "#38bdf8";
-  for (const b of bullets) if (b.x < 700) ctx.fillRect(b.x, b.y, b.w, b.h);
-  ctx.fillStyle = P.playerColor;
-  ctx.fillRect(player.x, player.y, player.w, player.h);
-  requestAnimationFrame(loop);
-}
-requestAnimationFrame(loop);
-</script>
-</body>
-</html>`;
+interface SimState {
+  levelIndex: number;
+  runtimeGrid: number[][];
+  rows: number;
+  cols: number;
+  tick: number;
+  camX: number;
+  camY: number;
+  shakeFrames: number;
+  shakeMag: number;
+  switchesOn: boolean;
+  doorsForcedOpen: boolean;
+  gravDir: number;
+  gravScale: number;
+  timerFrames: number;
+  firedRules: Record<string, boolean>;
+  bannerText: string;
+  levelBannerFrames: number;
+  rewardedWin?: boolean;
+  player: {
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    w: number;
+    h: number;
+    angle: number;
+    grounded: boolean;
+    onIce: boolean;
+    jumpsLeft: number;
+    jumpKeyLock: boolean;
+    dashCd: number;
+    dashFrames: number;
+    facing: number;
+    shootCd: number;
+    hp: number;
+    invulnFrames: number;
+    overdriveFrames: number;
+    tpCooldown: number;
+    jetpackFuel: number;
+    checkpointX: number;
+    checkpointY: number;
+    muzzleFlash: number;
+    bobPhase: number;
+    flapLock?: boolean;
+    trail: { x: number; y: number; alpha: number }[];
+  };
+  coins: { x: number; y: number; w: number; h: number; taken: boolean }[];
+  keysList: { x: number; y: number; w: number; h: number; taken: boolean }[];
+  checkpoints: { x: number; y: number; w: number; h: number; used: boolean }[];
+  powerups: { x: number; y: number; w: number; h: number; taken: boolean }[];
+  tntBarrels: { r: number; c: number; x: number; y: number; w: number; h: number; intact: boolean }[];
+  teleporters: { x: number; y: number; w: number; h: number }[];
+  spawners: { x: number; y: number; w: number; h: number; hp: number; maxHp: number; cd: number; alive: boolean }[];
+  signs: { x: number; y: number }[];
+  movingPlatforms: {
+    r: number;
+    c: number;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    vx: number;
+    vy: number;
+    vertical: boolean;
+  }[];
+  enemies: {
+    x: number;
+    y: number;
+    baseY: number;
+    w: number;
+    h: number;
+    vx: number;
+    vy: number;
+    hp: number;
+    maxHp: number;
+    kind: number; // 5 walker, 9 boss, 23 drone, 24 turret
+    isBoss: boolean;
+    cd: number;
+    aimAngle: number;
+    alive: boolean;
+  }[];
+  bullets: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    vx: number;
+    vy: number;
+    kind: WeaponType;
+    pierce?: boolean;
+    life: number;
+    dead?: boolean;
+  }[];
+  enemyBullets: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    vx: number;
+    vy: number;
+    life: number;
+    dead?: boolean;
+  }[];
+  shockwaves: { x: number; y: number; radius: number; maxRadius: number; color: string }[];
+  popups: { x: number; y: number; text: string; color: string; life: number }[];
+  particles: { x: number; y: number; vx: number; vy: number; color: string; life: number; size?: number | undefined }[];
+  weatherDrops: { x: number; y: number; vx: number; vy: number; size: number; char?: string | undefined }[];
+  score: number;
+  status: "playing" | "level_clear" | "won" | "lost";
 }
 
 export default function GameStudioPage() {
   const [visible, setVisible] = useState(false);
   const [active, setActive] = useState(false);
-  // Default page is OTHER PEOPLE'S GAMES ("community")
   const [subTab, setSubTab] = useState<"community" | "mystudio" | "editor" | "htmlupload">(
     "community"
   );
@@ -584,7 +405,7 @@ export default function GameStudioPage() {
   const [studioColorInput, setStudioColorInput] = useState(userStudio.color);
   const [studioIconInput, setStudioIconInput] = useState(userStudio.icon);
 
-  // Community published games state (synced with global /api/studio/games SQLite + Supabase store)
+  // Community published games state
   const [communityGames, setCommunityGames] = useState<StudioGameProject[]>(() => {
     try {
       const saved = localStorage.getItem("cookie_studio_games_v2");
@@ -601,7 +422,7 @@ export default function GameStudioPage() {
 
   // CloudSync Player Tracking state
   const [activeGameId, setActiveGameId] = useState<string>("editor_preview");
-  const [cloudPlayers, setCloudPlayers] = useState<CloudSyncPlayerProgress[]>([]);
+  const [, setCloudPlayers] = useState<CloudSyncPlayerProgress[]>([]);
   const [myCloudProgress, setMyCloudProgress] = useState<CloudSyncPlayerProgress | null>(null);
   const [playingCustomHtmlGame, setPlayingCustomHtmlGame] = useState<StudioGameProject | null>(
     null
@@ -626,34 +447,78 @@ export default function GameStudioPage() {
   const [htmlPreviewBlobUrl, setHtmlPreviewBlobUrl] = useState<string>("");
   const [playingCustomBlobUrl, setPlayingCustomBlobUrl] = useState<string>("");
 
-  // Multi-Level & Sophisticated Engine Project state
-  const [title, setTitle] = useState("cyber dungeon 3d & 2d");
+  // Advanced No-Code Engine Project State
+  const [title, setTitle] = useState("cyber odyssey xl");
   const [description, setDescription] = useState(
-    "multi-level adventure with cloudsync progression, checkpoints, bosses, and 3d first-person mode!"
+    "scrolling multi-level world with 6 weapons, wall-jumps, switches, TNT chain reactions & visual logic rules!"
   );
   const [mode, setMode] = useState<GameMode>("platformer");
-  const [levels, setLevels] = useState<StudioGameLevel[]>(() => makeDefaultLevels("platformer"));
+  const [levels, setLevels] = useState<StudioGameLevel[]>(() =>
+    makeDefaultStudioLevels("platformer")
+  );
   const [activeLevelIdx, setActiveLevelIdx] = useState<number>(0);
 
   const currentLevel = levels[activeLevelIdx] || levels[0];
-  const grid = currentLevel?.grid || makePresetGrid("platformer", 0);
+  const currentDims = getGridDimensions(currentLevel?.grid);
 
+  // Editor Palette & Paint Tool State
   const [selectedBrush, setSelectedBrush] = useState<number>(1);
+  const [brushCategory, setBrushCategory] = useState<BrushCategory>("all");
+  const [paintTool, setPaintTool] = useState<PaintToolMode>("brush");
+  const [inspectorTab, setInspectorTab] = useState<"hero" | "rules" | "world" | "publish">("hero");
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
+  const undoStackRef = useRef<number[][][]>([]);
+  const redoStackRef = useRef<number[][][]>([]);
+
+  // Editor Camera & Drag Preview Refs
+  const editorCamRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const dragShapeRef = useRef<{
+    active: boolean;
+    tool: PaintToolMode;
+    r0: number;
+    c0: number;
+    r1: number;
+    c1: number;
+    brushId: number;
+  } | null>(null);
+  const isPanningEditorRef = useRef<{ active: boolean; lastX: number; lastY: number }>({
+    active: false,
+    lastX: 0,
+    lastY: 0,
+  });
+
+  // No-Code Mechanics, Weapons, Rules & FX State
   const [gravity, setGravity] = useState(0.55);
   const [jumpForce, setJumpForce] = useState(11.5);
-  const [moveSpeed, setMoveSpeed] = useState(4.2);
+  const [moveSpeed, setMoveSpeed] = useState(4.4);
   const [maxHp, setMaxHp] = useState(3);
   const [enableDoubleJump, setEnableDoubleJump] = useState(true);
+  const [enableWallJump, setEnableWallJump] = useState(true);
   const [enableDash, setEnableDash] = useState(true);
-  const [enableBlaster, setEnableBlaster] = useState(true);
+  const [enableJetpack, setEnableJetpack] = useState(false);
+  const [weaponType, setWeaponType] = useState<WeaponType>("blaster");
+  const [mouseAim, setMouseAim] = useState(true);
+  const [autoFire, setAutoFire] = useState(false);
   const [render3DInTest, setRender3DInTest] = useState(false);
+
+  const [winCondition, setWinCondition] = useState<WinConditionType>("portal");
+  const [timeLimitSec, setTimeLimitSec] = useState<number>(45);
+  const [rules, setRules] = useState<StudioLogicRule[]>([
+    { id: "r_default_1", when: "on_switch_on", action: "open_doors", text: "laser switch activated — security doors open!" },
+    { id: "r_default_2", when: "on_boss_defeated", action: "overdrive_weapon", text: "boss defeated — weapon overdrive unlocked!" },
+  ]);
+
+  const [weather, setWeather] = useState<WeatherType>("starfield");
+  const [darknessMode, setDarknessMode] = useState(false);
+  const [sfxEnabled, setSfxEnabled] = useState(true);
+  const [screenShake, setScreenShake] = useState(true);
+  const [cameraZoom, setCameraZoom] = useState<number>(1);
 
   const [playerColor, setPlayerColor] = useState("#22c55e");
   const [bgColor, setBgColor] = useState("#090d16");
   const [wallColor, setWallColor] = useState("#3b82f6");
-  const [customScript, setCustomScript] = useState(
-    "// Optional JS per-frame hook:\n// state.score += 0;"
-  );
+  const [customScript, setCustomScript] = useState("");
   const isForeignProjectRef = useRef(false);
 
   // Live Play-Test Engine state
@@ -661,13 +526,14 @@ export default function GameStudioPage() {
   const [liveScore, setLiveScore] = useState(0);
   const [liveHp, setLiveHp] = useState(3);
   const [livePlayLevelIdx, setLivePlayLevelIdx] = useState(0);
-  const [gameStatus, setGameStatus] = useState<
-    "editing" | "playing" | "level_clear" | "won" | "lost"
-  >("editing");
+  const [, setGameStatus] = useState<"editing" | "playing" | "level_clear" | "won" | "lost">(
+    "editing"
+  );
   const [isPublishing, setIsPublishing] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isPaintingRef = useRef(false);
+  const paintButtonRef = useRef<number>(0);
   const fadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const broadcastRef = useRef<BroadcastChannel | null>(null);
   const playingCustomIframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -686,7 +552,7 @@ export default function GameStudioPage() {
     const activeInStudio = Boolean(
       visible &&
         subTab === "editor" &&
-        (Boolean(playingCustomHtmlGame && playingCustomBlobUrl) || isPlaying),
+        (Boolean(playingCustomHtmlGame && playingCustomBlobUrl) || isPlaying)
     );
     setGameSourceActive("studio-play", activeInStudio);
     return () => setGameSourceActive("studio-play", false);
@@ -704,6 +570,9 @@ export default function GameStudioPage() {
   const keysRef = useRef<Record<string, boolean>>({});
   const mouseLookDeltaRef = useRef<number>(0);
   const mouseFireRef = useRef<boolean>(false);
+  const mouseHeldRef = useRef<boolean>(false);
+  const mouseCanvasPosRef = useRef<{ x: number; y: number }>({ x: CANVAS_W / 2, y: CANVAS_H / 2 });
+  const hoverCellRef = useRef<{ r: number; c: number } | null>(null);
 
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
@@ -720,8 +589,20 @@ export default function GameStudioPage() {
     moveSpeed,
     maxHp,
     enableDoubleJump,
+    enableWallJump,
     enableDash,
-    enableBlaster,
+    enableJetpack,
+    weaponType,
+    mouseAim,
+    autoFire,
+    winCondition,
+    timeLimitSec,
+    weather,
+    darknessMode,
+    sfxEnabled,
+    screenShake,
+    cameraZoom,
+    rules,
     render3DInTest,
     playerColor,
     bgColor,
@@ -740,14 +621,63 @@ export default function GameStudioPage() {
     moveSpeed,
     maxHp,
     enableDoubleJump,
+    enableWallJump,
     enableDash,
-    enableBlaster,
+    enableJetpack,
+    weaponType,
+    mouseAim,
+    autoFire,
+    winCondition,
+    timeLimitSec,
+    weather,
+    darknessMode,
+    sfxEnabled,
+    screenShake,
+    cameraZoom,
+    rules,
     render3DInTest,
     playerColor,
     bgColor,
     wallColor,
     customScript,
   };
+
+  const pushUndoSnapshot = useCallback((gridSnap: number[][]) => {
+    const cloned = gridSnap.map((r) => [...r]);
+    undoStackRef.current.push(cloned);
+    if (undoStackRef.current.length > 35) undoStackRef.current.shift();
+    redoStackRef.current = [];
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(0);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    if (isPlayingRef.current || undoStackRef.current.length === 0) return;
+    const prevSnap = undoStackRef.current.pop()!;
+    setLevels((prevLevels) =>
+      prevLevels.map((lvl, idx) => {
+        if (idx !== activeLevelIdx) return lvl;
+        redoStackRef.current.push(lvl.grid.map((r) => [...r]));
+        return { ...lvl, grid: prevSnap };
+      })
+    );
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+  }, [activeLevelIdx]);
+
+  const handleRedo = useCallback(() => {
+    if (isPlayingRef.current || redoStackRef.current.length === 0) return;
+    const nextSnap = redoStackRef.current.pop()!;
+    setLevels((prevLevels) =>
+      prevLevels.map((lvl, idx) => {
+        if (idx !== activeLevelIdx) return lvl;
+        undoStackRef.current.push(lvl.grid.map((r) => [...r]));
+        return { ...lvl, grid: nextSnap };
+      })
+    );
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+  }, [activeLevelIdx]);
 
   // Sync Player Progress to CloudSync + Backend
   const syncProgressToCloud = useCallback(
@@ -764,7 +694,6 @@ export default function GameStudioPage() {
       const gId = payload.gameId || projectStateRef.current.activeGameId || "editor_preview";
       const gTitle = payload.gameTitle || projectStateRef.current.title || "studio game";
 
-      // Save to local CloudSync cache immediately
       try {
         const raw = localStorage.getItem("cookie_cloudsync_progress_v1");
         const all: Record<string, CloudSyncPlayerProgress> = raw ? JSON.parse(raw) : {};
@@ -797,7 +726,6 @@ export default function GameStudioPage() {
         setMyCloudProgress({ ...prev });
       } catch {}
 
-      // Sync to backend CloudSync telemetry endpoint
       fetch("/api/studio/progress", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -843,191 +771,241 @@ export default function GameStudioPage() {
       .catch(() => {});
   }, []);
 
-  const simRef = useRef<{
-    levelIndex: number;
-    player: {
-      x: number;
-      y: number;
-      vx: number;
-      vy: number;
-      w: number;
-      h: number;
-      angle: number;
-      grounded: boolean;
-      jumpsLeft: number;
-      jumpKeyLock: boolean;
-      dashCd: number;
-      dashFrames: number;
-      facing: number;
-      shootCd: number;
-      hp: number;
-      invulnFrames: number;
-      checkpointX: number;
-      checkpointY: number;
-      muzzleFlash: number;
-      bobPhase: number;
-      flapLock?: boolean;
-    };
-    coins: { x: number; y: number; w: number; h: number; taken: boolean }[];
-    keysList: { x: number; y: number; w: number; h: number; taken: boolean }[];
-    checkpoints: { x: number; y: number; w: number; h: number; used: boolean }[];
-    movingPlatforms: { r: number; c: number; x: number; y: number; w: number; h: number; vx: number }[];
-    enemies: {
-      x: number;
-      y: number;
-      w: number;
-      h: number;
-      vx: number;
-      vy: number;
-      hp: number;
-      maxHp: number;
-      isBoss: boolean;
-      alive: boolean;
-    }[];
-    bullets: { x: number; y: number; w: number; h: number; vx: number; vy: number }[];
-    particles: { x: number; y: number; vx: number; vy: number; color: string; life: number }[];
-    score: number;
-    status: "playing" | "level_clear" | "won" | "lost";
-    levelBannerFrames: number;
-    rewardedWin?: boolean;
-  } | null>(null);
+  const simRef = useRef<SimState | null>(null);
 
-  const initSimulation = useCallback(
-    (targetLevelIdx = 0, carryScore = 0) => {
-      const p = projectStateRef.current;
-      const safeLvlIdx = Math.max(0, Math.min(p.levels.length - 1, targetLevelIdx));
-      const lvl = p.levels[safeLvlIdx] || p.levels[0];
-      const lvlGrid = lvl.grid;
+  const initSimulation = useCallback((targetLevelIdx = 0, carryScore = 0) => {
+    const p = projectStateRef.current;
+    const safeLvlIdx = Math.max(0, Math.min(p.levels.length - 1, targetLevelIdx));
+    const lvl = p.levels[safeLvlIdx] || p.levels[0];
+    const runtimeGrid = (lvl?.grid || createSizedEmptyGrid()).map((r) => [...r]);
+    const { rows, cols } = getGridDimensions(runtimeGrid);
 
-      let spawnX = 68;
-      let spawnY = 200;
-      const coinsList: { x: number; y: number; w: number; h: number; taken: boolean }[] = [];
-      const keysList: { x: number; y: number; w: number; h: number; taken: boolean }[] = [];
-      const checkpoints: { x: number; y: number; w: number; h: number; used: boolean }[] = [];
-      const movingPlatforms: {
-        r: number;
-        c: number;
-        x: number;
-        y: number;
-        w: number;
-        h: number;
-        vx: number;
-      }[] = [];
-      const enemies: {
-        x: number;
-        y: number;
-        w: number;
-        h: number;
-        vx: number;
-        vy: number;
-        hp: number;
-        maxHp: number;
-        isBoss: boolean;
-        alive: boolean;
-      }[] = [];
+    let spawnX = 68;
+    let spawnY = Math.max(68, (rows - 3) * TILE_SIZE);
+    const coinsList: SimState["coins"] = [];
+    const keysList: SimState["keysList"] = [];
+    const checkpoints: SimState["checkpoints"] = [];
+    const powerups: SimState["powerups"] = [];
+    const tntBarrels: SimState["tntBarrels"] = [];
+    const teleporters: SimState["teleporters"] = [];
+    const spawners: SimState["spawners"] = [];
+    const signs: SimState["signs"] = [];
+    const movingPlatforms: SimState["movingPlatforms"] = [];
+    const enemies: SimState["enemies"] = [];
 
-      for (let r = 0; r < ROWS; r++) {
-        for (let c = 0; c < COLS; c++) {
-          const cell = lvlGrid[r]?.[c] || 0;
-          if (cell === 2) {
-            spawnX = c * TILE_SIZE + 5;
-            spawnY = r * TILE_SIZE + 5;
-          } else if (cell === 3) {
-            coinsList.push({
-              x: c * TILE_SIZE + 9,
-              y: r * TILE_SIZE + 9,
-              w: 16,
-              h: 16,
-              taken: false,
-            });
-          } else if (cell === 5 || cell === 9) {
-            const isBoss = cell === 9;
-            enemies.push({
-              x: c * TILE_SIZE + 4,
-              y: r * TILE_SIZE + 4,
-              w: isBoss ? 28 : 24,
-              h: isBoss ? 28 : 24,
-              vx: isBoss ? 2.0 : 1.5,
-              vy: 0,
-              hp: isBoss ? 3 : 1,
-              maxHp: isBoss ? 3 : 1,
-              isBoss,
-              alive: true,
-            });
-          } else if (cell === 8) {
-            movingPlatforms.push({
-              r,
-              c,
-              x: c * TILE_SIZE,
-              y: r * TILE_SIZE,
-              w: TILE_SIZE,
-              h: 14,
-              vx: 1.4,
-            });
-          } else if (cell === 10) {
-            checkpoints.push({
-              x: c * TILE_SIZE + 6,
-              y: r * TILE_SIZE + 6,
-              w: 22,
-              h: 22,
-              used: false,
-            });
-          } else if (cell === 11) {
-            keysList.push({
-              x: c * TILE_SIZE + 7,
-              y: r * TILE_SIZE + 7,
-              w: 20,
-              h: 20,
-              taken: false,
-            });
-          }
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const cell = runtimeGrid[r]?.[c] || 0;
+        if (cell === 2) {
+          spawnX = c * TILE_SIZE + 6;
+          spawnY = r * TILE_SIZE + 6;
+        } else if (cell === 3) {
+          coinsList.push({ x: c * TILE_SIZE + 9, y: r * TILE_SIZE + 9, w: 16, h: 16, taken: false });
+        } else if (cell === 5 || cell === 9 || cell === 23 || cell === 24) {
+          const isBoss = cell === 9;
+          const hp = isBoss ? 4 : cell === 24 ? 2 : 1;
+          enemies.push({
+            x: c * TILE_SIZE + 4,
+            y: r * TILE_SIZE + 4,
+            baseY: r * TILE_SIZE + 4,
+            w: isBoss ? 28 : 24,
+            h: isBoss ? 28 : 24,
+            vx: cell === 24 ? 0 : isBoss ? 2.0 : 1.5,
+            vy: 0,
+            hp,
+            maxHp: hp,
+            kind: cell,
+            isBoss,
+            cd: 55 + ((r * 13 + c * 7) % 35),
+            aimAngle: Math.PI,
+            alive: true,
+          });
+        } else if (cell === 8 || cell === 17) {
+          movingPlatforms.push({
+            r,
+            c,
+            x: c * TILE_SIZE,
+            y: r * TILE_SIZE,
+            w: TILE_SIZE,
+            h: 14,
+            vx: cell === 8 ? 1.5 : 0,
+            vy: cell === 17 ? 1.3 : 0,
+            vertical: cell === 17,
+          });
+        } else if (cell === 10) {
+          checkpoints.push({
+            x: c * TILE_SIZE + 6,
+            y: r * TILE_SIZE + 6,
+            w: 22,
+            h: 22,
+            used: false,
+          });
+        } else if (cell === 11) {
+          keysList.push({
+            x: c * TILE_SIZE + 7,
+            y: r * TILE_SIZE + 7,
+            w: 20,
+            h: 20,
+            taken: false,
+          });
+        } else if (cell === 19) {
+          teleporters.push({ x: c * TILE_SIZE, y: r * TILE_SIZE, w: TILE_SIZE, h: TILE_SIZE });
+        } else if (cell === 22) {
+          tntBarrels.push({
+            r,
+            c,
+            x: c * TILE_SIZE + 3,
+            y: r * TILE_SIZE + 3,
+            w: 28,
+            h: 28,
+            intact: true,
+          });
+        } else if (cell === 25) {
+          spawners.push({
+            x: c * TILE_SIZE + 3,
+            y: r * TILE_SIZE + 3,
+            w: 28,
+            h: 28,
+            hp: 3,
+            maxHp: 3,
+            cd: 110,
+            alive: true,
+          });
+        } else if (cell === 26) {
+          powerups.push({
+            x: c * TILE_SIZE + 7,
+            y: r * TILE_SIZE + 7,
+            w: 20,
+            h: 20,
+            taken: false,
+          });
+        } else if (cell === 27) {
+          signs.push({ x: c * TILE_SIZE + 17, y: r * TILE_SIZE });
         }
       }
+    }
 
-      const startHp = p.maxHp || 3;
-      simRef.current = {
-        levelIndex: safeLvlIdx,
-        player: {
-          x: spawnX,
-          y: spawnY,
-          vx: 0,
-          vy: 0,
-          w: 22,
-          h: 22,
-          angle: 0,
-          grounded: false,
-          jumpsLeft: p.enableDoubleJump ? 2 : 1,
-          jumpKeyLock: false,
-          dashCd: 0,
-          dashFrames: 0,
-          facing: 1,
-          shootCd: 0,
-          hp: startHp,
-          invulnFrames: 0,
-          checkpointX: spawnX,
-          checkpointY: spawnY,
-          muzzleFlash: 0,
-          bobPhase: 0,
-        },
-        coins: coinsList,
-        keysList,
-        checkpoints,
-        movingPlatforms,
-        enemies,
-        bullets: [],
-        particles: [],
-        score: carryScore,
-        status: "playing",
-        levelBannerFrames: 75,
-        rewardedWin: false,
-      };
-      setLivePlayLevelIdx(safeLvlIdx);
-      setLiveScore(carryScore);
-      setLiveHp(startHp);
-      setGameStatus("playing");
-    },
-    []
-  );
+    const activeWeather = lvl?.weather || p.weather || "none";
+    const weatherDrops: SimState["weatherDrops"] = [];
+    if (activeWeather !== "none") {
+      const count = activeWeather === "rain" ? 55 : activeWeather === "starfield" ? 45 : 38;
+      for (let i = 0; i < count; i++) {
+        weatherDrops.push({
+          x: Math.random() * CANVAS_W,
+          y: Math.random() * CANVAS_H,
+          vx: activeWeather === "rain" ? -1.4 : activeWeather === "snow" ? (Math.random() - 0.5) * 0.9 : 0,
+          vy:
+            activeWeather === "rain"
+              ? 6.5 + Math.random() * 2.5
+              : activeWeather === "snow"
+                ? 1.1 + Math.random() * 1.1
+                : activeWeather === "embers"
+                  ? -(0.8 + Math.random() * 1.4)
+                  : activeWeather === "matrix"
+                    ? 2.2 + Math.random() * 2.0
+                    : 0.15 + Math.random() * 0.35,
+          size: activeWeather === "starfield" ? 1.5 + Math.random() * 1.8 : 2.5,
+          char: activeWeather === "matrix" ? (Math.random() < 0.5 ? "1" : "0") : undefined,
+        });
+      }
+    }
+
+    const startHp = p.maxHp || 3;
+    const limSec = lvl?.timeLimitSec || p.timeLimitSec || 45;
+    const initCamX = Math.max(0, Math.min(cols * TILE_SIZE - CANVAS_W, spawnX - CANVAS_W / 2));
+    const initCamY = Math.max(0, Math.min(rows * TILE_SIZE - CANVAS_H, spawnY - CANVAS_H / 2));
+
+    const newSim: SimState = {
+      levelIndex: safeLvlIdx,
+      runtimeGrid,
+      rows,
+      cols,
+      tick: 0,
+      camX: initCamX,
+      camY: initCamY,
+      shakeFrames: 0,
+      shakeMag: 0,
+      switchesOn: false,
+      doorsForcedOpen: false,
+      gravDir: 1,
+      gravScale: 1,
+      timerFrames: limSec * 60,
+      firedRules: {},
+      bannerText: `${lvl?.name || `level ${safeLvlIdx + 1}`} (${safeLvlIdx + 1}/${p.levels.length})`,
+      levelBannerFrames: 85,
+      rewardedWin: false,
+      player: {
+        x: spawnX,
+        y: spawnY,
+        vx: 0,
+        vy: 0,
+        w: 22,
+        h: 22,
+        angle: 0,
+        grounded: false,
+        onIce: false,
+        jumpsLeft: p.enableDoubleJump ? 2 : 1,
+        jumpKeyLock: false,
+        dashCd: 0,
+        dashFrames: 0,
+        facing: 1,
+        shootCd: 0,
+        hp: startHp,
+        invulnFrames: 0,
+        overdriveFrames: 0,
+        tpCooldown: 0,
+        jetpackFuel: 100,
+        checkpointX: spawnX,
+        checkpointY: spawnY,
+        muzzleFlash: 0,
+        bobPhase: 0,
+        trail: [],
+      },
+      coins: coinsList,
+      keysList,
+      checkpoints,
+      powerups,
+      tntBarrels,
+      teleporters,
+      spawners,
+      signs,
+      movingPlatforms,
+      enemies,
+      bullets: [],
+      enemyBullets: [],
+      shockwaves: [],
+      popups: [],
+      particles: [],
+      weatherDrops,
+      score: carryScore,
+      status: "playing",
+    };
+
+    // Execute any "on_start" rules immediately
+    for (const rl of p.rules || []) {
+      if (rl.when === "on_start") {
+        newSim.firedRules[rl.id] = true;
+        if (rl.action === "low_gravity") newSim.gravScale = 0.45;
+        else if (rl.action === "flip_gravity") newSim.gravDir = -1;
+        else if (rl.action === "grant_shield") newSim.player.invulnFrames = 360;
+        else if (rl.action === "overdrive_weapon") newSim.player.overdriveFrames = 480;
+        else if (rl.action === "open_doors") {
+          newSim.doorsForcedOpen = true;
+          newSim.switchesOn = true;
+        }
+        if (rl.text) {
+          newSim.bannerText = rl.text;
+          newSim.levelBannerFrames = 115;
+        }
+      }
+    }
+
+    simRef.current = newSim;
+    setLivePlayLevelIdx(safeLvlIdx);
+    setLiveScore(carryScore);
+    setLiveHp(startHp);
+    setGameStatus("playing");
+  }, []);
 
   const hide = useCallback(() => {
     if (!document.body.classList.contains("studio-view")) return;
@@ -1093,8 +1071,7 @@ export default function GameStudioPage() {
 
     const studioBtn = document.getElementById("studio-btn");
     const brand =
-      document.getElementById("branding-container") ||
-      document.getElementById("brand");
+      document.getElementById("branding-container") || document.getElementById("brand");
 
     const onStudioClick = (e: MouseEvent) => {
       e.preventDefault();
@@ -1111,7 +1088,6 @@ export default function GameStudioPage() {
     const onCoins = () => setCoins(getCookieCoins());
     window.addEventListener("cookie-coins-updated", onCoins);
 
-    // Listen for CloudSync progress postMessages from custom index.html games
     const onWindowMessage = (ev: MessageEvent) => {
       if (ev.data?.type === "COOKIE_CLOUDSYNC_PROGRESS") {
         syncProgressToCloud({
@@ -1168,15 +1144,20 @@ export default function GameStudioPage() {
           for (const g of remoteList) {
             if (g?.id) {
               byId.set(g.id, g);
-              const tNorm = String(g.title || "").trim().toLowerCase().replace(/\s+/g, " ");
+              const tNorm = String(g.title || "")
+                .trim()
+                .toLowerCase()
+                .replace(/\s+/g, " ");
               if (tNorm) seenTitles.add(tNorm);
             }
           }
-          const myAuthor = getActiveAuthor().toLowerCase();
+          const myAuthor = getCloudSyncState().username.toLowerCase();
           for (const g of prev) {
             if (!g?.id || byId.has(g.id)) continue;
-            const tNorm = String(g.title || "").trim().toLowerCase().replace(/\s+/g, " ");
-            // Drop stale local duplicates of games already on the server or belonging to other users
+            const tNorm = String(g.title || "")
+              .trim()
+              .toLowerCase()
+              .replace(/\s+/g, " ");
             if (tNorm && seenTitles.has(tNorm)) continue;
             if (String(g.author || "").trim().toLowerCase() !== myAuthor) continue;
             if (tNorm) seenTitles.add(tNorm);
@@ -1197,7 +1178,6 @@ export default function GameStudioPage() {
   useEffect(() => {
     if (!visible) return;
     void refreshCommunityLibrary(subTab === "community");
-
     fetchCloudProgressForGame(activeGameId);
 
     const onSseStudio = (e: Event) => {
@@ -1234,12 +1214,22 @@ export default function GameStudioPage() {
   useEffect(() => {
     if (!visible) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (
-        document.activeElement?.tagName === "INPUT" ||
-        document.activeElement?.tagName === "TEXTAREA"
-      ) {
-        return;
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      if (!isPlayingRef.current && (e.ctrlKey || e.metaKey)) {
+        if (e.code === "KeyZ" && !e.shiftKey) {
+          e.preventDefault();
+          handleUndo();
+          return;
+        }
+        if (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey)) {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
       }
+
       keysRef.current[e.code] = true;
       if (
         isPlayingRef.current &&
@@ -1249,8 +1239,11 @@ export default function GameStudioPage() {
       ) {
         e.preventDefault();
       }
+      if (!isPlayingRef.current && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+        e.preventDefault();
+      }
       if (isPlayingRef.current && e.code === "KeyR") {
-        initSimulation(0, 0);
+        initSimulation(projectStateRef.current.livePlayLevelIdx, 0);
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -1262,9 +1255,11 @@ export default function GameStudioPage() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [visible, initSimulation]);
+  }, [visible, initSimulation, handleUndo, handleRedo]);
 
-  // 60fps Canvas Render & Physics Loop (Supports 2D Multi-Level AND First-Person 3D Raycaster!)
+  // =========================================================================
+  // 60FPS SCROLLING 2D + FIRST-PERSON 3D RAYCASTER ENGINE & EDITOR LOOP
+  // =========================================================================
   useEffect(() => {
     if (!visible || subTab !== "editor" || playingCustomHtmlGame) return;
     let rafId = 0;
@@ -1274,41 +1269,30 @@ export default function GameStudioPage() {
       b: { x: number; y: number; w: number; h: number }
     ) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
-    const spawnParticles = (x: number, y: number, color: string, count = 10) => {
+    const spawnParticles = (x: number, y: number, color: string, count = 10, spd = 6.5) => {
       if (!simRef.current) return;
       for (let i = 0; i < count; i++) {
         simRef.current.particles.push({
           x,
           y,
-          vx: (Math.random() - 0.5) * 6.5,
-          vy: (Math.random() - 0.5) * 6.5,
+          vx: (Math.random() - 0.5) * spd,
+          vy: (Math.random() - 0.5) * spd,
           color,
-          life: 22,
+          life: 18 + Math.floor(Math.random() * 12),
+          size: 3 + Math.random() * 2,
         });
       }
     };
 
-    const damagePlayer = () => {
-      const sim = simRef.current;
-      if (!sim || sim.player.invulnFrames > 0) return;
-      sim.player.hp -= 1;
-      setLiveHp(sim.player.hp);
-      spawnParticles(sim.player.x + 11, sim.player.y + 11, "#ef4444", 16);
-      if (sim.player.hp <= 0) {
-        sim.status = "lost";
-        setGameStatus("lost");
-        syncProgressToCloud({
-          levelReached: sim.levelIndex + 1,
-          score: sim.score,
-          deathsAdded: 1,
-        });
-      } else {
-        sim.player.invulnFrames = 65;
-        sim.player.x = sim.player.checkpointX;
-        sim.player.y = sim.player.checkpointY;
-        sim.player.vx = 0;
-        sim.player.vy = 0;
-      }
+    const addPopup = (x: number, y: number, text: string, color = "#facc15") => {
+      if (!simRef.current) return;
+      simRef.current.popups.push({ x, y, text, color, life: 42 });
+    };
+
+    const triggerShake = (frames = 8, mag = 5) => {
+      if (!simRef.current || !projectStateRef.current.screenShake) return;
+      simRef.current.shakeFrames = Math.max(simRef.current.shakeFrames, frames);
+      simRef.current.shakeMag = Math.max(simRef.current.shakeMag, mag);
     };
 
     const renderLoop = () => {
@@ -1322,28 +1306,281 @@ export default function GameStudioPage() {
 
       const cfg = projectStateRef.current;
       const sim = simRef.current;
-      const activeLvl = isPlayingRef.current && sim
-        ? cfg.levels[sim.levelIndex] || cfg.levels[0]
-        : cfg.levels[cfg.activeLevelIdx] || cfg.levels[0];
-      const activeGrid = activeLvl?.grid || cfg.levels[0].grid;
+      const activeLvl =
+        isPlayingRef.current && sim
+          ? cfg.levels[sim.levelIndex] || cfg.levels[0]
+          : cfg.levels[cfg.activeLevelIdx] || cfg.levels[0];
+      const editGrid = activeLvl?.grid || cfg.levels[0]?.grid || createSizedEmptyGrid();
+      const activeGrid = isPlayingRef.current && sim ? sim.runtimeGrid : editGrid;
+      const { rows: mapRows, cols: mapCols } = getGridDimensions(activeGrid);
+      const worldW = mapCols * TILE_SIZE;
+      const worldH = mapRows * TILE_SIZE;
+
       const lvlBg = activeLvl?.bgColor || cfg.bgColor;
       const lvlWall = activeLvl?.wallColor || cfg.wallColor;
+      const activeWinCond = activeLvl?.winCondition || cfg.winCondition || "portal";
+      const activeWeather = activeLvl?.weather || cfg.weather || "none";
+      const activeDarkness = Boolean(activeLvl?.darknessMode ?? cfg.darknessMode);
       const use3D = isPlayingRef.current && (cfg.mode === "fps3d" || cfg.render3DInTest);
+
+      const completeLevelOrGame = () => {
+        if (!sim || sim.status !== "playing") return;
+        playStudioSfx("win", cfg.sfxEnabled);
+        spawnParticles(sim.player.x + 11, sim.player.y + 11, "#10b981", 24, 8);
+        const nextLvlIdx = sim.levelIndex + 1;
+        if (nextLvlIdx < cfg.levels.length) {
+          const bonusScore = sim.score + 50;
+          addCookieCoins(10, `cleared level ${sim.levelIndex + 1} in ${cfg.title}`);
+          awardGamePassXp(12, "game", { silent: true });
+          syncProgressToCloud({
+            levelReached: nextLvlIdx + 1,
+            score: bonusScore,
+          });
+          notifyToast(
+            `level ${sim.levelIndex + 1} complete! advancing to ${cfg.levels[nextLvlIdx]?.name || `level ${nextLvlIdx + 1}`} (+10 coins)`,
+            "success"
+          );
+          initSimulation(nextLvlIdx, bonusScore);
+        } else {
+          sim.status = "won";
+          setGameStatus("won");
+          if (!sim.rewardedWin) {
+            sim.rewardedWin = true;
+            sim.score += 100;
+            setLiveScore(sim.score);
+            addCookieCoins(25, `beat all levels of ${cfg.title}`);
+            awardGamePassXp(25, "game", { silent: true });
+            recordGameActivity(cfg.title, 25, 1, sim.score);
+            syncProgressToCloud({
+              levelReached: cfg.levels.length,
+              score: sim.score,
+              completedGame: true,
+            });
+          }
+        }
+      };
+
+      const fireRuleTrigger = (trig: RuleTriggerType) => {
+        if (!sim) return;
+        for (const rl of cfg.rules || []) {
+          if (rl.when !== trig) continue;
+          const repeatable = trig === "on_every_10s" || trig === "on_switch_on";
+          if (!repeatable && sim.firedRules[rl.id]) continue;
+          sim.firedRules[rl.id] = true;
+
+          if (rl.action === "open_doors") {
+            sim.doorsForcedOpen = true;
+            sim.switchesOn = true;
+            playStudioSfx("switch", cfg.sfxEnabled);
+          } else if (rl.action === "win_level") {
+            completeLevelOrGame();
+            return;
+          } else if (rl.action === "grant_shield") {
+            sim.player.invulnFrames = 360;
+            playStudioSfx("powerup", cfg.sfxEnabled);
+          } else if (rl.action === "overdrive_weapon") {
+            sim.player.overdriveFrames = 480;
+            playStudioSfx("powerup", cfg.sfxEnabled);
+          } else if (rl.action === "heal_player") {
+            sim.player.hp = Math.min((cfg.maxHp || 3) + 2, sim.player.hp + 2);
+            setLiveHp(sim.player.hp);
+            playStudioSfx("powerup", cfg.sfxEnabled);
+          } else if (rl.action === "low_gravity") {
+            sim.gravScale = 0.45;
+          } else if (rl.action === "flip_gravity") {
+            sim.gravDir *= -1;
+          } else if (rl.action === "shatter_bricks") {
+            for (let r = 0; r < sim.rows; r++) {
+              const rowArr = sim.runtimeGrid[r];
+              if (!rowArr) continue;
+              for (let c = 0; c < sim.cols; c++) {
+                if (rowArr[c] === 14) rowArr[c] = 0;
+              }
+            }
+            triggerShake(12, 7);
+            playStudioSfx("explosion", cfg.sfxEnabled);
+          } else if (rl.action === "spawn_boss") {
+            sim.enemies.push({
+              x: Math.min((sim.cols - 2) * TILE_SIZE, sim.player.x + 150),
+              y: Math.max(TILE_SIZE, sim.player.y - 24),
+              baseY: sim.player.y,
+              w: 28,
+              h: 28,
+              vx: 2.0,
+              vy: 0,
+              hp: 4,
+              maxHp: 4,
+              kind: 9,
+              isBoss: true,
+              cd: 50,
+              aimAngle: Math.PI,
+              alive: true,
+            });
+          }
+          if (rl.text || rl.action === "announce") {
+            sim.bannerText = rl.text || `rule triggered: ${rl.action.replace("_", " ")}!`;
+            sim.levelBannerFrames = 130;
+          }
+        }
+      };
+
+      const damagePlayer = () => {
+        if (!sim || sim.player.invulnFrames > 0) return;
+        sim.player.hp -= 1;
+        setLiveHp(sim.player.hp);
+        playStudioSfx("hit", cfg.sfxEnabled);
+        triggerShake(10, 6);
+        spawnParticles(sim.player.x + 11, sim.player.y + 11, "#ef4444", 18);
+        if (sim.player.hp === 1) fireRuleTrigger("on_low_hp");
+        if (sim.player.hp <= 0) {
+          sim.status = "lost";
+          setGameStatus("lost");
+          syncProgressToCloud({
+            levelReached: sim.levelIndex + 1,
+            score: sim.score,
+            deathsAdded: 1,
+          });
+        } else {
+          sim.player.invulnFrames = 65;
+          sim.player.x = sim.player.checkpointX;
+          sim.player.y = sim.player.checkpointY;
+          sim.player.vx = 0;
+          sim.player.vy = 0;
+          sim.gravDir = 1;
+        }
+      };
+
+      const triggerExplosion = (cx: number, cy: number, radius = 88) => {
+        if (!sim) return;
+        playStudioSfx("explosion", cfg.sfxEnabled);
+        triggerShake(13, 8);
+        sim.shockwaves.push({ x: cx, y: cy, radius: 8, maxRadius: radius, color: "#fb923c" });
+        spawnParticles(cx, cy, "#f97316", 22, 9);
+        addPopup(cx, cy - 12, "BOOM!", "#fb923c");
+
+        for (let r = 0; r < sim.rows; r++) {
+          const rowArr = sim.runtimeGrid[r];
+          if (!rowArr) continue;
+          for (let c = 0; c < sim.cols; c++) {
+            if (
+              rowArr[c] === 14 &&
+              Math.hypot(c * TILE_SIZE + 17 - cx, r * TILE_SIZE + 17 - cy) <= radius
+            ) {
+              rowArr[c] = 0;
+              spawnParticles(c * TILE_SIZE + 17, r * TILE_SIZE + 17, "#f59e0b", 6);
+            }
+          }
+        }
+
+        for (const en of sim.enemies) {
+          if (en.alive && Math.hypot(en.x + en.w / 2 - cx, en.y + en.h / 2 - cy) <= radius + 12) {
+            en.hp -= 3;
+            if (en.hp <= 0) {
+              en.alive = false;
+              const pts = en.isBoss ? 75 : 30;
+              sim.score += pts;
+              setLiveScore(sim.score);
+              addPopup(en.x + 12, en.y, `+${pts}`, "#f472b6");
+              if (en.isBoss) fireRuleTrigger("on_boss_defeated");
+            }
+          }
+        }
+
+        for (const sp of sim.spawners) {
+          if (sp.alive && Math.hypot(sp.x + 14 - cx, sp.y + 14 - cy) <= radius) {
+            sp.hp -= 3;
+            if (sp.hp <= 0) {
+              sp.alive = false;
+              sim.score += 50;
+              setLiveScore(sim.score);
+            }
+          }
+        }
+
+        // Chain-react nearby TNT barrels!
+        for (const tnt of sim.tntBarrels) {
+          if (tnt.intact && Math.hypot(tnt.x + 14 - cx, tnt.y + 14 - cy) <= radius) {
+            tnt.intact = false;
+            triggerExplosion(tnt.x + 14, tnt.y + 14, radius);
+          }
+        }
+      };
+
+      // --- EDITOR CAMERA PANNING WHEN NOT PLAYING ---
+      if (!isPlayingRef.current) {
+        const keys = keysRef.current;
+        const panSpd = 8;
+        if (keys["ArrowLeft"] || keys["KeyA"]) editorCamRef.current.x -= panSpd;
+        if (keys["ArrowRight"] || keys["KeyD"]) editorCamRef.current.x += panSpd;
+        if (keys["ArrowUp"] || keys["KeyW"]) editorCamRef.current.y -= panSpd;
+        if (keys["ArrowDown"] || keys["KeyS"]) editorCamRef.current.y += panSpd;
+        editorCamRef.current.x = Math.max(0, Math.min(Math.max(0, worldW - CANVAS_W), editorCamRef.current.x));
+        editorCamRef.current.y = Math.max(0, Math.min(Math.max(0, worldH - CANVAS_H), editorCamRef.current.y));
+      }
 
       // --- SIMULATION STEP ---
       if (isPlayingRef.current && sim && sim.status === "playing") {
+        sim.tick++;
         const keys = keysRef.current;
         const pl = sim.player;
         if (pl.invulnFrames > 0) pl.invulnFrames--;
         if (pl.dashCd > 0) pl.dashCd--;
         if (pl.shootCd > 0) pl.shootCd--;
+        if (pl.overdriveFrames > 0) pl.overdriveFrames--;
+        if (pl.tpCooldown > 0) pl.tpCooldown--;
         if (pl.muzzleFlash > 0) pl.muzzleFlash--;
         if (sim.levelBannerFrames > 0) sim.levelBannerFrames--;
+        if (sim.shakeFrames > 0) sim.shakeFrames--;
+        if (sim.tick % 600 === 0) fireRuleTrigger("on_every_10s");
 
         const allKeysCollected = sim.keysList.every((k) => k.taken);
+        const isSolidCell = (r: number, c: number) => {
+          if (r < 0 || r >= sim.rows || c < 0 || c >= sim.cols) return true;
+          const id = activeGrid[r]?.[c] || 0;
+          if (id === 1 || id === 14 || id === 15 || id === 16) return true;
+          if (id === 12 && !allKeysCollected && !sim.doorsForcedOpen) return true;
+          if (id === 21 && !sim.switchesOn && !sim.doorsForcedOpen) return true;
+          return false;
+        };
+
+        // Survivor auto-wave horde spawns
+        if (
+          cfg.mode === "survivor" &&
+          sim.tick % 135 === 0 &&
+          sim.enemies.filter((e) => e.alive).length < 20
+        ) {
+          const ang = Math.random() * Math.PI * 2;
+          const sx = Math.max(
+            TILE_SIZE * 1.4,
+            Math.min((sim.cols - 2.4) * TILE_SIZE, pl.x + Math.cos(ang) * 240)
+          );
+          const sy = Math.max(
+            TILE_SIZE * 1.4,
+            Math.min((sim.rows - 2.4) * TILE_SIZE, pl.y + Math.sin(ang) * 185)
+          );
+          const isWaveBoss = sim.tick % 810 === 0;
+          sim.enemies.push({
+            x: sx,
+            y: sy,
+            baseY: sy,
+            w: isWaveBoss ? 28 : 24,
+            h: isWaveBoss ? 28 : 24,
+            vx: 1.6,
+            vy: 0,
+            hp: isWaveBoss ? 4 : 1,
+            maxHp: isWaveBoss ? 4 : 1,
+            kind: 9,
+            isBoss: isWaveBoss,
+            cd: 60,
+            aimAngle: 0,
+            alive: true,
+          });
+        }
+
+        const effSpeed = cfg.moveSpeed * (pl.overdriveFrames > 0 ? 1.28 : 1);
 
         if (use3D) {
-          // --- FIRST-PERSON 3D RAYCASTER MOVEMENT & SHOOTING ---
+          // --- FIRST-PERSON 3D RAYCASTER MOVEMENT & COMBAT ---
           const turnSpeed = 0.055;
           if (keys["ArrowLeft"]) pl.angle -= turnSpeed;
           if (keys["ArrowRight"]) pl.angle += turnSpeed;
@@ -1352,7 +1589,7 @@ export default function GameStudioPage() {
             mouseLookDeltaRef.current = 0;
           }
 
-          const moveSpd = cfg.moveSpeed * 0.65;
+          const moveSpd = effSpeed * 0.65;
           let dx = 0;
           let dy = 0;
           if (keys["KeyW"] || keys["ArrowUp"]) {
@@ -1371,15 +1608,13 @@ export default function GameStudioPage() {
             dx += Math.cos(pl.angle + Math.PI / 2) * (moveSpd * 0.8);
             dy += Math.sin(pl.angle + Math.PI / 2) * (moveSpd * 0.8);
           }
+          if (cfg.enableDash && (keys["ShiftLeft"] || keys["ShiftRight"]) && pl.dashCd <= 0) {
+            dx *= 3.2;
+            dy *= 3.2;
+            pl.dashCd = 40;
+            playStudioSfx("dash", cfg.sfxEnabled);
+          }
           if (Math.hypot(dx, dy) > 0.1) pl.bobPhase += 0.18;
-
-          const isSolidCell = (r: number, c: number) => {
-            if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return true;
-            const id = activeGrid[r][c];
-            if (id === 1 || id === 8) return true;
-            if (id === 12 && !allKeysCollected) return true;
-            return false;
-          };
 
           const nextX = pl.x + dx;
           const nextY = pl.y + dy;
@@ -1392,13 +1627,49 @@ export default function GameStudioPage() {
           if (!isSolidCell(curR, checkC)) pl.x = nextX;
           if (!isSolidCell(checkR, curC)) pl.y = nextY;
 
-          // Fire 3D Hitscan / Plasma Ray
-          if ((keys["Space"] || mouseFireRef.current) && pl.shootCd <= 0) {
+          // Fire 3D Weapon
+          if (
+            cfg.weaponType !== "none" &&
+            (keys["Space"] || keys["KeyF"] || mouseFireRef.current || mouseHeldRef.current) &&
+            pl.shootCd <= 0
+          ) {
             mouseFireRef.current = false;
-            pl.shootCd = 15;
+            pl.shootCd = pl.overdriveFrames > 0 ? 7 : 14;
             pl.muzzleFlash = 6;
+            playStudioSfx(cfg.weaponType === "laser" ? "laser" : "shoot", cfg.sfxEnabled);
 
-            // Find closest enemy near center crosshair ray
+            // Check breakable brick or TNT along center ray first
+            let rx = (pl.x + 11) / TILE_SIZE;
+            let ry = (pl.y + 11) / TILE_SIZE;
+            for (let step = 0; step < 36; step++) {
+              rx += Math.cos(pl.angle) * 0.25;
+              ry += Math.sin(pl.angle) * 0.25;
+              const rr = Math.floor(ry);
+              const cc = Math.floor(rx);
+              if (rr >= 0 && rr < sim.rows && cc >= 0 && cc < sim.cols) {
+                const rowArr = activeGrid[rr];
+                if (rowArr && rowArr[cc] === 14) {
+                  rowArr[cc] = 0;
+                  break;
+                }
+                if (isSolidCell(rr, cc)) break;
+              }
+            }
+
+            for (const tnt of sim.tntBarrels) {
+              if (!tnt.intact) continue;
+              const tx = tnt.x + 14 - (pl.x + 11);
+              const ty = tnt.y + 14 - (pl.y + 11);
+              let diff = Math.atan2(ty, tx) - pl.angle;
+              while (diff < -Math.PI) diff += Math.PI * 2;
+              while (diff > Math.PI) diff -= Math.PI * 2;
+              if (Math.abs(diff) < 0.2 && Math.hypot(tx, ty) < 420) {
+                tnt.intact = false;
+                triggerExplosion(tnt.x + 14, tnt.y + 14);
+                break;
+              }
+            }
+
             let bestEnemy: (typeof sim.enemies)[0] | null = null;
             let bestDist = 9999;
             for (const en of sim.enemies) {
@@ -1409,22 +1680,24 @@ export default function GameStudioPage() {
               let diff = Math.atan2(ey, ex) - pl.angle;
               while (diff < -Math.PI) diff += Math.PI * 2;
               while (diff > Math.PI) diff -= Math.PI * 2;
-              if (Math.abs(diff) < 0.22 && dist < bestDist) {
+              const cone = cfg.weaponType === "shotgun" ? 0.36 : 0.22;
+              if (Math.abs(diff) < cone && dist < bestDist) {
                 bestDist = dist;
                 bestEnemy = en;
               }
             }
             if (bestEnemy) {
-              bestEnemy.hp -= 1;
+              bestEnemy.hp -= cfg.weaponType === "shotgun" || cfg.weaponType === "laser" ? 2 : 1;
               if (bestEnemy.hp <= 0) {
                 bestEnemy.alive = false;
                 sim.score += bestEnemy.isBoss ? 75 : 30;
                 setLiveScore(sim.score);
+                if (bestEnemy.isBoss) fireRuleTrigger("on_boss_defeated");
               }
             }
           }
         } else {
-          // --- 2D SOPHISTICATED PLATFORMER / TOPDOWN / SHOOTER / FLAPPY ---
+          // --- 2D SCROLLING WORLD MOVEMENT, GADGETS & 6 WEAPONS ---
           const left = keys["ArrowLeft"] || keys["KeyA"];
           const right = keys["ArrowRight"] || keys["KeyD"];
           const up = keys["ArrowUp"] || keys["KeyW"] || keys["Space"];
@@ -1434,177 +1707,404 @@ export default function GameStudioPage() {
           if (right) pl.facing = 1;
           else if (left) pl.facing = -1;
 
-          // Dash ability
+          // Shift Dash with brief i-frames & afterimage trail
           if (cfg.enableDash && dashKey && pl.dashCd <= 0) {
-            pl.dashFrames = 7;
-            pl.dashCd = 42;
-            spawnParticles(pl.x + 11, pl.y + 11, "#38bdf8", 8);
+            pl.dashFrames = 8;
+            pl.dashCd = 40;
+            pl.invulnFrames = Math.max(pl.invulnFrames, 9);
+            playStudioSfx("dash", cfg.sfxEnabled);
+            spawnParticles(pl.x + 11, pl.y + 11, "#38bdf8", 10);
           }
 
-          if (cfg.mode === "platformer") {
-            const baseVx = (right ? cfg.moveSpeed : 0) - (left ? cfg.moveSpeed : 0);
-            pl.vx = pl.dashFrames > 0 ? pl.facing * cfg.moveSpeed * 2.5 : baseVx;
-            if (pl.dashFrames > 0) pl.dashFrames--;
+          if (pl.dashFrames > 0 || pl.overdriveFrames > 0) {
+            pl.trail.push({ x: pl.x, y: pl.y, alpha: 0.55 });
+            if (pl.trail.length > 6) pl.trail.shift();
+          }
 
-            if (up && !pl.jumpKeyLock && pl.jumpsLeft > 0) {
-              pl.vy = -cfg.jumpForce;
+          const isTopDown =
+            cfg.mode === "topdown" || cfg.mode === "shooter" || cfg.mode === "survivor";
+
+          if (isTopDown) {
+            const targetVx = (right ? effSpeed : 0) - (left ? effSpeed : 0);
+            const targetVy =
+              (down ? effSpeed : 0) - (keys["ArrowUp"] || keys["KeyW"] ? effSpeed : 0);
+            const mult = pl.dashFrames > 0 ? 2.4 : 1;
+            pl.vx = targetVx * mult;
+            pl.vy = targetVy * mult;
+            if (pl.dashFrames > 0) pl.dashFrames--;
+          } else if (cfg.mode === "gravrunner") {
+            pl.vx = effSpeed * 0.88;
+            if (up && !pl.jumpKeyLock && pl.grounded) {
+              sim.gravDir *= -1;
               pl.grounded = false;
-              pl.jumpsLeft--;
               pl.jumpKeyLock = true;
-              spawnParticles(pl.x + 11, pl.y + 22, "#94a3b8", 5);
+              playStudioSfx("jump", cfg.sfxEnabled);
+              spawnParticles(pl.x + 11, pl.y + 11, "#c084fc", 8);
             }
             if (!up) pl.jumpKeyLock = false;
-            pl.vy += cfg.gravity;
-          } else if (cfg.mode === "topdown" || cfg.mode === "shooter") {
-            pl.vx = (right ? cfg.moveSpeed : 0) - (left ? cfg.moveSpeed : 0);
-            pl.vy =
-              (down ? cfg.moveSpeed : 0) -
-              (keys["ArrowUp"] || keys["KeyW"] ? cfg.moveSpeed : 0);
+            pl.vy += (cfg.gravity || 0.55) * sim.gravDir * sim.gravScale;
           } else if (cfg.mode === "flappy") {
-            pl.vx = cfg.moveSpeed * 0.65;
+            pl.vx = effSpeed * 0.65;
             if (up && !pl.flapLock) {
               pl.vy = -cfg.jumpForce;
               pl.flapLock = true;
+              playStudioSfx("jump", cfg.sfxEnabled);
             }
             if (!up) pl.flapLock = false;
-            pl.vy += cfg.gravity;
+            pl.vy += cfg.gravity * sim.gravScale;
+          } else {
+            // Platformer & Metroidvania
+            const targetVx = (right ? effSpeed : 0) - (left ? effSpeed : 0);
+            if (pl.dashFrames > 0) {
+              pl.vx = pl.facing * effSpeed * 2.55;
+              pl.vy *= 0.4;
+              pl.dashFrames--;
+            } else if (pl.onIce) {
+              pl.vx += (targetVx - pl.vx) * 0.07;
+            } else {
+              pl.vx = targetVx;
+            }
+
+            if (up && !pl.jumpKeyLock && pl.jumpsLeft > 0) {
+              pl.vy = -cfg.jumpForce * sim.gravDir;
+              pl.grounded = false;
+              pl.jumpsLeft--;
+              pl.jumpKeyLock = true;
+              playStudioSfx("jump", cfg.sfxEnabled);
+              spawnParticles(pl.x + 11, pl.y + (sim.gravDir > 0 ? 22 : 0), "#94a3b8", 6);
+            } else if (cfg.enableJetpack && up && pl.jetpackFuel > 0) {
+              pl.vy = Math.max(-6.5, Math.min(6.5, pl.vy - 0.88 * sim.gravDir));
+              pl.jetpackFuel = Math.max(0, pl.jetpackFuel - 1.4);
+              if (sim.tick % 3 === 0) {
+                spawnParticles(pl.x + 11, pl.y + 22, "#38bdf8", 2, 2.5);
+              }
+            }
+            if (!up) pl.jumpKeyLock = false;
+            pl.vy += cfg.gravity * sim.gravDir * sim.gravScale;
+            pl.vy = Math.max(-16, Math.min(16, pl.vy));
           }
 
-          // Blaster firing in 2D
-          if (
-            (cfg.enableBlaster || cfg.mode === "shooter") &&
-            (keys["KeyF"] || (cfg.mode === "shooter" && keys["Space"]) || mouseFireRef.current) &&
-            pl.shootCd <= 0
-          ) {
+          // --- 6 NO-CODE WEAPONS + 360° CURSOR AIM / AUTO-FIRE ---
+          const fireTriggered =
+            keys["KeyF"] ||
+            mouseFireRef.current ||
+            mouseHeldRef.current ||
+            cfg.autoFire ||
+            (isTopDown && keys["Space"]);
+
+          if (cfg.weaponType !== "none" && fireTriggered && pl.shootCd <= 0) {
             mouseFireRef.current = false;
-            sim.bullets.push({
-              x: pl.facing > 0 ? pl.x + pl.w : pl.x - 10,
-              y: pl.y + pl.h / 2 - 2,
-              w: 12,
-              h: 4,
-              vx: pl.facing * 9.5,
-              vy: 0,
-            });
-            pl.shootCd = 14;
-          }
+            const zoom = cfg.cameraZoom || 1;
+            const worldMouseX = (mouseCanvasPosRef.current.x - CANVAS_W / 2) / zoom + CANVAS_W / 2 + sim.camX;
+            const worldMouseY = (mouseCanvasPosRef.current.y - CANVAS_H / 2) / zoom + CANVAS_H / 2 + sim.camY;
 
-          // Update moving platforms
-          for (const mp of sim.movingPlatforms) {
-            mp.x += mp.vx;
-            const nextC = Math.floor((mp.x + (mp.vx > 0 ? mp.w : 0)) / TILE_SIZE);
-            if (
-              nextC < 0 ||
-              nextC >= COLS ||
-              activeGrid[mp.r]?.[nextC] === 1
-            ) {
-              mp.vx *= -1;
+            let aimAng = pl.facing > 0 ? 0 : Math.PI;
+            if (cfg.mode === "survivor") {
+              // Auto-target nearest living enemy if autoFire, else cursor
+              let nearestDist = 9999;
+              for (const en of sim.enemies) {
+                if (!en.alive) continue;
+                const d = Math.hypot(en.x - pl.x, en.y - pl.y);
+                if (d < nearestDist) {
+                  nearestDist = d;
+                  aimAng = Math.atan2(en.y + 12 - (pl.y + 11), en.x + 12 - (pl.x + 11));
+                }
+              }
+              if (mouseHeldRef.current || (!cfg.autoFire && cfg.mouseAim)) {
+                aimAng = Math.atan2(worldMouseY - (pl.y + 11), worldMouseX - (pl.x + 11));
+              }
+            } else if (cfg.mouseAim || isTopDown) {
+              aimAng = Math.atan2(worldMouseY - (pl.y + 11), worldMouseX - (pl.x + 11));
+              pl.facing = Math.cos(aimAng) >= 0 ? 1 : -1;
+            }
+
+            const cdMult = pl.overdriveFrames > 0 ? 0.45 : 1;
+            if (cfg.weaponType === "shotgun") {
+              playStudioSfx("shoot", cfg.sfxEnabled);
+              for (const off of [-0.24, 0, 0.24]) {
+                sim.bullets.push({
+                  x: pl.x + 11,
+                  y: pl.y + 11,
+                  w: 9,
+                  h: 9,
+                  vx: Math.cos(aimAng + off) * 9.5,
+                  vy: Math.sin(aimAng + off) * 9.5,
+                  kind: "shotgun",
+                  life: 38,
+                });
+              }
+              pl.shootCd = Math.round(23 * cdMult);
+            } else if (cfg.weaponType === "laser") {
+              playStudioSfx("laser", cfg.sfxEnabled);
+              sim.bullets.push({
+                x: pl.x + 11,
+                y: pl.y + 9,
+                w: 16,
+                h: 6,
+                vx: Math.cos(aimAng) * 15.5,
+                vy: Math.sin(aimAng) * 15.5,
+                kind: "laser",
+                pierce: true,
+                life: 48,
+              });
+              pl.shootCd = Math.round(17 * cdMult);
+            } else if (cfg.weaponType === "boomerang") {
+              playStudioSfx("sword", cfg.sfxEnabled);
+              sim.bullets.push({
+                x: pl.x + 7,
+                y: pl.y + 7,
+                w: 14,
+                h: 14,
+                vx: Math.cos(aimAng) * 9.2,
+                vy: Math.sin(aimAng) * 9.2,
+                kind: "boomerang",
+                pierce: true,
+                life: 76,
+              });
+              pl.shootCd = Math.round(22 * cdMult);
+            } else if (cfg.weaponType === "grenade") {
+              playStudioSfx("shoot", cfg.sfxEnabled);
+              sim.bullets.push({
+                x: pl.x + 7,
+                y: pl.y + 6,
+                w: 12,
+                h: 12,
+                vx: Math.cos(aimAng) * 7.8,
+                vy: Math.sin(aimAng) * 7.8 - (isTopDown ? 0 : 3.6 * sim.gravDir),
+                kind: "grenade",
+                life: 68,
+              });
+              pl.shootCd = Math.round(26 * cdMult);
+            } else if (cfg.weaponType === "sword") {
+              playStudioSfx("sword", cfg.sfxEnabled);
+              const sx = pl.x + 11 + Math.cos(aimAng) * 22 - 18;
+              const sy = pl.y + 11 + Math.sin(aimAng) * 22 - 18;
+              sim.bullets.push({
+                x: sx,
+                y: sy,
+                w: 36,
+                h: 36,
+                vx: 0,
+                vy: 0,
+                kind: "sword",
+                pierce: true,
+                life: 9,
+              });
+              // Deflect / slice enemy plasma bolts!
+              for (const eb of sim.enemyBullets) {
+                if (Math.hypot(eb.x - (pl.x + 11), eb.y - (pl.y + 11)) < 52) {
+                  eb.dead = true;
+                  spawnParticles(eb.x, eb.y, "#38bdf8", 6);
+                  addPopup(eb.x, eb.y - 8, "PARRY!", "#38bdf8");
+                }
+              }
+              pl.shootCd = Math.round(14 * cdMult);
+            } else {
+              playStudioSfx("shoot", cfg.sfxEnabled);
+              sim.bullets.push({
+                x: pl.x + 8,
+                y: pl.y + 9,
+                w: 10,
+                h: 6,
+                vx: Math.cos(aimAng) * 10.5,
+                vy: Math.sin(aimAng) * 10.5,
+                kind: "blaster",
+                life: 62,
+              });
+              pl.shootCd = Math.round(13 * cdMult);
             }
           }
 
-          pl.x += pl.vx;
-          if (pl.x < 0) pl.x = 0;
-          if (pl.x + pl.w > COLS * TILE_SIZE) pl.x = COLS * TILE_SIZE - pl.w;
-
-          for (let r = 0; r < ROWS; r++) {
-            for (let c = 0; c < COLS; c++) {
-              const cell = activeGrid[r][c];
-              if (cell === 1 || (cell === 12 && !allKeysCollected)) {
-                const box = { x: c * TILE_SIZE, y: r * TILE_SIZE, w: TILE_SIZE, h: TILE_SIZE };
-                if (overlap(pl, box)) {
-                  if (pl.vx > 0) pl.x = box.x - pl.w;
-                  else if (pl.vx < 0) pl.x = box.x + box.w;
-                  if (cfg.mode === "flappy") damagePlayer();
-                }
+          // Update H-Moving & V-Elevator platforms
+          for (const mp of sim.movingPlatforms) {
+            if (mp.vertical) {
+              mp.y += mp.vy;
+              const nextR = Math.floor((mp.y + (mp.vy > 0 ? mp.h : 0)) / TILE_SIZE);
+              if (nextR <= 0 || nextR >= sim.rows - 1 || isSolidCell(nextR, mp.c)) {
+                mp.vy *= -1;
+              }
+            } else {
+              mp.x += mp.vx;
+              const nextC = Math.floor((mp.x + (mp.vx > 0 ? mp.w : 0)) / TILE_SIZE);
+              if (nextC < 0 || nextC >= sim.cols || isSolidCell(mp.r, nextC)) {
+                mp.vx *= -1;
               }
             }
           }
 
+          // Horizontal Move & Wall-Jump Detection
+          pl.x += pl.vx;
+          if (pl.x < 0) pl.x = 0;
+          if (pl.x + pl.w > worldW) pl.x = worldW - pl.w;
+
+          let wallTouchDir = 0;
+          const rStart = Math.max(0, Math.floor(pl.y / TILE_SIZE) - 1);
+          const rEnd = Math.min(sim.rows - 1, Math.floor((pl.y + pl.h) / TILE_SIZE) + 1);
+          const cStart = Math.max(0, Math.floor(pl.x / TILE_SIZE) - 1);
+          const cEnd = Math.min(sim.cols - 1, Math.floor((pl.x + pl.w) / TILE_SIZE) + 1);
+
+          for (let r = rStart; r <= rEnd; r++) {
+            for (let c = cStart; c <= cEnd; c++) {
+              if (!isSolidCell(r, c)) continue;
+              const box = { x: c * TILE_SIZE, y: r * TILE_SIZE, w: TILE_SIZE, h: TILE_SIZE };
+              if (overlap(pl, box)) {
+                // Dashing into breakable brick shatters it!
+                const rowArr = activeGrid[r];
+                if (pl.dashFrames > 0 && rowArr && rowArr[c] === 14) {
+                  rowArr[c] = 0;
+                  spawnParticles(box.x + 17, box.y + 17, "#f59e0b", 10);
+                  triggerShake(6, 4);
+                  continue;
+                }
+                if (pl.vx > 0) {
+                  pl.x = box.x - pl.w;
+                  wallTouchDir = 1;
+                } else if (pl.vx < 0) {
+                  pl.x = box.x + box.w;
+                  wallTouchDir = -1;
+                }
+                if (cfg.mode === "flappy" || cfg.mode === "gravrunner") damagePlayer();
+              }
+            }
+          }
+
+          // Wall-Slide & Wall-Kick
+          if (
+            cfg.enableWallJump &&
+            !isTopDown &&
+            wallTouchDir !== 0 &&
+            !pl.grounded &&
+            pl.vy * sim.gravDir > 1.3
+          ) {
+            pl.vy = 1.4 * sim.gravDir;
+            pl.jumpsLeft = Math.max(pl.jumpsLeft, 1);
+            if (up && !pl.jumpKeyLock) {
+              pl.vy = -cfg.jumpForce * 0.96 * sim.gravDir;
+              pl.vx = -wallTouchDir * effSpeed * 1.35;
+              pl.facing = -wallTouchDir;
+              pl.jumpKeyLock = true;
+              playStudioSfx("jump", cfg.sfxEnabled);
+              spawnParticles(pl.x + (wallTouchDir > 0 ? pl.w : 0), pl.y + 11, "#e2e8f0", 8);
+            }
+          }
+
+          // Vertical Move & Platform Collisions
+          const prevY = pl.y;
           pl.y += pl.vy;
           pl.grounded = false;
-          if (pl.y > ROWS * TILE_SIZE) {
+          pl.onIce = false;
+          if (pl.y > worldH + 24 || pl.y < -48) {
             damagePlayer();
           }
 
-          // Moving platform collision
           for (const mp of sim.movingPlatforms) {
-            if (overlap(pl, mp) && pl.vy >= 0 && pl.y + pl.h - pl.vy <= mp.y + 10) {
+            if (overlap(pl, mp) && pl.vy * sim.gravDir >= 0 && prevY + pl.h <= mp.y + 12) {
               pl.y = mp.y - pl.h;
               pl.vy = 0;
               pl.x += mp.vx;
+              pl.y += mp.vy;
               pl.grounded = true;
               pl.jumpsLeft = cfg.enableDoubleJump ? 2 : 1;
+              pl.jetpackFuel = 100;
             }
           }
         }
 
-        // Shared Tile Interactions (Walls, Lava, Bounce, Portal)
-        for (let r = 0; r < ROWS; r++) {
-          for (let c = 0; c < COLS; c++) {
-            const cell = activeGrid[r][c];
+        // Shared Tile Interactions (Solid Y, One-Way, Ice, Conveyor, Spikes, Bounce, Gravity, Teleporter, Switch, Portal)
+        const trStart = Math.max(0, Math.floor(pl.y / TILE_SIZE) - 1);
+        const trEnd = Math.min(sim.rows - 1, Math.floor((pl.y + pl.h) / TILE_SIZE) + 1);
+        const tcStart = Math.max(0, Math.floor(pl.x / TILE_SIZE) - 1);
+        const tcEnd = Math.min(sim.cols - 1, Math.floor((pl.x + pl.w) / TILE_SIZE) + 1);
+
+        for (let r = trStart; r <= trEnd; r++) {
+          for (let c = tcStart; c <= tcEnd; c++) {
+            const cell = activeGrid[r]?.[c] || 0;
             if (cell === 0 || cell === 2 || cell === 3 || cell === 5 || cell === 8 || cell === 9)
               continue;
             const box = { x: c * TILE_SIZE, y: r * TILE_SIZE, w: TILE_SIZE, h: TILE_SIZE };
             if (!overlap(pl, box)) continue;
 
-            if (!use3D && (cell === 1 || (cell === 12 && !allKeysCollected))) {
-              if (pl.vy > 0) {
-                pl.y = box.y - pl.h;
-                pl.vy = 0;
-                pl.grounded = true;
-                pl.jumpsLeft = cfg.enableDoubleJump ? 2 : 1;
-              } else if (pl.vy < 0) {
-                pl.y = box.y + box.h;
-                pl.vy = 0;
+            if (!use3D && isSolidCell(r, c)) {
+              if (sim.gravDir > 0) {
+                if (pl.vy > 0) {
+                  pl.y = box.y - pl.h;
+                  pl.vy = 0;
+                  pl.grounded = true;
+                  pl.jumpsLeft = cfg.enableDoubleJump ? 2 : 1;
+                  pl.jetpackFuel = 100;
+                  if (cell === 15) pl.onIce = true;
+                  if (cell === 16) pl.x = Math.min(worldW - pl.w, pl.x + 2.6);
+                } else if (pl.vy < 0) {
+                  pl.y = box.y + box.h;
+                  pl.vy = 0;
+                }
+              } else {
+                if (pl.vy < 0) {
+                  pl.y = box.y + box.h;
+                  pl.vy = 0;
+                  pl.grounded = true;
+                  pl.jumpsLeft = cfg.enableDoubleJump ? 2 : 1;
+                  pl.jetpackFuel = 100;
+                } else if (pl.vy > 0) {
+                  pl.y = box.y - pl.h;
+                  pl.vy = 0;
+                }
               }
+            } else if (
+              !use3D &&
+              cell === 13 &&
+              sim.gravDir > 0 &&
+              !(keys["ArrowDown"] || keys["KeyS"]) &&
+              pl.vy >= 0 &&
+              pl.y + pl.h - pl.vy <= box.y + 11
+            ) {
+              pl.y = box.y - pl.h;
+              pl.vy = 0;
+              pl.grounded = true;
+              pl.jumpsLeft = cfg.enableDoubleJump ? 2 : 1;
+              pl.jetpackFuel = 100;
             } else if (cell === 4) {
               damagePlayer();
             } else if (cell === 6) {
+              playStudioSfx("jump", cfg.sfxEnabled);
               if (use3D) {
-                pl.x += Math.cos(pl.angle) * 14;
-                pl.y += Math.sin(pl.angle) * 14;
+                pl.x += Math.cos(pl.angle) * 16;
+                pl.y += Math.sin(pl.angle) * 16;
               } else {
-                pl.vy = -cfg.jumpForce * 1.38;
+                pl.vy = -cfg.jumpForce * 1.42 * sim.gravDir;
                 pl.grounded = false;
                 pl.jumpsLeft = cfg.enableDoubleJump ? 2 : 1;
               }
-              spawnParticles(pl.x + 11, pl.y + 20, "#06b6d4", 8);
-            } else if (cell === 7) {
-              // LEVEL GOAL PORTAL REACHED!
-              spawnParticles(pl.x + 11, pl.y + 11, "#10b981", 18);
-              const nextLvlIdx = sim.levelIndex + 1;
-              if (nextLvlIdx < cfg.levels.length) {
-                const bonusScore = sim.score + 50;
-                addCookieCoins(10, `cleared level ${sim.levelIndex + 1} in ${cfg.title}`);
-                awardGamePassXp(12, "game", { silent: true });
-                syncProgressToCloud({
-                  levelReached: nextLvlIdx + 1,
-                  score: bonusScore,
-                });
-                notifyToast(
-                  `level ${sim.levelIndex + 1} complete! advancing to ${
-                    cfg.levels[nextLvlIdx].name
-                  } (+10 coins)`,
-                  "success"
-                );
-                initSimulation(nextLvlIdx, bonusScore);
-                break;
-              } else {
-                sim.status = "won";
-                setGameStatus("won");
-                if (!sim.rewardedWin) {
-                  sim.rewardedWin = true;
-                  sim.score += 100;
-                  setLiveScore(sim.score);
-                  addCookieCoins(25, `beat all levels of ${cfg.title}`);
-                  awardGamePassXp(25, "game", { silent: true });
-                  recordGameActivity(cfg.title, 25, 1, sim.score);
-                  syncProgressToCloud({
-                    levelReached: cfg.levels.length,
-                    score: sim.score,
-                    completedGame: true,
-                  });
-                }
+              spawnParticles(pl.x + 11, pl.y + 20, "#06b6d4", 9);
+            } else if (cell === 18 && pl.tpCooldown <= 0) {
+              sim.gravDir *= -1;
+              pl.vy = 2.5 * sim.gravDir;
+              pl.tpCooldown = 28;
+              playStudioSfx("teleport", cfg.sfxEnabled);
+              spawnParticles(pl.x + 11, pl.y + 11, "#c084fc", 12);
+            } else if (cell === 19 && pl.tpCooldown <= 0 && sim.teleporters.length > 1) {
+              const others = sim.teleporters.filter(
+                (tp) => Math.hypot(tp.x - box.x, tp.y - box.y) > 22
+              );
+              if (others.length > 0) {
+                const dest = others[Math.floor(Math.random() * others.length)] || others[0]!;
+                pl.x = dest.x + 6;
+                pl.y = dest.y + 6;
+                pl.tpCooldown = 55;
+                playStudioSfx("teleport", cfg.sfxEnabled);
+                spawnParticles(pl.x + 11, pl.y + 11, "#2dd4bf", 16);
+                addPopup(pl.x, pl.y - 8, "WARP!", "#2dd4bf");
               }
+            } else if (cell === 20 && pl.tpCooldown <= 0) {
+              sim.switchesOn = !sim.switchesOn;
+              pl.tpCooldown = 32;
+              playStudioSfx("switch", cfg.sfxEnabled);
+              spawnParticles(box.x + 17, box.y + 17, "#facc15", 10);
+              addPopup(box.x + 10, box.y, sim.switchesOn ? "SWITCH ON!" : "SWITCH OFF", "#4ade80");
+              if (sim.switchesOn) fireRuleTrigger("on_switch_on");
+            } else if (cell === 7 && activeWinCond === "portal") {
+              completeLevelOrGame();
+              break;
             }
           }
         }
@@ -1615,8 +2115,16 @@ export default function GameStudioPage() {
             coin.taken = true;
             sim.score += 10;
             setLiveScore(sim.score);
+            playStudioSfx("coin", cfg.sfxEnabled);
             spawnParticles(coin.x + 8, coin.y + 8, "#eab308", 8);
+            addPopup(coin.x, coin.y - 6, "+10", "#fde08a");
             syncProgressToCloud({ score: sim.score, coinsAdded: 1 });
+            if (sim.score >= 50) fireRuleTrigger("on_score_50");
+            if (sim.score >= 150) fireRuleTrigger("on_score_150");
+            if (sim.coins.every((c) => c.taken)) {
+              fireRuleTrigger("on_all_coins");
+              if (activeWinCond === "all_coins") completeLevelOrGame();
+            }
           }
         }
 
@@ -1626,8 +2134,9 @@ export default function GameStudioPage() {
             k.taken = true;
             sim.score += 20;
             setLiveScore(sim.score);
+            playStudioSfx("powerup", cfg.sfxEnabled);
             spawnParticles(k.x + 10, k.y + 10, "#f59e0b", 12);
-            notifyToast("golden key collected! locked gate opened", "info");
+            addPopup(k.x, k.y - 8, "KEY UNLOCKED!", "#fbbf24");
           }
         }
 
@@ -1643,63 +2152,229 @@ export default function GameStudioPage() {
             }
             sim.score += 15;
             setLiveScore(sim.score);
+            playStudioSfx("powerup", cfg.sfxEnabled);
             spawnParticles(cp.x + 10, cp.y + 10, "#f43f5e", 12);
-            notifyToast("checkpoint saved & +1 hp restored!", "success");
+            addPopup(cp.x, cp.y - 8, "CHECKPOINT +HP", "#fb7185");
           }
         }
 
-        // Update 2D Bullets
+        // Overdrive Powerup Orbs
+        for (const pu of sim.powerups) {
+          if (!pu.taken && overlap(pl, pu)) {
+            pu.taken = true;
+            pl.overdriveFrames = 450;
+            pl.invulnFrames = Math.max(pl.invulnFrames, 260);
+            sim.score += 30;
+            setLiveScore(sim.score);
+            playStudioSfx("powerup", cfg.sfxEnabled);
+            spawnParticles(pu.x + 10, pu.y + 10, "#38bdf8", 18);
+            addPopup(pu.x, pu.y - 10, "OVERDRIVE!", "#38bdf8");
+          }
+        }
+
+        // Enemy Spawner Rifts
+        for (const sp of sim.spawners) {
+          if (!sp.alive) continue;
+          sp.cd--;
+          if (sp.cd <= 0 && sim.enemies.filter((e) => e.alive).length < 18) {
+            sp.cd = 175;
+            sim.enemies.push({
+              x: sp.x + 2,
+              y: sp.y + 2,
+              baseY: sp.y + 2,
+              w: 24,
+              h: 24,
+              vx: pl.x >= sp.x ? 1.65 : -1.65,
+              vy: 0,
+              hp: 1,
+              maxHp: 1,
+              kind: cfg.mode === "topdown" || cfg.mode === "survivor" ? 9 : 5,
+              isBoss: false,
+              cd: 65,
+              aimAngle: 0,
+              alive: true,
+            });
+            spawnParticles(sp.x + 14, sp.y + 14, "#a855f7", 8);
+          }
+        }
+
+        // Update Player Projectiles
         for (const b of sim.bullets) {
+          if (b.dead) continue;
+          if (b.kind === "boomerang" && b.life < 44) {
+            const retAng = Math.atan2(pl.y + 11 - b.y, pl.x + 11 - b.x);
+            b.vx = Math.cos(retAng) * 10;
+            b.vy = Math.sin(retAng) * 10;
+          } else if (
+            b.kind === "grenade" &&
+            cfg.mode !== "topdown" &&
+            cfg.mode !== "shooter" &&
+            cfg.mode !== "survivor"
+          ) {
+            b.vy += 0.3 * sim.gravDir;
+          }
+
           b.x += b.vx;
           b.y += b.vy;
-          for (const en of sim.enemies) {
-            if (en.alive && overlap(b, en)) {
-              en.hp -= 1;
-              b.x = 99999;
-              if (en.hp <= 0) {
-                en.alive = false;
-                sim.score += en.isBoss ? 75 : 25;
+          b.life--;
+
+          const br = Math.floor((b.y + b.h / 2) / TILE_SIZE);
+          const bc = Math.floor((b.x + b.w / 2) / TILE_SIZE);
+          const bRow = activeGrid[br];
+          if (br >= 0 && br < sim.rows && bc >= 0 && bc < sim.cols && bRow && bRow[bc] === 14) {
+            bRow[bc] = 0;
+            spawnParticles(bc * TILE_SIZE + 17, br * TILE_SIZE + 17, "#f59e0b", 8);
+            if (b.kind === "grenade") triggerExplosion(b.x, b.y);
+            if (!b.pierce) b.dead = true;
+          } else if (b.kind !== "sword" && b.kind !== "boomerang" && isSolidCell(br, bc)) {
+            if (b.kind === "grenade") triggerExplosion(b.x, b.y);
+            b.dead = true;
+          }
+
+          for (const tnt of sim.tntBarrels) {
+            if (tnt.intact && overlap(b, tnt)) {
+              tnt.intact = false;
+              triggerExplosion(tnt.x + 14, tnt.y + 14);
+              if (!b.pierce) b.dead = true;
+            }
+          }
+
+          for (const sp of sim.spawners) {
+            if (sp.alive && overlap(b, sp)) {
+              sp.hp -= 1;
+              if (!b.pierce) b.dead = true;
+              spawnParticles(sp.x + 14, sp.y + 14, "#c084fc", 8);
+              if (sp.hp <= 0) {
+                sp.alive = false;
+                sim.score += 50;
                 setLiveScore(sim.score);
-                spawnParticles(en.x + 12, en.y + 12, en.isBoss ? "#ec4899" : "#a855f7", 14);
-              } else {
-                spawnParticles(en.x + 12, en.y + 12, "#facc15", 6);
+                addPopup(sp.x, sp.y - 8, "+50 RIFT CLOSED!", "#c084fc");
               }
             }
           }
-        }
 
-        // Update Enemies (Patrol & Boss Chasers)
+          for (const en of sim.enemies) {
+            if (en.alive && overlap(b, en)) {
+              en.hp -= 1;
+              if (b.kind === "grenade") triggerExplosion(b.x, b.y);
+              if (!b.pierce) b.dead = true;
+              if (en.hp <= 0) {
+                en.alive = false;
+                const pts = en.isBoss ? 75 : 25;
+                sim.score += pts;
+                setLiveScore(sim.score);
+                triggerShake(5, 3);
+                spawnParticles(en.x + 12, en.y + 12, en.isBoss ? "#ec4899" : "#a855f7", 14);
+                addPopup(en.x, en.y - 6, `+${pts}`, en.isBoss ? "#f472b6" : "#d8b4fe");
+                if (en.isBoss) fireRuleTrigger("on_boss_defeated");
+                if (
+                  sim.enemies.every((x) => !x.alive) &&
+                  sim.spawners.every((s) => !s.alive)
+                ) {
+                  fireRuleTrigger("on_all_enemies");
+                  if (activeWinCond === "all_enemies") completeLevelOrGame();
+                }
+              } else {
+                spawnParticles(en.x + 12, en.y + 12, "#facc15", 5);
+              }
+            }
+          }
+
+          if (b.life <= 0) {
+            if (b.kind === "grenade") triggerExplosion(b.x, b.y);
+            b.dead = true;
+          }
+        }
+        sim.bullets = sim.bullets.filter((b) => !b.dead);
+
+        // Update Enemy Turret Bolts
+        for (const eb of sim.enemyBullets) {
+          eb.x += eb.vx;
+          eb.y += eb.vy;
+          eb.life--;
+          if (overlap(eb, pl)) {
+            eb.dead = true;
+            damagePlayer();
+          }
+          const er = Math.floor(eb.y / TILE_SIZE);
+          const ec = Math.floor(eb.x / TILE_SIZE);
+          if (eb.life <= 0 || isSolidCell(er, ec)) eb.dead = true;
+        }
+        sim.enemyBullets = sim.enemyBullets.filter((eb) => !eb.dead);
+
+        // Update Enemies (Walkers, Boss Chasers, Flying Sine-Drones, Aimed Laser Turrets)
         for (const en of sim.enemies) {
           if (!en.alive) continue;
-          if (en.isBoss && (use3D || cfg.mode === "topdown" || cfg.mode === "shooter")) {
+          if (en.kind === 24) {
+            en.aimAngle = Math.atan2(pl.y + 11 - (en.y + 12), pl.x + 11 - (en.x + 12));
+            en.cd--;
+            if (en.cd <= 0 && Math.hypot(pl.x - en.x, pl.y - en.y) < 380) {
+              en.cd = 88;
+              sim.enemyBullets.push({
+                x: en.x + 12,
+                y: en.y + 12,
+                w: 8,
+                h: 8,
+                vx: Math.cos(en.aimAngle) * 4.3,
+                vy: Math.sin(en.aimAngle) * 4.3,
+                life: 105,
+              });
+            }
+          } else if (en.kind === 23) {
+            en.x += en.vx;
+            en.y = en.baseY + Math.sin(sim.tick * 0.075 + en.x * 0.02) * 28;
+            const nextCol = Math.floor((en.x + (en.vx > 0 ? en.w : 0)) / TILE_SIZE);
+            const row = Math.floor((en.y + 12) / TILE_SIZE);
+            if (nextCol < 0 || nextCol >= sim.cols || isSolidCell(row, nextCol)) {
+              en.vx *= -1;
+            }
+          } else if (
+            en.isBoss &&
+            (use3D || cfg.mode === "topdown" || cfg.mode === "shooter" || cfg.mode === "survivor")
+          ) {
             const ang = Math.atan2(pl.y - en.y, pl.x - en.x);
-            en.x += Math.cos(ang) * 1.15;
-            en.y += Math.sin(ang) * 1.15;
+            en.x += Math.cos(ang) * 1.3;
+            en.y += Math.sin(ang) * 1.3;
           } else {
             en.x += en.vx;
             const nextCol = Math.floor((en.x + (en.vx > 0 ? en.w : 0)) / TILE_SIZE);
             const row = Math.floor((en.y + 12) / TILE_SIZE);
-            if (
-              nextCol < 0 ||
-              nextCol >= COLS ||
-              (activeGrid[row] && activeGrid[row][nextCol] === 1)
-            ) {
+            if (nextCol < 0 || nextCol >= sim.cols || isSolidCell(row, nextCol)) {
               en.vx *= -1;
             }
           }
 
           if (overlap(pl, en)) {
-            if (
-              !use3D &&
-              cfg.mode === "platformer" &&
-              pl.vy > 1 &&
-              pl.y + pl.h - pl.vy <= en.y + 13
-            ) {
+            if (pl.dashFrames > 0) {
+              // Dash-strike enemy!
               en.hp -= 1;
-              pl.vy = -cfg.jumpForce * 0.82;
               if (en.hp <= 0) {
                 en.alive = false;
                 sim.score += en.isBoss ? 75 : 25;
+                setLiveScore(sim.score);
+                spawnParticles(en.x + 12, en.y + 12, "#38bdf8", 12);
+                if (en.isBoss) fireRuleTrigger("on_boss_defeated");
+              }
+            } else if (
+              !use3D &&
+              (cfg.mode === "platformer" || cfg.mode === "metroidvania") &&
+              pl.vy * sim.gravDir > 1 &&
+              (sim.gravDir > 0 ? pl.y + pl.h - pl.vy <= en.y + 14 : pl.y - pl.vy >= en.y + en.h - 14)
+            ) {
+              en.hp -= 1;
+              pl.vy = -cfg.jumpForce * 0.85 * sim.gravDir;
+              playStudioSfx("jump", cfg.sfxEnabled);
+              if (en.hp <= 0) {
+                en.alive = false;
+                sim.score += en.isBoss ? 75 : 25;
+                if (en.isBoss) fireRuleTrigger("on_boss_defeated");
+                if (
+                  sim.enemies.every((x) => !x.alive) &&
+                  sim.spawners.every((s) => !s.alive)
+                ) {
+                  fireRuleTrigger("on_all_enemies");
+                  if (activeWinCond === "all_enemies") completeLevelOrGame();
+                }
               }
               setLiveScore(sim.score);
               spawnParticles(en.x + 12, en.y + 12, "#a855f7", 12);
@@ -1709,6 +2384,21 @@ export default function GameStudioPage() {
           }
         }
 
+        // Survive Timer Win Condition
+        if (activeWinCond === "survive_timer") {
+          sim.timerFrames--;
+          if (sim.timerFrames <= 0) {
+            completeLevelOrGame();
+          }
+        }
+
+        // Smooth Follow Camera with World Bounds Clamping
+        const targetCamX = Math.max(0, Math.min(Math.max(0, worldW - CANVAS_W), pl.x + 11 - CANVAS_W / 2));
+        const targetCamY = Math.max(0, Math.min(Math.max(0, worldH - CANVAS_H), pl.y + 11 - CANVAS_H / 2));
+        sim.camX += (targetCamX - sim.camX) * 0.14;
+        sim.camY += (targetCamY - sim.camY) * 0.14;
+
+        // Optional legacy per-frame hook
         if (cfg.customScript && cfg.customScript.trim() && !isForeignProjectRef.current) {
           try {
             const fn = new Function("ctx", "state", "player", cfg.customScript);
@@ -1717,20 +2407,20 @@ export default function GameStudioPage() {
         }
       }
 
-      // --- RENDER STAGE ---
+      // =====================================================================
+      // RENDER STAGE (FIRST-PERSON 3D OR 2D SCROLLING + EDITOR)
+      // =====================================================================
+      const globalTick = sim ? sim.tick : Math.floor(performance.now() / 16);
+
       if (use3D && sim) {
-        // ===================================================================
-        // LIGHTWEIGHT FIRST-PERSON 3D RAYCASTER ENGINE (60FPS)
-        // ===================================================================
         const W = canvas.width;
         const H = canvas.height;
         const pl = sim.player;
         const fov = Math.PI / 3;
-        const numRays = 170;
+        const numRays = 180;
         const stripW = W / numRays;
         const zBuffer = new Float32Array(numRays);
 
-        // Sky & Floor Gradient
         const skyGrad = ctx.createLinearGradient(0, 0, 0, H / 2);
         skyGrad.addColorStop(0, "#030712");
         skyGrad.addColorStop(1, lvlBg);
@@ -1747,7 +2437,6 @@ export default function GameStudioPage() {
         const py = (pl.y + 11) / TILE_SIZE;
         const allKeysTaken = sim.keysList.every((k) => k.taken);
 
-        // Raycast Walls
         for (let i = 0; i < numRays; i++) {
           const rayAngle = pl.angle - fov / 2 + (i / numRays) * fov;
           const sin = Math.sin(rayAngle);
@@ -1756,22 +2445,29 @@ export default function GameStudioPage() {
           let dist = 0;
           let hitId = 0;
           let hitSide = 0;
-          const step = 0.03;
+          const step = 0.032;
           let rx = px;
           let ry = py;
 
-          while (dist < 22) {
+          while (dist < 26) {
             rx += cos * step;
             ry += sin * step;
             dist += step;
             const c = Math.floor(rx);
             const r = Math.floor(ry);
-            if (r < 0 || r >= ROWS || c < 0 || c >= COLS) {
+            if (r < 0 || r >= sim.rows || c < 0 || c >= sim.cols) {
               hitId = 1;
               break;
             }
-            const cell = activeGrid[r][c];
-            if (cell === 1 || cell === 8 || (cell === 12 && !allKeysTaken)) {
+            const cell = activeGrid[r]?.[c] ?? 0;
+            if (
+              cell === 1 ||
+              cell === 8 ||
+              cell === 14 ||
+              cell === 15 ||
+              (cell === 12 && !allKeysTaken && !sim.doorsForcedOpen) ||
+              (cell === 21 && !sim.switchesOn && !sim.doorsForcedOpen)
+            ) {
               hitId = cell;
               const fracX = Math.abs(rx - Math.round(rx));
               const fracY = Math.abs(ry - Math.round(ry));
@@ -1783,84 +2479,74 @@ export default function GameStudioPage() {
           const perpDist = Math.max(0.15, dist * Math.cos(rayAngle - pl.angle));
           zBuffer[i] = perpDist;
 
-          const wallH = Math.min(H * 1.4, (H * 0.92) / perpDist);
+          const wallH = Math.min(H * 1.45, (H * 0.92) / perpDist);
           const topY = (H - wallH) / 2;
-          const shade = Math.max(0.18, 1 - perpDist / 16) * (hitSide ? 0.78 : 1);
+          const shade =
+            Math.max(activeDarkness ? 0.05 : 0.18, 1 - perpDist / (activeDarkness ? 8.5 : 18)) *
+            (hitSide ? 0.78 : 1);
 
-          ctx.fillStyle = hitId === 12 ? "#f59e0b" : hitId === 8 ? "#6366f1" : lvlWall;
+          ctx.fillStyle =
+            hitId === 12
+              ? "#f59e0b"
+              : hitId === 21
+                ? "#fb7185"
+                : hitId === 14
+                  ? "#d97706"
+                  : hitId === 15
+                    ? "#67e8f9"
+                    : hitId === 8
+                      ? "#6366f1"
+                      : lvlWall;
           ctx.globalAlpha = shade;
           ctx.fillRect(i * stripW, topY, stripW + 1, wallH);
 
-          // Neon trim along top and bottom of 3D wall
-          ctx.fillStyle = "#38bdf8";
+          ctx.fillStyle = hitId === 21 ? "#fda4af" : "#38bdf8";
           ctx.fillRect(i * stripW, topY, stripW + 1, 2);
           ctx.fillRect(i * stripW, topY + wallH - 2, stripW + 1, 2);
         }
         ctx.globalAlpha = 1;
 
-        // Collect 3D Sprites (Coins, Enemies, Keys, Checkpoints, Exit Portals, Lava)
-        const sprites: { x: number; y: number; color: string; kind: string; hp?: number }[] = [];
+        const sprites: { x: number; y: number; color: string; kind: string }[] = [];
         for (const coin of sim.coins) {
-          if (!coin.taken) {
-            sprites.push({
-              x: (coin.x + 8) / TILE_SIZE,
-              y: (coin.y + 8) / TILE_SIZE,
-              color: "#eab308",
-              kind: "coin",
-            });
-          }
+          if (!coin.taken) sprites.push({ x: (coin.x + 8) / TILE_SIZE, y: (coin.y + 8) / TILE_SIZE, color: "#eab308", kind: "orb" });
         }
         for (const k of sim.keysList) {
-          if (!k.taken) {
-            sprites.push({
-              x: (k.x + 10) / TILE_SIZE,
-              y: (k.y + 10) / TILE_SIZE,
-              color: "#f59e0b",
-              kind: "key",
-            });
-          }
+          if (!k.taken) sprites.push({ x: (k.x + 10) / TILE_SIZE, y: (k.y + 10) / TILE_SIZE, color: "#f59e0b", kind: "orb" });
         }
-        for (const cp of sim.checkpoints) {
-          if (!cp.used) {
-            sprites.push({
-              x: (cp.x + 10) / TILE_SIZE,
-              y: (cp.y + 10) / TILE_SIZE,
-              color: "#f43f5e",
-              kind: "heart",
-            });
-          }
+        for (const pu of sim.powerups) {
+          if (!pu.taken) sprites.push({ x: (pu.x + 10) / TILE_SIZE, y: (pu.y + 10) / TILE_SIZE, color: "#38bdf8", kind: "orb" });
+        }
+        for (const tnt of sim.tntBarrels) {
+          if (tnt.intact) sprites.push({ x: (tnt.x + 14) / TILE_SIZE, y: (tnt.y + 14) / TILE_SIZE, color: "#f97316", kind: "tnt" });
         }
         for (const en of sim.enemies) {
           if (en.alive) {
             sprites.push({
               x: (en.x + en.w / 2) / TILE_SIZE,
               y: (en.y + en.h / 2) / TILE_SIZE,
-              color: en.isBoss ? "#ec4899" : "#a855f7",
+              color: en.isBoss ? "#ec4899" : en.kind === 24 ? "#f43f5e" : "#a855f7",
               kind: en.isBoss ? "boss" : "enemy",
-              hp: en.hp,
             });
           }
         }
-        for (let r = 0; r < ROWS; r++) {
-          for (let c = 0; c < COLS; c++) {
-            if (activeGrid[r][c] === 7) {
-              sprites.push({ x: c + 0.5, y: r + 0.5, color: "#10b981", kind: "portal" });
-            } else if (activeGrid[r][c] === 4) {
-              sprites.push({ x: c + 0.5, y: r + 0.5, color: "#ef4444", kind: "lava" });
-            }
+        for (const eb of sim.enemyBullets) {
+          sprites.push({ x: eb.x / TILE_SIZE, y: eb.y / TILE_SIZE, color: "#fb7185", kind: "orb" });
+        }
+        for (let r = 0; r < sim.rows; r++) {
+          for (let c = 0; c < sim.cols; c++) {
+            const id = activeGrid[r]?.[c] ?? 0;
+            if (id === 7) sprites.push({ x: c + 0.5, y: r + 0.5, color: "#10b981", kind: "portal" });
+            else if (id === 4) sprites.push({ x: c + 0.5, y: r + 0.5, color: "#ef4444", kind: "lava" });
+            else if (id === 20) sprites.push({ x: c + 0.5, y: r + 0.5, color: sim.switchesOn ? "#4ade80" : "#facc15", kind: "orb" });
           }
         }
 
-        sprites.sort(
-          (a, b) =>
-            Math.hypot(b.x - px, b.y - py) - Math.hypot(a.x - px, a.y - py)
-        );
-
+        sprites.sort((a, b) => Math.hypot(b.x - px, b.y - py) - Math.hypot(a.x - px, a.y - py));
         for (const sp of sprites) {
           const sx = sp.x - px;
           const sy = sp.y - py;
           const dist = Math.hypot(sx, sy);
-          if (dist < 0.25 || dist > 18) continue;
+          if (dist < 0.25 || dist > 22) continue;
 
           let spriteAngle = Math.atan2(sy, sx) - pl.angle;
           while (spriteAngle < -Math.PI) spriteAngle += Math.PI * 2;
@@ -1869,13 +2555,13 @@ export default function GameStudioPage() {
 
           const screenX = (0.5 + spriteAngle / fov) * W;
           const rayIdx = Math.floor((screenX / W) * numRays);
-          if (rayIdx >= 0 && rayIdx < numRays && zBuffer[rayIdx] < dist) continue;
+          if (rayIdx >= 0 && rayIdx < numRays && (zBuffer[rayIdx] ?? 999) < dist) continue;
 
           const size = Math.min(220, (H * 0.65) / dist);
           ctx.fillStyle = sp.color;
-          if (sp.kind === "coin" || sp.kind === "key" || sp.kind === "heart") {
+          if (sp.kind === "orb") {
             ctx.beginPath();
-            ctx.arc(screenX, H / 2 + size * 0.15, size * 0.26, 0, Math.PI * 2);
+            ctx.arc(screenX, H / 2 + size * 0.14, size * 0.24, 0, Math.PI * 2);
             ctx.fill();
           } else if (sp.kind === "portal") {
             ctx.strokeStyle = "#10b981";
@@ -1883,8 +2569,11 @@ export default function GameStudioPage() {
             ctx.strokeRect(screenX - size * 0.28, H / 2 - size * 0.45, size * 0.56, size * 0.9);
           } else if (sp.kind === "lava") {
             ctx.fillRect(screenX - size * 0.35, H / 2 + size * 0.35, size * 0.7, size * 0.18);
+          } else if (sp.kind === "tnt") {
+            ctx.fillRect(screenX - size * 0.25, H / 2 - size * 0.1, size * 0.5, size * 0.55);
+            ctx.fillStyle = "#fef08a";
+            ctx.fillRect(screenX - size * 0.25, H / 2 + size * 0.1, size * 0.5, size * 0.12);
           } else {
-            // 3D Enemy / Boss Billboard
             const boxW = sp.kind === "boss" ? size * 0.68 : size * 0.5;
             const boxH = sp.kind === "boss" ? size * 0.85 : size * 0.65;
             ctx.fillRect(screenX - boxW / 2, H / 2 - boxH / 2, boxW, boxH);
@@ -1894,7 +2583,7 @@ export default function GameStudioPage() {
           }
         }
 
-        // Crosshair
+        // Crosshair & 3D Viewmodel
         ctx.strokeStyle = "#4ade80";
         ctx.lineWidth = 2;
         ctx.beginPath();
@@ -1904,7 +2593,6 @@ export default function GameStudioPage() {
         ctx.lineTo(W / 2, H / 2 + 10);
         ctx.stroke();
 
-        // 3D First-Person Weapon Viewmodel + Muzzle Flash
         const bobX = Math.cos(pl.bobPhase) * 6;
         const bobY = Math.abs(Math.sin(pl.bobPhase)) * 6 + (pl.muzzleFlash > 0 ? 8 : 0);
         if (pl.muzzleFlash > 0) {
@@ -1912,218 +2600,521 @@ export default function GameStudioPage() {
           ctx.beginPath();
           ctx.arc(W * 0.66 + bobX, H - 95 + bobY, 26, 0, Math.PI * 2);
           ctx.fill();
-          ctx.strokeStyle = "#38bdf8";
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.moveTo(W * 0.66 + bobX, H - 95 + bobY);
-          ctx.lineTo(W / 2, H / 2);
-          ctx.stroke();
         }
         ctx.fillStyle = "#1e293b";
         ctx.fillRect(W * 0.63 + bobX, H - 90 + bobY, 54, 95);
         ctx.fillStyle = cfg.playerColor;
         ctx.fillRect(W * 0.65 + bobX, H - 82 + bobY, 16, 65);
 
-        // 3D Minimap Overlay (Top-Left)
-        const mmScale = 5.5;
-        ctx.fillStyle = "rgba(9, 13, 22, 0.82)";
-        ctx.fillRect(10, 10, COLS * mmScale, ROWS * mmScale);
-        for (let r = 0; r < ROWS; r++) {
-          for (let c = 0; c < COLS; c++) {
-            const id = activeGrid[r][c];
-            if (id === 1) {
-              ctx.fillStyle = lvlWall;
-              ctx.fillRect(10 + c * mmScale, 10 + r * mmScale, mmScale, mmScale);
+        // Scaled 3D Minimap
+        const mmScale = Math.min(5.2, 130 / Math.max(sim.cols, sim.rows));
+        ctx.fillStyle = "rgba(9, 13, 22, 0.84)";
+        ctx.fillRect(10, 10, sim.cols * mmScale + 4, sim.rows * mmScale + 4);
+        for (let r = 0; r < sim.rows; r++) {
+          for (let c = 0; c < sim.cols; c++) {
+            const id = activeGrid[r]?.[c] ?? 0;
+            if (id === 1 || id === 14) {
+              ctx.fillStyle = id === 14 ? "#d97706" : lvlWall;
+              ctx.fillRect(12 + c * mmScale, 12 + r * mmScale, mmScale, mmScale);
             } else if (id === 7) {
               ctx.fillStyle = "#10b981";
-              ctx.fillRect(10 + c * mmScale, 10 + r * mmScale, mmScale, mmScale);
+              ctx.fillRect(12 + c * mmScale, 12 + r * mmScale, mmScale, mmScale);
             }
           }
         }
         ctx.fillStyle = "#22c55e";
-        ctx.fillRect(10 + px * mmScale - 2, 10 + py * mmScale - 2, 4, 4);
+        ctx.fillRect(12 + px * mmScale - 2, 12 + py * mmScale - 2, 4, 4);
       } else {
         // ===================================================================
-        // 2D TILE EDITOR & 2D ENGINE RENDERER
+        // 2D SCROLLING WORLD & TILE EDITOR RENDERER
         // ===================================================================
         ctx.fillStyle = lvlBg;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+        const camX = isPlayingRef.current && sim ? sim.camX : editorCamRef.current.x;
+        const camY = isPlayingRef.current && sim ? sim.camY : editorCamRef.current.y;
+        const zoom = isPlayingRef.current ? cfg.cameraZoom || 1 : 1;
+        const shakeX =
+          isPlayingRef.current && sim && sim.shakeFrames > 0
+            ? (Math.random() - 0.5) * sim.shakeMag * 2
+            : 0;
+        const shakeY =
+          isPlayingRef.current && sim && sim.shakeFrames > 0
+            ? (Math.random() - 0.5) * sim.shakeMag * 2
+            : 0;
+
+        // Background Weather (Starfield)
+        if (activeWeather === "starfield") {
+          ctx.fillStyle = "rgba(226, 232, 240, 0.55)";
+          for (let i = 0; i < 42; i++) {
+            const sx = ((i * 173 - camX * 0.25) % CANVAS_W + CANVAS_W) % CANVAS_W;
+            const sy = ((i * 97 - camY * 0.25) % CANVAS_H + CANVAS_H) % CANVAS_H;
+            ctx.fillRect(sx, sy, i % 3 === 0 ? 2.5 : 1.5, i % 3 === 0 ? 2.5 : 1.5);
+          }
+        }
+
+        ctx.save();
+        if (zoom !== 1) {
+          ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
+          ctx.scale(zoom, zoom);
+          ctx.translate(-CANVAS_W / 2, -CANVAS_H / 2);
+        }
+        ctx.translate(-Math.round(camX - shakeX), -Math.round(camY - shakeY));
+
+        const visStartC = Math.max(0, Math.floor(camX / TILE_SIZE) - 2);
+        const visEndC = Math.min(mapCols - 1, Math.ceil((camX + CANVAS_W) / TILE_SIZE) + 2);
+        const visStartR = Math.max(0, Math.floor(camY / TILE_SIZE) - 2);
+        const visEndR = Math.min(mapRows - 1, Math.ceil((camY + CANVAS_H) / TILE_SIZE) + 2);
+
         if (!isPlayingRef.current) {
-          ctx.strokeStyle = "rgba(255,255,255,0.05)";
+          ctx.strokeStyle = "rgba(255,255,255,0.055)";
           ctx.lineWidth = 1;
-          for (let r = 0; r <= ROWS; r++) {
+          for (let r = visStartR; r <= visEndR + 1; r++) {
             ctx.beginPath();
-            ctx.moveTo(0, r * TILE_SIZE);
-            ctx.lineTo(COLS * TILE_SIZE, r * TILE_SIZE);
+            ctx.moveTo(visStartC * TILE_SIZE, r * TILE_SIZE);
+            ctx.lineTo((visEndC + 1) * TILE_SIZE, r * TILE_SIZE);
             ctx.stroke();
           }
-          for (let c = 0; c <= COLS; c++) {
+          for (let c = visStartC; c <= visEndC + 1; c++) {
             ctx.beginPath();
-            ctx.moveTo(c * TILE_SIZE, 0);
-            ctx.lineTo(c * TILE_SIZE, ROWS * TILE_SIZE);
+            ctx.moveTo(c * TILE_SIZE, visStartR * TILE_SIZE);
+            ctx.lineTo(c * TILE_SIZE, (visEndR + 1) * TILE_SIZE);
             ctx.stroke();
           }
         }
 
         const allKeysTaken = sim ? sim.keysList.every((k) => k.taken) : false;
+        const switchesOn = sim ? sim.switchesOn : false;
+        const doorsForcedOpen = sim ? sim.doorsForcedOpen : false;
 
-        for (let r = 0; r < ROWS; r++) {
-          for (let c = 0; c < COLS; c++) {
+        for (let r = visStartR; r <= visEndR; r++) {
+          for (let c = visStartC; c <= visEndC; c++) {
             const id = activeGrid[r]?.[c] || 0;
-            const x = c * TILE_SIZE;
-            const y = r * TILE_SIZE;
-
-            if (id === 1) {
-              ctx.fillStyle = lvlWall;
-              ctx.fillRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
-            } else if (id === 2 && !isPlayingRef.current) {
-              ctx.fillStyle = cfg.playerColor;
-              ctx.fillRect(x + 5, y + 5, 24, 24);
-            } else if (id === 3 && !isPlayingRef.current) {
-              ctx.fillStyle = "#eab308";
-              ctx.beginPath();
-              ctx.arc(x + TILE_SIZE / 2, y + TILE_SIZE / 2, 8, 0, Math.PI * 2);
-              ctx.fill();
-            } else if (id === 4) {
-              ctx.fillStyle = "#ef4444";
-              ctx.beginPath();
-              ctx.moveTo(x + 2, y + TILE_SIZE);
-              ctx.lineTo(x + TILE_SIZE / 2, y + 8);
-              ctx.lineTo(x + TILE_SIZE - 2, y + TILE_SIZE);
-              ctx.closePath();
-              ctx.fill();
-            } else if ((id === 5 || id === 9) && !isPlayingRef.current) {
-              ctx.fillStyle = id === 9 ? "#ec4899" : "#a855f7";
-              ctx.fillRect(x + 4, y + 4, 26, 26);
-            } else if (id === 6) {
-              ctx.fillStyle = "#06b6d4";
-              ctx.fillRect(x + 3, y + TILE_SIZE - 12, TILE_SIZE - 6, 12);
-            } else if (id === 7) {
-              ctx.fillStyle = "#10b981";
-              ctx.fillRect(x + 7, y + 4, 4, TILE_SIZE - 4);
-              ctx.beginPath();
-              ctx.moveTo(x + 11, y + 4);
-              ctx.lineTo(x + TILE_SIZE - 4, y + 12);
-              ctx.lineTo(x + 11, y + 20);
-              ctx.closePath();
-              ctx.fill();
-            } else if (id === 8 && !isPlayingRef.current) {
-              ctx.fillStyle = "#6366f1";
-              ctx.fillRect(x + 1, y + 2, TILE_SIZE - 2, 14);
-            } else if (id === 10 && !isPlayingRef.current) {
-              ctx.fillStyle = "#f43f5e";
-              ctx.beginPath();
-              ctx.arc(x + TILE_SIZE / 2, y + TILE_SIZE / 2, 9, 0, Math.PI * 2);
-              ctx.fill();
-            } else if (id === 11 && !isPlayingRef.current) {
-              ctx.fillStyle = "#f59e0b";
-              ctx.fillRect(x + 9, y + 9, 16, 16);
-            } else if (id === 12 && (!isPlayingRef.current || !allKeysTaken)) {
-              ctx.fillStyle = "#94a3b8";
-              ctx.fillRect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+            if (id !== 0) {
+              drawStudioTile2D(ctx, id, c * TILE_SIZE, r * TILE_SIZE, isPlayingRef.current, {
+                wallColor: lvlWall,
+                playerColor: cfg.playerColor,
+                allKeysTaken,
+                switchesOn,
+                doorsForcedOpen,
+                tick: globalTick,
+              });
             }
           }
         }
 
+        // Editor Hover Cursor & Rect/Line Drag Preview
+        if (!isPlayingRef.current) {
+          const drag = dragShapeRef.current;
+          if (drag && drag.active) {
+            ctx.fillStyle = "rgba(56, 189, 248, 0.25)";
+            ctx.strokeStyle = "#38bdf8";
+            ctx.lineWidth = 2;
+            const minR = Math.min(drag.r0, drag.r1);
+            const maxR = Math.max(drag.r0, drag.r1);
+            const minC = Math.min(drag.c0, drag.c1);
+            const maxC = Math.max(drag.c0, drag.c1);
+            if (drag.tool === "rect") {
+              const rx = minC * TILE_SIZE;
+              const ry = minR * TILE_SIZE;
+              const rw = (maxC - minC + 1) * TILE_SIZE;
+              const rh = (maxR - minR + 1) * TILE_SIZE;
+              ctx.fillRect(rx, ry, rw, rh);
+              ctx.strokeRect(rx, ry, rw, rh);
+            } else if (drag.tool === "line") {
+              ctx.beginPath();
+              ctx.moveTo(drag.c0 * TILE_SIZE + 17, drag.r0 * TILE_SIZE + 17);
+              ctx.lineTo(drag.c1 * TILE_SIZE + 17, drag.r1 * TILE_SIZE + 17);
+              ctx.stroke();
+            }
+          } else if (hoverCellRef.current) {
+            const { r, c } = hoverCellRef.current;
+            if (r >= 0 && r < mapRows && c >= 0 && c < mapCols) {
+              ctx.strokeStyle = "rgba(255,255,255,0.45)";
+              ctx.lineWidth = 1.5;
+              const span = paintTool === "thick" ? 2 : 1;
+              ctx.strokeRect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE * span, TILE_SIZE * span);
+            }
+          }
+        }
+
+        // Dynamic Play-Mode Entities
         if (isPlayingRef.current && sim) {
-          ctx.fillStyle = "#6366f1";
           for (const mp of sim.movingPlatforms) {
+            ctx.fillStyle = mp.vertical ? "#818cf8" : "#6366f1";
             ctx.fillRect(mp.x, mp.y, mp.w, mp.h);
           }
 
-          ctx.fillStyle = "#eab308";
           for (const coin of sim.coins) {
             if (!coin.taken) {
+              ctx.fillStyle = "#eab308";
               ctx.beginPath();
               ctx.arc(coin.x + 8, coin.y + 8, 7, 0, Math.PI * 2);
               ctx.fill();
             }
           }
 
-          ctx.fillStyle = "#f59e0b";
           for (const k of sim.keysList) {
             if (!k.taken) {
+              ctx.fillStyle = "#f59e0b";
               ctx.fillRect(k.x, k.y, k.w, k.h);
             }
           }
 
-          ctx.fillStyle = "#f43f5e";
           for (const cp of sim.checkpoints) {
             if (!cp.used) {
+              ctx.fillStyle = "#f43f5e";
               ctx.beginPath();
               ctx.arc(cp.x + 10, cp.y + 10, 8, 0, Math.PI * 2);
               ctx.fill();
             }
           }
 
-          for (const en of sim.enemies) {
-            if (en.alive) {
-              ctx.fillStyle = en.isBoss ? "#ec4899" : "#a855f7";
-              ctx.fillRect(en.x, en.y, en.w, en.h);
-              if (en.isBoss && en.maxHp > 1) {
-                ctx.fillStyle = "#ef4444";
-                ctx.fillRect(en.x, en.y - 6, (en.w * en.hp) / en.maxHp, 4);
-              }
+          for (const pu of sim.powerups) {
+            if (!pu.taken) {
+              ctx.fillStyle = "#38bdf8";
+              ctx.beginPath();
+              ctx.arc(pu.x + 10, pu.y + 10, 9, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.strokeStyle = "#e0f2fe";
+              ctx.lineWidth = 2;
+              ctx.stroke();
             }
           }
 
-          ctx.fillStyle = "#38bdf8";
+          for (const tnt of sim.tntBarrels) {
+            if (tnt.intact) {
+              ctx.fillStyle = "#ea580c";
+              ctx.fillRect(tnt.x, tnt.y, tnt.w, tnt.h);
+              ctx.fillStyle = "#fef08a";
+              ctx.fillRect(tnt.x, tnt.y + 10, tnt.w, 8);
+            }
+          }
+
+          for (const sp of sim.spawners) {
+            if (sp.alive) {
+              ctx.strokeStyle = "#a855f7";
+              ctx.lineWidth = 3;
+              ctx.beginPath();
+              ctx.arc(sp.x + 14, sp.y + 14, 12 + Math.sin(sim.tick * 0.15) * 2, 0, Math.PI * 2);
+              ctx.stroke();
+              ctx.fillStyle = "#7c3aed";
+              ctx.beginPath();
+              ctx.arc(sp.x + 14, sp.y + 14, 6, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+
+          for (const en of sim.enemies) {
+            if (!en.alive) continue;
+            if (en.kind === 24) {
+              ctx.fillStyle = "#475569";
+              ctx.fillRect(en.x + 2, en.y + 10, 20, 14);
+              ctx.fillStyle = "#f43f5e";
+              ctx.beginPath();
+              ctx.arc(en.x + 12, en.y + 11, 9, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.strokeStyle = "#fda4af";
+              ctx.lineWidth = 4;
+              ctx.beginPath();
+              ctx.moveTo(en.x + 12, en.y + 11);
+              ctx.lineTo(
+                en.x + 12 + Math.cos(en.aimAngle) * 15,
+                en.y + 11 + Math.sin(en.aimAngle) * 15
+              );
+              ctx.stroke();
+            } else if (en.kind === 23) {
+              ctx.fillStyle = "#e879f9";
+              ctx.beginPath();
+              ctx.arc(en.x + 12, en.y + 12, 11, 0, Math.PI * 2);
+              ctx.fill();
+            } else {
+              ctx.fillStyle = en.isBoss ? "#ec4899" : "#a855f7";
+              ctx.fillRect(en.x, en.y, en.w, en.h);
+            }
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(en.x + 5, en.y + 6, 4, 4);
+            ctx.fillRect(en.x + en.w - 9, en.y + 6, 4, 4);
+            if (en.maxHp > 1) {
+              ctx.fillStyle = "rgba(0,0,0,0.6)";
+              ctx.fillRect(en.x, en.y - 7, en.w, 4);
+              ctx.fillStyle = "#ef4444";
+              ctx.fillRect(en.x, en.y - 7, (en.w * en.hp) / en.maxHp, 4);
+            }
+          }
+
+          // Player Projectiles
           for (const b of sim.bullets) {
-            if (b.x > 0 && b.x < COLS * TILE_SIZE) {
+            if (b.kind === "sword") {
+              ctx.strokeStyle = "#38bdf8";
+              ctx.lineWidth = 4;
+              ctx.beginPath();
+              ctx.arc(b.x + 18, b.y + 18, 18, 0, Math.PI * 2);
+              ctx.stroke();
+            } else if (b.kind === "grenade") {
+              ctx.fillStyle = "#fb923c";
+              ctx.beginPath();
+              ctx.arc(b.x + 6, b.y + 6, 6, 0, Math.PI * 2);
+              ctx.fill();
+            } else if (b.kind === "boomerang") {
+              ctx.strokeStyle = "#facc15";
+              ctx.lineWidth = 3;
+              ctx.strokeRect(b.x + 2, b.y + 2, 10, 10);
+            } else {
+              ctx.fillStyle = b.kind === "laser" ? "#f472b6" : "#38bdf8";
               ctx.fillRect(b.x, b.y, b.w, b.h);
             }
           }
 
+          // Enemy Turret Bolts
+          ctx.fillStyle = "#fb7185";
+          for (const eb of sim.enemyBullets) {
+            ctx.beginPath();
+            ctx.arc(eb.x + 4, eb.y + 4, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Explosion Shockwaves
+          for (let i = sim.shockwaves.length - 1; i >= 0; i--) {
+            const sw = sim.shockwaves[i];
+            if (!sw) continue;
+            sw.radius += 7;
+            ctx.strokeStyle = sw.color;
+            ctx.lineWidth = 3;
+            ctx.globalAlpha = Math.max(0, 1 - sw.radius / sw.maxRadius);
+            ctx.beginPath();
+            ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+            if (sw.radius >= sw.maxRadius) sim.shockwaves.splice(i, 1);
+          }
+
+          // Particles
           for (let i = sim.particles.length - 1; i >= 0; i--) {
             const pt = sim.particles[i];
+            if (!pt) continue;
             pt.x += pt.vx;
             pt.y += pt.vy;
             pt.life--;
             ctx.fillStyle = pt.color;
-            ctx.fillRect(pt.x, pt.y, 4, 4);
+            ctx.fillRect(pt.x, pt.y, pt.size || 4, pt.size || 4);
             if (pt.life <= 0) sim.particles.splice(i, 1);
           }
 
-          if (sim.player.invulnFrames % 4 < 2) {
+          // Hero Dash Afterimage Trail & Hero Body
+          for (let i = sim.player.trail.length - 1; i >= 0; i--) {
+            const tr = sim.player.trail[i];
+            if (!tr) continue;
+            tr.alpha -= 0.08;
+            if (tr.alpha <= 0) {
+              sim.player.trail.splice(i, 1);
+              continue;
+            }
+            ctx.globalAlpha = tr.alpha;
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillRect(tr.x, tr.y, sim.player.w, sim.player.h);
+          }
+          ctx.globalAlpha = 1;
+
+          if (sim.player.invulnFrames % 4 < 3) {
             ctx.fillStyle = cfg.playerColor;
             ctx.fillRect(sim.player.x, sim.player.y, sim.player.w, sim.player.h);
+            ctx.fillStyle = "#fff";
+            const eyeX = sim.player.facing >= 0 ? sim.player.x + 14 : sim.player.x + 3;
+            const eyeY = sim.gravDir > 0 ? sim.player.y + 5 : sim.player.y + 13;
+            ctx.fillRect(eyeX, eyeY, 5, 5);
+          }
+
+          // Shield Ring when invincible > 70 frames
+          if (sim.player.invulnFrames > 70) {
+            ctx.strokeStyle = "#38bdf8";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(sim.player.x + 11, sim.player.y + 11, 17, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+
+          // Jetpack Fuel Bar above Hero
+          if (cfg.enableJetpack && sim.player.jetpackFuel < 99) {
+            ctx.fillStyle = "rgba(0,0,0,0.65)";
+            ctx.fillRect(sim.player.x - 2, sim.player.y - 9, 26, 4);
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillRect(sim.player.x - 2, sim.player.y - 9, (26 * sim.player.jetpackFuel) / 100, 4);
+          }
+
+          // NPC / Lore Signpost Dialogue Bubble when Hero is near
+          const signMsg = (activeLvl?.signText || "").trim();
+          if (signMsg) {
+            for (const sg of sim.signs) {
+              if (Math.hypot(sim.player.x + 11 - sg.x, sim.player.y + 11 - sg.y) < 82) {
+                ctx.font = "11.5px Lexend, sans-serif";
+                const textW = Math.min(270, ctx.measureText(signMsg).width + 20);
+                const bx = Math.max(8, Math.min(worldW - textW - 8, sg.x - textW / 2));
+                const by = Math.max(8, sg.y - 34);
+                ctx.fillStyle = "rgba(9, 13, 22, 0.92)";
+                ctx.fillRect(bx, by, textW, 24);
+                ctx.strokeStyle = "#fde047";
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(bx, by, textW, 24);
+                ctx.fillStyle = "#fef9c3";
+                ctx.textAlign = "center";
+                ctx.fillText(signMsg.slice(0, 48), bx + textW / 2, by + 16);
+              }
+            }
+          }
+
+          // Floating Score / Action Popups
+          ctx.font = "bold 11.5px Lexend, sans-serif";
+          ctx.textAlign = "center";
+          for (let i = sim.popups.length - 1; i >= 0; i--) {
+            const pop = sim.popups[i];
+            if (!pop) continue;
+            pop.y -= 0.7;
+            pop.life--;
+            ctx.globalAlpha = Math.min(1, pop.life / 20);
+            ctx.fillStyle = pop.color;
+            ctx.fillText(pop.text, pop.x, pop.y);
+            if (pop.life <= 0) sim.popups.splice(i, 1);
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        ctx.restore();
+
+        // Foreground Weather Overlay (Rain, Snow, Embers, Matrix)
+        if (isPlayingRef.current && sim && activeWeather !== "none" && activeWeather !== "starfield") {
+          ctx.font = "11px monospace";
+          for (const d of sim.weatherDrops) {
+            d.x = ((d.x + d.vx) % CANVAS_W + CANVAS_W) % CANVAS_W;
+            d.y = ((d.y + d.vy) % CANVAS_H + CANVAS_H) % CANVAS_H;
+            if (activeWeather === "rain") {
+              ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(d.x, d.y);
+              ctx.lineTo(d.x - 3, d.y + 9);
+              ctx.stroke();
+            } else if (activeWeather === "snow") {
+              ctx.fillStyle = "rgba(241, 245, 249, 0.75)";
+              ctx.beginPath();
+              ctx.arc(d.x, d.y, d.size, 0, Math.PI * 2);
+              ctx.fill();
+            } else if (activeWeather === "embers") {
+              ctx.fillStyle = "rgba(251, 146, 60, 0.75)";
+              ctx.fillRect(d.x, d.y, 3, 3);
+            } else if (activeWeather === "matrix") {
+              ctx.fillStyle = "rgba(74, 222, 128, 0.55)";
+              ctx.fillText(d.char || "1", d.x, d.y);
+            }
+          }
+        }
+
+        // Dynamic Flashlight / Darkness Atmosphere Overlay
+        if (isPlayingRef.current && sim && activeDarkness) {
+          const heroScreenX = sim.player.x + 11 - sim.camX;
+          const heroScreenY = sim.player.y + 11 - sim.camY;
+          const radGrad = ctx.createRadialGradient(
+            heroScreenX,
+            heroScreenY,
+            34,
+            heroScreenX,
+            heroScreenY,
+            195
+          );
+          radGrad.addColorStop(0, "rgba(2, 6, 16, 0)");
+          radGrad.addColorStop(0.65, "rgba(2, 6, 16, 0.72)");
+          radGrad.addColorStop(1, "rgba(2, 6, 16, 0.94)");
+          ctx.fillStyle = radGrad;
+          ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        }
+
+        // Interactive Minimap Overlay when World > 20x12
+        if (mapCols > VIEWPORT_COLS || mapRows > VIEWPORT_ROWS) {
+          const mmScale = Math.min(3.4, 136 / Math.max(mapCols, mapRows));
+          const mmW = mapCols * mmScale;
+          const mmH = mapRows * mmScale;
+          const mmX = CANVAS_W - mmW - 10;
+          const mmY = 10;
+          ctx.fillStyle = "rgba(9, 13, 22, 0.82)";
+          ctx.fillRect(mmX - 2, mmY - 2, mmW + 4, mmH + 4);
+          ctx.strokeStyle = "rgba(255,255,255,0.2)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(mmX - 2, mmY - 2, mmW + 4, mmH + 4);
+
+          for (let r = 0; r < mapRows; r++) {
+            for (let c = 0; c < mapCols; c++) {
+              const id = activeGrid[r]?.[c] || 0;
+              if (id === 1 || id === 14 || id === 15) {
+                ctx.fillStyle = lvlWall;
+                ctx.fillRect(mmX + c * mmScale, mmY + r * mmScale, mmScale, mmScale);
+              } else if (id === 7) {
+                ctx.fillStyle = "#10b981";
+                ctx.fillRect(mmX + c * mmScale, mmY + r * mmScale, mmScale + 1, mmScale + 1);
+              } else if (id === 4) {
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(mmX + c * mmScale, mmY + r * mmScale, mmScale, mmScale);
+              }
+            }
+          }
+          // Viewport frame on minimap
+          ctx.strokeStyle = "#38bdf8";
+          ctx.lineWidth = 1.2;
+          ctx.strokeRect(
+            mmX + (camX / TILE_SIZE) * mmScale,
+            mmY + (camY / TILE_SIZE) * mmScale,
+            VIEWPORT_COLS * mmScale,
+            VIEWPORT_ROWS * mmScale
+          );
+          if (isPlayingRef.current && sim) {
+            ctx.fillStyle = cfg.playerColor;
+            ctx.fillRect(
+              mmX + (sim.player.x / TILE_SIZE) * mmScale - 1.5,
+              mmY + (sim.player.y / TILE_SIZE) * mmScale - 1.5,
+              3.5,
+              3.5
+            );
           }
         }
       }
 
-      // Level Banner & Win/Loss Overlay
+      // Live HUD Banner, Survive Timer & Win/Loss Overlay
       if (isPlayingRef.current && sim) {
+        if (activeWinCond === "survive_timer" && sim.status === "playing") {
+          ctx.fillStyle = "rgba(9, 13, 22, 0.84)";
+          ctx.fillRect(12, 10, 128, 26);
+          ctx.fillStyle = "#facc15";
+          ctx.font = "bold 12px Lexend, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText(`survive: ${Math.max(0, Math.ceil(sim.timerFrames / 60))}s`, 22, 27);
+        }
+
         if (sim.levelBannerFrames > 0 && sim.status === "playing") {
-          ctx.fillStyle = "rgba(9, 13, 22, 0.78)";
-          ctx.fillRect(canvas.width / 2 - 140, 14, 280, 32);
+          ctx.fillStyle = "rgba(9, 13, 22, 0.84)";
+          ctx.fillRect(CANVAS_W / 2 - 185, 12, 370, 30);
+          ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(CANVAS_W / 2 - 185, 12, 370, 30);
           ctx.fillStyle = "#38bdf8";
-          ctx.font = "bold 13px Lexend, sans-serif";
+          ctx.font = "bold 12.5px Lexend, sans-serif";
           ctx.textAlign = "center";
-          ctx.fillText(
-            `${activeLvl?.name || `level ${sim.levelIndex + 1}`} (${sim.levelIndex + 1}/${
-              cfg.levels.length
-            })`,
-            canvas.width / 2,
-            34
-          );
+          ctx.fillText(sim.bannerText.slice(0, 56), CANVAS_W / 2, 31);
         }
 
         if (sim.status !== "playing") {
-          ctx.fillStyle = "rgba(0, 0, 0, 0.72)";
+          ctx.fillStyle = "rgba(0, 0, 0, 0.74)";
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.fillStyle = sim.status === "won" ? "#4ade80" : "#f87171";
-          ctx.font = "bold 25px Lexend, sans-serif";
+          ctx.font = "bold 24px Lexend, sans-serif";
           ctx.textAlign = "center";
           ctx.fillText(
             sim.status === "won"
               ? `ALL ${cfg.levels.length} LEVELS COMPLETED! (+25 COINS)`
-              : "GAME OVER — OUT OF HP",
+              : "GAME OVER — OUT OF HEARTS",
             canvas.width / 2,
             canvas.height / 2 - 10
           );
           ctx.fillStyle = "#e2e8f0";
-          ctx.font = "14px Lexend, sans-serif";
+          ctx.font = "13.5px Lexend, sans-serif";
           ctx.fillText(
             `final score: ${sim.score} · synced to cloudsync · press R to play again`,
             canvas.width / 2,
@@ -2137,7 +3128,7 @@ export default function GameStudioPage() {
 
     rafId = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(rafId);
-  }, [visible, subTab, playingCustomHtmlGame, initSimulation, syncProgressToCloud]);
+  }, [visible, subTab, playingCustomHtmlGame, paintTool, initSimulation, syncProgressToCloud]);
 
   const updateCurrentLevelGrid = (updater: (prevGrid: number[][]) => number[][]) => {
     setLevels((prevLevels) =>
@@ -2147,27 +3138,192 @@ export default function GameStudioPage() {
     );
   };
 
-  const handleCanvasPaint = (e: MouseEvent) => {
-    if (isPlaying || !canvasRef.current) return;
+  const getCanvasCellFromEvent = (e: MouseEvent): { r: number; c: number; canvasX: number; canvasY: number } | null => {
+    if (!canvasRef.current) return null;
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
-    const col = Math.floor(((e.clientX - rect.left) * scaleX) / TILE_SIZE);
-    const row = Math.floor(((e.clientY - rect.top) * scaleY) / TILE_SIZE);
-    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+    const canvasX = (e.clientX - rect.left) * scaleX;
+    const canvasY = (e.clientY - rect.top) * scaleY;
+    const c = Math.floor((canvasX + editorCamRef.current.x) / TILE_SIZE);
+    const r = Math.floor((canvasY + editorCamRef.current.y) / TILE_SIZE);
+    return { r, c, canvasX, canvasY };
+  };
 
+  const applySingleOrThickPaint = (row: number, col: number, brushId: number) => {
     updateCurrentLevelGrid((prev) => {
+      const { rows, cols } = getGridDimensions(prev);
+      if (row < 0 || row >= rows || col < 0 || col >= cols) return prev;
       const copy = prev.map((r) => [...r]);
-      if (selectedBrush === 2) {
-        for (let r = 0; r < ROWS; r++) {
-          for (let c = 0; c < COLS; c++) {
-            if (copy[r][c] === 2) copy[r][c] = 0;
+      if (brushId === 2) {
+        for (let r = 0; r < rows; r++) {
+          const rowArr = copy[r];
+          if (!rowArr) continue;
+          for (let c = 0; c < cols; c++) {
+            if (rowArr[c] === 2) rowArr[c] = 0;
+          }
+        }
+        const targetRow = copy[row];
+        if (targetRow) targetRow[col] = 2;
+        return copy;
+      }
+      const span = paintTool === "thick" ? 2 : 1;
+      for (let dr = 0; dr < span; dr++) {
+        const targetRow = copy[row + dr];
+        if (!targetRow) continue;
+        for (let dc = 0; dc < span; dc++) {
+          if (row + dr < rows && col + dc < cols) {
+            targetRow[col + dc] = brushId;
           }
         }
       }
-      copy[row][col] = selectedBrush;
       return copy;
     });
+  };
+
+  const handleCanvasMouseDown = (e: MouseEvent) => {
+    const pos = getCanvasCellFromEvent(e);
+    if (!pos) return;
+    mouseCanvasPosRef.current = { x: pos.canvasX, y: pos.canvasY };
+
+    if (isPlaying) {
+      if (e.button === 0) {
+        mouseFireRef.current = true;
+        mouseHeldRef.current = true;
+        if (
+          (mode === "fps3d" || render3DInTest) &&
+          canvasRef.current &&
+          document.pointerLockElement !== canvasRef.current
+        ) {
+          canvasRef.current.requestPointerLock?.();
+        }
+      }
+      return;
+    }
+
+    // Check if user clicked inside the top-right minimap to jump camera!
+    const { rows, cols } = getGridDimensions(currentLevel?.grid);
+    if (cols > VIEWPORT_COLS || rows > VIEWPORT_ROWS) {
+      const mmScale = Math.min(3.4, 136 / Math.max(cols, rows));
+      const mmW = cols * mmScale;
+      const mmH = rows * mmScale;
+      const mmX = CANVAS_W - mmW - 10;
+      const mmY = 10;
+      if (
+        pos.canvasX >= mmX - 4 &&
+        pos.canvasX <= mmX + mmW + 4 &&
+        pos.canvasY >= mmY - 4 &&
+        pos.canvasY <= mmY + mmH + 4
+      ) {
+        const targetCol = (pos.canvasX - mmX) / mmScale;
+        const targetRow = (pos.canvasY - mmY) / mmScale;
+        editorCamRef.current.x = Math.max(
+          0,
+          Math.min(cols * TILE_SIZE - CANVAS_W, targetCol * TILE_SIZE - CANVAS_W / 2)
+        );
+        editorCamRef.current.y = Math.max(
+          0,
+          Math.min(rows * TILE_SIZE - CANVAS_H, targetRow * TILE_SIZE - CANVAS_H / 2)
+        );
+        return;
+      }
+    }
+
+    // Middle-click or Space+Click pans editor camera
+    if (e.button === 1 || keysRef.current["Space"]) {
+      e.preventDefault();
+      isPanningEditorRef.current = { active: true, lastX: e.clientX, lastY: e.clientY };
+      return;
+    }
+
+    const effectiveBrush = e.button === 2 ? 0 : selectedBrush;
+    paintButtonRef.current = e.button;
+
+    if (pos.r < 0 || pos.r >= rows || pos.c < 0 || pos.c >= cols || !currentLevel) return;
+    pushUndoSnapshot(currentLevel.grid);
+
+    if (paintTool === "bucket" && e.button !== 2) {
+      updateCurrentLevelGrid((prev) => applyFloodFill(prev, pos.r, pos.c, effectiveBrush));
+      return;
+    }
+
+    if ((paintTool === "rect" || paintTool === "line") && e.button !== 2) {
+      dragShapeRef.current = {
+        active: true,
+        tool: paintTool,
+        r0: pos.r,
+        c0: pos.c,
+        r1: pos.r,
+        c1: pos.c,
+        brushId: effectiveBrush,
+      };
+      return;
+    }
+
+    isPaintingRef.current = true;
+    applySingleOrThickPaint(pos.r, pos.c, effectiveBrush);
+  };
+
+  const handleCanvasMouseMove = (e: MouseEvent) => {
+    const pos = getCanvasCellFromEvent(e);
+    if (pos) {
+      mouseCanvasPosRef.current = { x: pos.canvasX, y: pos.canvasY };
+      hoverCellRef.current = { r: pos.r, c: pos.c };
+    }
+
+    if (isPlaying) {
+      if (mode === "fps3d" || render3DInTest) {
+        if (document.pointerLockElement === canvasRef.current || e.buttons === 1) {
+          mouseLookDeltaRef.current += e.movementX || 0;
+        }
+      }
+      return;
+    }
+
+    if (isPanningEditorRef.current.active) {
+      const dx = e.clientX - isPanningEditorRef.current.lastX;
+      const dy = e.clientY - isPanningEditorRef.current.lastY;
+      isPanningEditorRef.current.lastX = e.clientX;
+      isPanningEditorRef.current.lastY = e.clientY;
+      const { rows, cols } = getGridDimensions(currentLevel?.grid);
+      editorCamRef.current.x = Math.max(
+        0,
+        Math.min(Math.max(0, cols * TILE_SIZE - CANVAS_W), editorCamRef.current.x - dx * 1.4)
+      );
+      editorCamRef.current.y = Math.max(
+        0,
+        Math.min(Math.max(0, rows * TILE_SIZE - CANVAS_H), editorCamRef.current.y - dy * 1.4)
+      );
+      return;
+    }
+
+    if (dragShapeRef.current?.active && pos) {
+      dragShapeRef.current.r1 = pos.r;
+      dragShapeRef.current.c1 = pos.c;
+      return;
+    }
+
+    if (isPaintingRef.current && pos) {
+      const effectiveBrush = paintButtonRef.current === 2 ? 0 : selectedBrush;
+      applySingleOrThickPaint(pos.r, pos.c, effectiveBrush);
+    }
+  };
+
+  const handleCanvasMouseUp = () => {
+    mouseFireRef.current = false;
+    mouseHeldRef.current = false;
+    isPaintingRef.current = false;
+    isPanningEditorRef.current.active = false;
+
+    if (dragShapeRef.current?.active) {
+      const drag = dragShapeRef.current;
+      dragShapeRef.current = null;
+      updateCurrentLevelGrid((prev) =>
+        drag.tool === "rect"
+          ? applyRectPaint(prev, drag.r0, drag.c0, drag.r1, drag.c1, drag.brushId)
+          : applyLinePaint(prev, drag.r0, drag.c0, drag.r1, drag.c1, drag.brushId)
+      );
+    }
   };
 
   const applyTemplate = (preset: GameMode) => {
@@ -2175,56 +3331,121 @@ export default function GameStudioPage() {
     setGameStatus("editing");
     setMode(preset);
     setRender3DInTest(preset === "fps3d");
-    setLevels(makeDefaultLevels(preset));
+    setLevels(makeDefaultStudioLevels(preset));
     setActiveLevelIdx(0);
-    if (preset === "platformer") {
+    editorCamRef.current = { x: 0, y: 0 };
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    setUndoCount(0);
+    setRedoCount(0);
+
+    if (preset === "platformer" || preset === "metroidvania") {
       setGravity(0.55);
       setJumpForce(11.5);
-      setMoveSpeed(4.2);
+      setMoveSpeed(4.4);
+      setEnableWallJump(true);
+      setEnableJetpack(preset === "metroidvania");
+      setWinCondition("portal");
     } else if (preset === "fps3d" || preset === "topdown") {
       setGravity(0);
       setJumpForce(0);
-      setMoveSpeed(3.8);
+      setMoveSpeed(4.0);
+      setWinCondition("portal");
     } else if (preset === "shooter") {
       setGravity(0);
       setJumpForce(0);
+      setMoveSpeed(4.6);
+      setWeaponType("shotgun");
+      setMouseAim(true);
+      setWinCondition("portal");
+    } else if (preset === "survivor") {
+      setGravity(0);
+      setJumpForce(0);
       setMoveSpeed(4.5);
+      setWeaponType("blaster");
+      setAutoFire(true);
+      setWinCondition("survive_timer");
+      setTimeLimitSec(45);
+    } else if (preset === "gravrunner") {
+      setGravity(0.6);
+      setJumpForce(10.5);
+      setMoveSpeed(4.8);
+      setWinCondition("portal");
     } else if (preset === "flappy") {
       setGravity(0.42);
       setJumpForce(7.8);
-      setMoveSpeed(2.6);
+      setMoveSpeed(2.8);
+      setWinCondition("portal");
     }
+  };
+
+  const handleChangeWorldSize = (sizeKey: WorldSizePreset) => {
+    const target = WORLD_SIZE_PRESETS[sizeKey];
+    if (!target || !currentLevel) return;
+    setIsPlaying(false);
+    pushUndoSnapshot(currentLevel.grid);
+    const anchorBottom = mode === "platformer" || mode === "metroidvania";
+    setLevels((prev) =>
+      prev.map((lvl, idx) =>
+        idx === activeLevelIdx
+          ? {
+              ...lvl,
+              worldSize: sizeKey,
+              grid: resizeLevelGrid(lvl.grid, target.rows, target.cols, anchorBottom),
+            }
+          : lvl
+      )
+    );
+    editorCamRef.current = { x: 0, y: 0 };
+    notifyToast(`resized level ${activeLevelIdx + 1} to ${target.label}`, "info");
+  };
+
+  const handleProceduralGenerateStage = () => {
+    if (!currentLevel) return;
+    setIsPlaying(false);
+    pushUndoSnapshot(currentLevel.grid);
+    const { rows, cols } = getGridDimensions(currentLevel.grid);
+    const generated = generateProceduralLevel(mode, rows, cols, Math.floor(Math.random() * 1000));
+    updateCurrentLevelGrid(() => generated);
+    notifyToast(`generated new ${cols}×${rows} ${mode} stage!`, "success");
   };
 
   const handleAddLevel = () => {
     setIsPlaying(false);
     setLevels((prev) => {
       const nextNum = prev.length + 1;
+      const curSize = inferWorldSizePreset(prev[activeLevelIdx]?.grid);
+      const dims = WORLD_SIZE_PRESETS[curSize];
       const newLvl: StudioGameLevel = {
         id: `lvl_${Date.now()}`,
-        name: `level ${nextNum}: stage ${nextNum}`,
-        grid: makePresetGrid(mode, prev.length),
+        name: `level ${nextNum}: sector ${nextNum}`,
+        worldSize: curSize,
+        grid: generateProceduralLevel(mode, dims.rows, dims.cols, nextNum * 37),
         bgColor,
         wallColor,
+        weather,
+        winCondition,
+        timeLimitSec,
       };
       const updated = [...prev, newLvl];
       setActiveLevelIdx(updated.length - 1);
       return updated;
     });
-    notifyToast("added new level to your game!", "success");
+    editorCamRef.current = { x: 0, y: 0 };
+    notifyToast("added new generated level to your game!", "success");
   };
 
   const handleDuplicateLevel = () => {
     setIsPlaying(false);
     setLevels((prev) => {
       const src = prev[activeLevelIdx] || prev[0];
+      if (!src) return prev;
       const nextNum = prev.length + 1;
       const copy: StudioGameLevel = {
+        ...src,
         id: `lvl_${Date.now()}`,
         name: `level ${nextNum} (copy)`,
         grid: src.grid.map((r) => [...r]),
-        bgColor: src.bgColor || bgColor,
-        wallColor: src.wallColor || wallColor,
       };
       const updated = [...prev, copy];
       setActiveLevelIdx(updated.length - 1);
@@ -2257,8 +3478,58 @@ export default function GameStudioPage() {
     }
   };
 
-  const getActiveAuthor = (): string => {
-    return getCloudSyncState().username;
+  const getActiveAuthor = (): string => getCloudSyncState().username;
+
+  const buildCurrentProjectSnapshot = (): StudioGameProject => ({
+    id: activeGameId,
+    title: title || "preview game",
+    description,
+    author: getActiveAuthor(),
+    studioName: userStudio.name,
+    studioColor: userStudio.color,
+    mode,
+    grid: (levels[0]?.grid || createSizedEmptyGrid()).map((r) => [...r]),
+    levels: levels.map((l) => ({ ...l, grid: l.grid.map((r) => [...r]) })),
+    gravity,
+    jumpForce,
+    moveSpeed,
+    maxHp,
+    enableDoubleJump,
+    enableWallJump,
+    enableDash,
+    enableJetpack,
+    enableBlaster: weaponType !== "none",
+    weaponType,
+    mouseAim,
+    autoFire,
+    winCondition,
+    timeLimitSec,
+    weather,
+    darknessMode,
+    sfxEnabled,
+    screenShake,
+    cameraZoom,
+    rules,
+    playerColor,
+    bgColor,
+    wallColor,
+    customScript,
+    likes: 0,
+    plays: 0,
+    createdAt: new Date().toISOString(),
+  });
+
+  const handleExportStandaloneHtmlFile = () => {
+    const snap = buildCurrentProjectSnapshot();
+    const html = buildStandaloneGameHtml(snap);
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(snap.title || "studio_game").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.html`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notifyToast("exported standalone playable .html game!", "success");
   };
 
   const handleSaveStudioProfile = async (e: Event) => {
@@ -2302,7 +3573,6 @@ export default function GameStudioPage() {
     setUserStudio(updated);
   };
 
-  // Handle uploading a custom index.html file for 1,000 Cookie Coins
   const handleHtmlFileSelect = (e: Event) => {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -2326,7 +3596,6 @@ export default function GameStudioPage() {
     reader.readAsText(file);
   };
 
-  // Manage Blob URL for Live HTML File Upload Preview (debounced so typing in textarea is smooth & zero memory leaks)
   useEffect(() => {
     if (!visible || subTab !== "htmlupload") return;
     const timer = window.setTimeout(() => {
@@ -2358,7 +3627,6 @@ export default function GameStudioPage() {
     return () => window.clearTimeout(timer);
   }, [visible, subTab, customHtmlCode, htmlTitle, htmlDesc, previewRefreshTick]);
 
-  // Manage Blob URL for playing a published custom index.html game inside Studio
   useEffect(() => {
     if (!playingCustomHtmlGame || !playingCustomHtmlGame.customHtmlContent) {
       setPlayingCustomBlobUrl((prev) => {
@@ -2386,7 +3654,8 @@ export default function GameStudioPage() {
     async (gamePayload: StudioGameProject): Promise<StudioGameProject> => {
       let authToken = "";
       try {
-        authToken = localStorage.getItem("auth_token") || "";
+        authToken =
+          localStorage.getItem("cloudsync_token") || localStorage.getItem("auth_token") || "";
       } catch {}
       const res = await fetch("/api/studio/games", {
         method: "POST",
@@ -2472,7 +3741,7 @@ export default function GameStudioPage() {
         studioName: userStudio.name,
         studioColor: userStudio.color,
         mode: "custom_html",
-        grid: createEmptyGrid(),
+        grid: createSizedEmptyGrid(),
         levels: [],
         gravity: 0.5,
         jumpForce: 10,
@@ -2539,35 +3808,16 @@ export default function GameStudioPage() {
         activeGameId !== "editor_preview" &&
         !activeGameId.startsWith("htmlgame_");
 
+      const snap = buildCurrentProjectSnapshot();
       const newGame: StudioGameProject = {
+        ...snap,
         id: canUpdateExisting
           ? activeGameId
           : `game_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         title: cleanTitle,
         description: description.trim() || `built by ${userStudio.name}`,
-        author: getActiveAuthor(),
-        studioName: userStudio.name,
-        studioColor: userStudio.color,
-        mode,
-        grid: levels[0].grid.map((r) => [...r]),
-        levels: levels.map((l) => ({
-          ...l,
-          grid: l.grid.map((r) => [...r]),
-        })),
-        gravity,
-        jumpForce,
-        moveSpeed,
-        maxHp,
-        enableDoubleJump,
-        enableDash,
-        enableBlaster,
-        playerColor,
-        bgColor,
-        wallColor,
-        customScript,
         likes: 1,
         plays: 1,
-        createdAt: new Date().toISOString(),
       };
 
       const savedGame = await publishStudioGameToServer(newGame);
@@ -2626,7 +3876,6 @@ export default function GameStudioPage() {
       body: JSON.stringify({ field: "plays" }),
     }).catch(() => {});
 
-    // If this is a custom uploaded index.html game, serve that directly instead of the tile engine!
     if (g.isCustomHtml && g.customHtmlContent) {
       if (autoPlay) {
         setPlayingCustomHtmlGame(g);
@@ -2652,11 +3901,16 @@ export default function GameStudioPage() {
     setRender3DInTest(g.mode === "fps3d");
     const loadedLevels =
       Array.isArray(g.levels) && g.levels.length > 0
-        ? g.levels.map((l) => ({ ...l, grid: l.grid.map((r) => [...r]) }))
+        ? g.levels.map((l) => ({
+            ...l,
+            worldSize: l.worldSize || inferWorldSizePreset(l.grid),
+            grid: l.grid.map((r) => [...r]),
+          }))
         : [
             {
               id: "lvl_1",
               name: "level 1",
+              worldSize: inferWorldSizePreset(g.grid),
               grid: g.grid.map((r) => [...r]),
               bgColor: g.bgColor,
               wallColor: g.wallColor,
@@ -2664,13 +3918,31 @@ export default function GameStudioPage() {
           ];
     setLevels(loadedLevels);
     setActiveLevelIdx(0);
+    editorCamRef.current = { x: 0, y: 0 };
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    setUndoCount(0);
+    setRedoCount(0);
+
     setGravity(g.gravity);
     setJumpForce(g.jumpForce);
     setMoveSpeed(g.moveSpeed);
     setMaxHp(g.maxHp || 3);
     setEnableDoubleJump(g.enableDoubleJump ?? true);
+    setEnableWallJump(g.enableWallJump ?? false);
     setEnableDash(g.enableDash ?? true);
-    setEnableBlaster(g.enableBlaster ?? true);
+    setEnableJetpack(g.enableJetpack ?? false);
+    setWeaponType(g.weaponType || (g.enableBlaster === false ? "none" : "blaster"));
+    setMouseAim(g.mouseAim ?? false);
+    setAutoFire(g.autoFire ?? false);
+    setWinCondition(g.winCondition || "portal");
+    setTimeLimitSec(g.timeLimitSec || 45);
+    setWeather(g.weather || "none");
+    setDarknessMode(Boolean(g.darknessMode));
+    setSfxEnabled(g.sfxEnabled ?? true);
+    setScreenShake(g.screenShake ?? true);
+    setCameraZoom(g.cameraZoom || 1);
+    setRules(Array.isArray(g.rules) ? g.rules : []);
     setPlayerColor(g.playerColor);
     setBgColor(g.bgColor);
     setWallColor(g.wallColor);
@@ -2708,7 +3980,8 @@ export default function GameStudioPage() {
     try {
       let token = "";
       try {
-        token = localStorage.getItem("auth_token") || "";
+        token =
+          localStorage.getItem("cloudsync_token") || localStorage.getItem("auth_token") || "";
       } catch {}
       const res = await fetch(`/api/studio/games/${encodeURIComponent(g.id)}/stat`, {
         method: "POST",
@@ -2769,9 +4042,7 @@ export default function GameStudioPage() {
   };
 
   const filteredCommunityGames = useMemo(() => {
-    const q = (chromebookMode ? debouncedSearchQuery : searchQuery)
-      .toLowerCase()
-      .trim();
+    const q = (chromebookMode ? debouncedSearchQuery : searchQuery).toLowerCase().trim();
     return communityGames.filter((g) => {
       if (modeFilter !== "all" && g.mode !== modeFilter) return false;
       if (!q) return true;
@@ -2794,9 +4065,32 @@ export default function GameStudioPage() {
     [communityGames, userStudio.name]
   );
 
+  const visibleBrushes = useMemo(
+    () =>
+      brushCategory === "all"
+        ? STUDIO_BRUSHES
+        : STUDIO_BRUSHES.filter((b) => b.category === brushCategory),
+    [brushCategory]
+  );
+
+  const activeBrushMeta = useMemo(
+    () =>
+      STUDIO_BRUSHES.find((b) => b.id === selectedBrush) ||
+      STUDIO_BRUSHES[0] || {
+        id: 1,
+        name: "solid wall",
+        color: "#3b82f6",
+        icon: "fa-square",
+        category: "terrain" as const,
+        hint: "indestructible wall block",
+      },
+    [selectedBrush]
+  );
+
   if (!visible) return null;
 
   const cloudSyncInfo = getCloudSyncState();
+  const activeWorldSizeKey = currentLevel?.worldSize || inferWorldSizePreset(currentLevel?.grid);
 
   return (
     <section
@@ -2869,8 +4163,8 @@ export default function GameStudioPage() {
               setSubTab("editor");
             }}
           >
-            <i class="fa-solid fa-hammer"></i>
-            <span>2d / 3d game engine</span>
+            <i class="fa-solid fa-wand-magic-sparkles"></i>
+            <span>no-code 2d / 3d engine</span>
           </button>
 
           <button
@@ -2883,7 +4177,9 @@ export default function GameStudioPage() {
             }}
           >
             <i class="fa-solid fa-file-code"></i>
-            <span>upload index.html (1,000 <i class="fa-solid fa-cookie-bite"></i>)</span>
+            <span>
+              upload index.html (1,000 <i class="fa-solid fa-cookie-bite"></i>)
+            </span>
           </button>
 
           <button
@@ -2911,7 +4207,7 @@ export default function GameStudioPage() {
         </div>
       </div>
 
-      {/* TAB 1 (DEFAULT): OTHER PEOPLE'S GAMES / COMMUNITY ARCADE */}
+      {/* TAB 1: COMMUNITY ARCADE */}
       {subTab === "community" && (
         <>
           <div
@@ -2927,10 +4223,13 @@ export default function GameStudioPage() {
               {(
                 [
                   { id: "all", label: "all games", icon: "fa-layer-group" },
-                  { id: "fps3d", label: "first-person 3d", icon: "fa-cube" },
                   { id: "platformer", label: "platformers", icon: "fa-person-running" },
-                  { id: "topdown", label: "top-down", icon: "fa-compass" },
-                  { id: "shooter", label: "shooters", icon: "fa-jet-fighter" },
+                  { id: "metroidvania", label: "metroidvania", icon: "fa-dungeon" },
+                  { id: "fps3d", label: "first-person 3d", icon: "fa-cube" },
+                  { id: "topdown", label: "rpg / dungeon", icon: "fa-compass" },
+                  { id: "shooter", label: "shooters", icon: "fa-crosshairs" },
+                  { id: "survivor", label: "wave survivor", icon: "fa-skull" },
+                  { id: "gravrunner", label: "gravity runner", icon: "fa-bolt" },
                   { id: "custom_html", label: "custom index.html", icon: "fa-code" },
                 ] as const
               ).map((m) => (
@@ -2962,7 +4261,11 @@ export default function GameStudioPage() {
                 disabled={isRefreshingLibrary}
                 onClick={() => void refreshCommunityLibrary(true)}
               >
-                <i class={`fa-solid ${isRefreshingLibrary ? "fa-spinner fa-spin" : "fa-rotate-right"}`}></i>
+                <i
+                  class={`fa-solid ${
+                    isRefreshingLibrary ? "fa-spinner fa-spin" : "fa-rotate-right"
+                  }`}
+                ></i>
                 <span>refresh</span>
               </button>
               <button
@@ -2991,20 +4294,19 @@ export default function GameStudioPage() {
                 style={{ fontSize: "32px", color: "var(--color-icon-dim)" }}
               ></i>
               <h3 style={{ margin: 0, fontSize: "15px" }}>
-                no community games published yet
+                no community games match this filter yet
               </h3>
               <p
                 style={{
                   margin: 0,
                   fontSize: "12.5px",
                   color: "var(--color-sublabel)",
-                  maxWidth: "460px",
+                  maxWidth: "480px",
                 }}
               >
-                only real user-created games appear here. open the{" "}
-                <strong>2d / 3d game engine</strong> (with multi-level progression & first-person 3d
-                raycasting) or <strong>upload a custom index.html file</strong> to publish the first
-                game!
+                open the <strong>no-code 2d / 3d game engine</strong> (with scrolling mega-worlds,
+                6 weapons, visual logic rules, and first-person 3d raycasting) or{" "}
+                <strong>upload a custom index.html file</strong> to publish your game!
               </p>
               <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
                 <button
@@ -3012,8 +4314,8 @@ export default function GameStudioPage() {
                   class="apps-custom-btn"
                   onClick={() => setSubTab("editor")}
                 >
-                  <i class="fa-solid fa-hammer"></i>
-                  <span>open 2d / 3d game engine</span>
+                  <i class="fa-solid fa-wand-magic-sparkles"></i>
+                  <span>open no-code game engine</span>
                 </button>
                 <button
                   type="button"
@@ -3124,7 +4426,7 @@ export default function GameStudioPage() {
                         <button
                           type="button"
                           class="studio-tool-btn"
-                          title="Remix in Game Engine"
+                          title="Remix in No-Code Game Engine"
                           onClick={() => loadGameIntoEngine(g, false)}
                         >
                           <i class="fa-solid fa-code-branch"></i>
@@ -3158,7 +4460,12 @@ export default function GameStudioPage() {
                             <button
                               type="button"
                               class="studio-tool-btn"
-                              style={{ flex: 1, justifyContent: "center", borderColor: "rgba(251, 191, 36, 0.4)", color: "#fbbf24" }}
+                              style={{
+                                flex: 1,
+                                justifyContent: "center",
+                                borderColor: "rgba(251, 191, 36, 0.4)",
+                                color: "#fbbf24",
+                              }}
                               title="This game is only saved locally; click to republish to global library"
                               onClick={() => void handleRepublishGame(g)}
                             >
@@ -3339,7 +4646,9 @@ export default function GameStudioPage() {
                     onClick={() => setSubTab("htmlupload")}
                   >
                     <i class="fa-solid fa-file-code"></i>
-                    <span>upload custom index.html (1,000 🍪)</span>
+                    <span>
+                      upload custom index.html (1,000 <i class="fa-solid fa-cookie-bite"></i>)
+                    </span>
                   </button>
                 </div>
               </div>
@@ -3396,7 +4705,7 @@ export default function GameStudioPage() {
                     total coins earned
                   </div>
                   <div style={{ fontSize: "20px", fontWeight: 700, marginTop: "4px" }}>
-                    {userStudio.coinsEarned} 🍪
+                    {userStudio.coinsEarned} <i class="fa-solid fa-cookie-bite"></i>
                   </div>
                 </div>
               </div>
@@ -3433,7 +4742,7 @@ export default function GameStudioPage() {
                   }}
                 >
                   your studio hasn't published any games yet — build a multi-level 2d/3d game in the
-                  engine (+50 coins) or upload a custom index.html file (1,000 coins)!
+                  no-code engine (+50 coins) or upload a custom index.html file (1,000 coins)!
                 </div>
               ) : (
                 <div class="studio-community-grid">
@@ -3494,7 +4803,9 @@ export default function GameStudioPage() {
         >
           <form class="studio-panel" onSubmit={handlePublishCustomHtmlGame}>
             <h3 class="studio-panel-title">
-              <span>upload index.html to studio (1,000 🍪)</span>
+              <span>
+                upload index.html to studio (1,000 <i class="fa-solid fa-cookie-bite"></i>)
+              </span>
               <i class="fa-solid fa-file-code"></i>
             </h3>
 
@@ -3601,7 +4912,6 @@ export default function GameStudioPage() {
             </button>
           </form>
 
-          {/* Live Sandbox Preview of the uploaded index.html */}
           <div class="studio-stage-panel" style={{ width: "100%" }}>
             <div class="studio-stage-toolbar">
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -3690,11 +5000,10 @@ export default function GameStudioPage() {
         </div>
       )}
 
-      {/* TAB 3: SOPHISTICATED MULTI-LEVEL 2D & FIRST-PERSON 3D GAME ENGINE */}
+      {/* TAB 3: ADVANCED NO-CODE MULTI-WORLD 2D & 3D GAME ENGINE */}
       {subTab === "editor" && (
         <>
           {playingCustomHtmlGame ? (
-            /* SERVING UPLOADED CUSTOM INDEX.HTML GAME DIRECTLY */
             <div class="studio-stage-panel" style={{ width: "100%" }}>
               <div class="studio-stage-toolbar">
                 <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
@@ -3771,27 +5080,20 @@ export default function GameStudioPage() {
               )}
             </div>
           ) : (
-            <div class="studio-workspace">
-              {/* LEFT PANEL: 2D/3D Modes, Multi-Level Manager & 12 Tile Brushes */}
-              <div class="studio-panel">
+            <div class="studio-workspace studio-workspace-pro">
+              {/* LEFT PANEL: 8 Modes, Multi-Level + World Size + Generator, Paint Tools & 28 Categorized Brushes */}
+              <div class="studio-panel studio-left-panel">
                 <h3 class="studio-panel-title">
-                  <span>1. engine dimension & mode</span>
-                  <i class="fa-solid fa-cube"></i>
+                  <span>1. game genre & engine mode</span>
+                  <i class="fa-solid fa-gamepad"></i>
                 </h3>
                 <div class="studio-tool-grid">
-                  {(
-                    [
-                      { id: "fps3d", label: "1st-person 3d", icon: "fa-cube" },
-                      { id: "platformer", label: "2d platformer", icon: "fa-person-running" },
-                      { id: "topdown", label: "2d dungeon", icon: "fa-compass" },
-                      { id: "shooter", label: "arena shooter", icon: "fa-jet-fighter" },
-                      { id: "flappy", label: "flappy dash", icon: "fa-dove" },
-                    ] as const
-                  ).map((m) => (
+                  {ENGINE_MODES.map((m) => (
                     <button
                       key={m.id}
                       type="button"
-                      class={`studio-tool-btn ${mode === m.id ? "active" : ""}`}
+                      class={`studio-tool-btn studio-compact-btn ${mode === m.id ? "active" : ""}`}
+                      title={m.desc}
                       onClick={() => applyTemplate(m.id)}
                     >
                       <i class={`fa-solid ${m.icon}`}></i>
@@ -3800,23 +5102,23 @@ export default function GameStudioPage() {
                   ))}
                 </div>
 
-                {/* MULTI-LEVEL MANAGER */}
-                <h3 class="studio-panel-title" style={{ marginTop: "6px" }}>
-                  <span>2. levels ({levels.length})</span>
+                {/* MULTI-LEVEL & WORLD SIZE MANAGER */}
+                <h3 class="studio-panel-title" style={{ marginTop: "4px" }}>
+                  <span>
+                    2. world & levels ({currentDims.cols}×{currentDims.rows})
+                  </span>
                   <div style={{ display: "flex", gap: "4px" }}>
                     <button
                       type="button"
-                      class="studio-tool-btn"
-                      style={{ padding: "3px 7px", fontSize: "10.5px" }}
+                      class="studio-tool-btn studio-mini-action"
                       onClick={handleAddLevel}
                       title="Add New Level"
                     >
-                      <i class="fa-solid fa-plus"></i> add
+                      <i class="fa-solid fa-plus"></i>
                     </button>
                     <button
                       type="button"
-                      class="studio-tool-btn"
-                      style={{ padding: "3px 7px", fontSize: "10.5px" }}
+                      class="studio-tool-btn studio-mini-action"
                       onClick={handleDuplicateLevel}
                       title="Duplicate Current Level"
                     >
@@ -3824,8 +5126,7 @@ export default function GameStudioPage() {
                     </button>
                     <button
                       type="button"
-                      class="studio-tool-btn"
-                      style={{ padding: "3px 7px", fontSize: "10.5px" }}
+                      class="studio-tool-btn studio-mini-action"
                       onClick={handleDeleteLevel}
                       title="Delete Current Level"
                     >
@@ -3834,15 +5135,17 @@ export default function GameStudioPage() {
                   </div>
                 </h3>
 
-                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
                   {levels.map((lvl, idx) => (
                     <button
                       key={lvl.id}
                       type="button"
-                      class={`studio-tool-btn ${activeLevelIdx === idx ? "active" : ""}`}
-                      style={{ padding: "5px 10px", fontSize: "11.5px" }}
+                      class={`studio-tool-btn studio-mini-action ${
+                        activeLevelIdx === idx ? "active" : ""
+                      }`}
                       onClick={() => {
                         setActiveLevelIdx(idx);
+                        editorCamRef.current = { x: 0, y: 0 };
                         if (isPlaying) initSimulation(idx, liveScore);
                       }}
                     >
@@ -3854,7 +5157,7 @@ export default function GameStudioPage() {
                 <input
                   type="text"
                   class="studio-input"
-                  style={{ fontSize: "11.5px", padding: "5px 8px" }}
+                  style={{ fontSize: "11.5px", padding: "6px 9px" }}
                   value={currentLevel?.name || ""}
                   onInput={(e) => {
                     const val = e.currentTarget.value;
@@ -3865,41 +5168,142 @@ export default function GameStudioPage() {
                   placeholder="level name..."
                 />
 
-                <h3 class="studio-panel-title" style={{ marginTop: "6px" }}>
-                  <span>3. paint entities & tiles</span>
-                  <i class="fa-solid fa-paintbrush"></i>
-                </h3>
-                <div class="studio-tool-grid">
-                  {BRUSH_TOOLS.map((b) => (
+                <div class="studio-worldsize-row">
+                  <select
+                    class="studio-select"
+                    style={{ flex: 1, fontSize: "11.5px", padding: "6px 8px" }}
+                    value={activeWorldSizeKey}
+                    onChange={(e) =>
+                      handleChangeWorldSize(e.currentTarget.value as WorldSizePreset)
+                    }
+                    title="Resize level map dimensions (keeps painted tiles!)"
+                  >
+                    {(Object.keys(WORLD_SIZE_PRESETS) as WorldSizePreset[]).map((k) => (
+                      <option key={k} value={k}>
+                        {WORLD_SIZE_PRESETS[k].label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    class="studio-tool-btn studio-compact-btn"
+                    style={{ borderColor: "rgba(56, 189, 248, 0.4)", color: "#38bdf8" }}
+                    onClick={handleProceduralGenerateStage}
+                    title="Auto-generate a rich playable level for this mode & world size!"
+                  >
+                    <i class="fa-solid fa-wand-sparkles"></i>
+                    <span>auto-gen</span>
+                  </button>
+                </div>
+
+                {/* PAINT TOOLS & UNDO/REDO */}
+                <h3 class="studio-panel-title" style={{ marginTop: "4px" }}>
+                  <span>3. paint tools & 28 brushes</span>
+                  <div style={{ display: "flex", gap: "4px" }}>
                     <button
-                      key={b.id}
                       type="button"
-                      class={`studio-tool-btn ${selectedBrush === b.id ? "active" : ""}`}
-                      onClick={() => setSelectedBrush(b.id)}
+                      class="studio-tool-btn studio-mini-action"
+                      disabled={undoCount === 0 || isPlaying}
+                      onClick={handleUndo}
+                      title="Undo (Ctrl+Z)"
                     >
-                      <span class="studio-Swatch" style={{ backgroundColor: b.color }}></span>
-                      <span>{b.name}</span>
+                      <i class="fa-solid fa-rotate-left"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="studio-tool-btn studio-mini-action"
+                      disabled={redoCount === 0 || isPlaying}
+                      onClick={handleRedo}
+                      title="Redo (Ctrl+Y)"
+                    >
+                      <i class="fa-solid fa-rotate-right"></i>
+                    </button>
+                  </div>
+                </h3>
+
+                <div class="studio-paint-toolbar">
+                  {(
+                    [
+                      { id: "brush", icon: "fa-pen", label: "1×1" },
+                      { id: "thick", icon: "fa-paintbrush", label: "2×2" },
+                      { id: "rect", icon: "fa-vector-square", label: "box" },
+                      { id: "line", icon: "fa-slash", label: "line" },
+                      { id: "bucket", icon: "fa-fill-drip", label: "fill" },
+                    ] as const
+                  ).map((pt) => (
+                    <button
+                      key={pt.id}
+                      type="button"
+                      class={`studio-paint-mode-btn ${paintTool === pt.id ? "active" : ""}`}
+                      onClick={() => setPaintTool(pt.id)}
+                      title={`Paint mode: ${pt.label}`}
+                    >
+                      <i class={`fa-solid ${pt.icon}`}></i>
+                      <span>{pt.label}</span>
                     </button>
                   ))}
                 </div>
 
+                <div class="studio-cat-tabs">
+                  {(["all", "terrain", "gadgets", "enemies", "items"] as const).map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      class={`studio-cat-pill ${brushCategory === cat ? "active" : ""}`}
+                      onClick={() => setBrushCategory(cat)}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                <div class="studio-brush-scroll">
+                  <div class="studio-tool-grid">
+                    {visibleBrushes.map((b) => (
+                      <button
+                        key={b.id}
+                        type="button"
+                        class={`studio-tool-btn studio-compact-btn ${
+                          selectedBrush === b.id ? "active" : ""
+                        }`}
+                        title={b.hint}
+                        onClick={() => setSelectedBrush(b.id)}
+                      >
+                        <span class="studio-Swatch" style={{ backgroundColor: b.color }}></span>
+                        <span>{b.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div class="studio-brush-hint">
+                  <i class={`fa-solid ${activeBrushMeta.icon}`} style={{ color: activeBrushMeta.color }}></i>
+                  <span>
+                    <strong>{activeBrushMeta.name}:</strong> {activeBrushMeta.hint}
+                  </span>
+                </div>
+
                 <button
                   type="button"
-                  class="studio-tool-btn"
-                  style={{ justifyContent: "center", marginTop: "4px" }}
+                  class="studio-tool-btn studio-compact-btn"
+                  style={{ justifyContent: "center" }}
                   onClick={() => {
+                    if (!currentLevel) return;
                     setIsPlaying(false);
-                    const g = createEmptyGrid();
-                    g[5][2] = 2;
+                    pushUndoSnapshot(currentLevel.grid);
+                    const { rows, cols } = getGridDimensions(currentLevel.grid);
+                    const g = createSizedEmptyGrid(rows, cols);
+                    const spawnRow = g[Math.max(1, rows - 2)];
+                    if (spawnRow) spawnRow[2] = 2;
                     updateCurrentLevelGrid(() => g);
                   }}
                 >
                   <i class="fa-solid fa-trash-can"></i>
-                  <span>clear level {activeLevelIdx + 1} grid</span>
+                  <span>clear level {activeLevelIdx + 1} canvas</span>
                 </button>
               </div>
 
-              {/* CENTER PANEL: Interactive 2D / First-Person 3D Stage + CloudSync Telemetry */}
+              {/* CENTER PANEL: Interactive Scrolling 2D / First-Person 3D Stage */}
               <div class="studio-stage-panel">
                 <div class="studio-stage-toolbar">
                   <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
@@ -3916,7 +5320,7 @@ export default function GameStudioPage() {
                       <i class={`fa-solid ${isPlaying ? "fa-stop" : "fa-play"}`}></i>
                       <span>
                         {isPlaying
-                          ? "stop playing"
+                          ? "stop & edit"
                           : `play lvl ${activeLevelIdx + 1}/${levels.length}`}
                       </span>
                     </button>
@@ -3934,10 +5338,19 @@ export default function GameStudioPage() {
                           setIsPlaying(true);
                         }
                       }}
-                      title="Toggle First-Person 3D Raycaster View"
+                      title="Toggle First-Person 3D Raycaster View on any map!"
                     >
                       <i class="fa-solid fa-vr-cardboard"></i>
                       <span>{mode === "fps3d" || render3DInTest ? "3d view: on" : "3d view"}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      class={`studio-tool-btn ${sfxEnabled ? "active" : ""}`}
+                      onClick={() => setSfxEnabled((v) => !v)}
+                      title="Toggle Arcade WebAudio Sound Effects"
+                    >
+                      <i class={`fa-solid ${sfxEnabled ? "fa-volume-high" : "fa-volume-xmark"}`}></i>
                     </button>
 
                     {isPlaying && (
@@ -3967,10 +5380,14 @@ export default function GameStudioPage() {
                         {(isPlaying ? livePlayLevelIdx : activeLevelIdx) + 1}/{levels.length}
                       </strong>
                     </span>
-                    <span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
                       hp:{" "}
-                      <strong style={{ color: "#f43f5e" }}>
-                        {"❤️".repeat(Math.max(0, isPlaying ? liveHp : maxHp))}
+                      <strong style={{ color: "#f43f5e", display: "inline-flex", gap: "2px" }}>
+                        {Array.from({ length: Math.max(0, isPlaying ? liveHp : maxHp) }).map(
+                          (_, idx) => (
+                            <i key={idx} class="fa-solid fa-heart"></i>
+                          )
+                        )}
                       </strong>
                     </span>
                     <span>
@@ -4007,33 +5424,7 @@ export default function GameStudioPage() {
                       type="button"
                       class="studio-tool-btn"
                       title="Launch in Full Browser Tab"
-                      onClick={() =>
-                        openGameInBrowserTab({
-                          id: activeGameId,
-                          title: title || "preview game",
-                          description,
-                          author: getActiveAuthor(),
-                          studioName: userStudio.name,
-                          studioColor: userStudio.color,
-                          mode,
-                          grid: levels[0].grid,
-                          levels,
-                          gravity,
-                          jumpForce,
-                          moveSpeed,
-                          maxHp,
-                          enableDoubleJump,
-                          enableDash,
-                          enableBlaster,
-                          playerColor,
-                          bgColor,
-                          wallColor,
-                          customScript,
-                          likes: 0,
-                          plays: 0,
-                          createdAt: new Date().toISOString(),
-                        })
-                      }
+                      onClick={() => openGameInBrowserTab(buildCurrentProjectSnapshot())}
                     >
                       <i class="fa-solid fa-up-right-from-square"></i>
                     </button>
@@ -4043,49 +5434,28 @@ export default function GameStudioPage() {
                 <div class="studio-canvas-wrap">
                   <canvas
                     ref={canvasRef}
-                    width={COLS * TILE_SIZE}
-                    height={ROWS * TILE_SIZE}
+                    width={CANVAS_W}
+                    height={CANVAS_H}
                     class="studio-canvas"
-                    onMouseDown={(e) => {
-                      if (isPlaying) {
-                        mouseFireRef.current = true;
-                        if (
-                          (mode === "fps3d" || render3DInTest) &&
-                          canvasRef.current &&
-                          document.pointerLockElement !== canvasRef.current
-                        ) {
-                          canvasRef.current.requestPointerLock?.();
-                        }
-                        return;
-                      }
-                      isPaintingRef.current = true;
-                      handleCanvasPaint(e);
-                    }}
-                    onMouseMove={(e) => {
-                      if (isPlaying && (mode === "fps3d" || render3DInTest)) {
-                        if (document.pointerLockElement === canvasRef.current || e.buttons === 1) {
-                          mouseLookDeltaRef.current += e.movementX || 0;
-                        }
-                        return;
-                      }
-                      if (isPaintingRef.current) handleCanvasPaint(e);
-                    }}
-                    onMouseUp={() => {
-                      isPaintingRef.current = false;
-                      mouseFireRef.current = false;
-                    }}
+                    onContextMenu={(e) => e.preventDefault()}
+                    onMouseDown={handleCanvasMouseDown}
+                    onMouseMove={handleCanvasMouseMove}
+                    onMouseUp={handleCanvasMouseUp}
                     onMouseLeave={() => {
-                      isPaintingRef.current = false;
+                      hoverCellRef.current = null;
+                      handleCanvasMouseUp();
                     }}
                   />
                 </div>
 
-                <div style={{ fontSize: "11.5px", color: "var(--color-sublabel)" }}>
+                <div style={{ fontSize: "11.5px", color: "var(--color-sublabel)", textAlign: "center" }}>
                   {isPlaying
                     ? mode === "fps3d" || render3DInTest
-                      ? "3D CONTROLS: W/S move · A/D strafe · Left/Right or Mouse turn · Click/SPACE shoot plasma blaster · reach emerald portal to advance level!"
-                      : "2D CONTROLS: WASD/Arrows move · SPACE jump (2x jump enabled) · SHIFT dash · F/Click shoot blaster · touch hearts for checkpoints!"
-                    : `editing "${currentLevel?.name}" — paint walls, coins, bosses, keys, moving platforms, or portals, then click play or toggle 3d view!`}
+                      ? "3D CONTROLS: W/S move · A/D strafe · Mouse/Arrows look · Click/SPACE fire · SHIFT dash"
+                      : `2D CONTROLS: WASD/Arrows move · SPACE ${
+                          mode === "gravrunner" ? "flip gravity" : "jump / wall-kick / jetpack"
+                        } · SHIFT dash (breaks bricks!) · F or Click fire (${weaponType})`
+                    : `EDIT CONTROLS: Left-click paint (${paintTool}) · Right-click instant erase · WASD/Arrows or click minimap to pan ${currentDims.cols}×${currentDims.rows} world · Ctrl+Z undo`}
                 </div>
 
                 {/* CLOUDSYNC PLAYER TRACKING BAR */}
@@ -4107,12 +5477,11 @@ export default function GameStudioPage() {
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <i class="fa-solid fa-cloud-bolt" style={{ color: "#38bdf8" }}></i>
                     <span>
-                      <strong>cloudsync player tracker:</strong> @{cloudSyncInfo.username} ·
-                      unlocked level{" "}
+                      <strong>cloudsync tracker:</strong> @{cloudSyncInfo.username} · unlocked{" "}
                       <strong>
                         {myCloudProgress?.highestLevel || 1}/{levels.length}
                       </strong>{" "}
-                      · best score: <strong>{myCloudProgress?.bestScore || 0}</strong> · coins:{" "}
+                      · best: <strong>{myCloudProgress?.bestScore || 0}</strong> · coins:{" "}
                       <strong>{myCloudProgress?.totalCoinsCollected || 0}</strong> · clears:{" "}
                       <strong>{myCloudProgress?.completions || 0}</strong>
                     </span>
@@ -4120,19 +5489,18 @@ export default function GameStudioPage() {
 
                   {myCloudProgress && myCloudProgress.highestLevel > 1 && (
                     <div style={{ display: "flex", gap: "5px", alignItems: "center" }}>
-                      <span style={{ color: "var(--color-sublabel)" }}>jump to unlocked:</span>
+                      <span style={{ color: "var(--color-sublabel)" }}>jump to:</span>
                       {levels.slice(0, myCloudProgress.highestLevel).map((l, idx) => (
                         <button
                           key={l.id}
                           type="button"
-                          class="studio-tool-btn"
-                          style={{ padding: "3px 8px", fontSize: "10.5px" }}
+                          class="studio-tool-btn studio-mini-action"
                           onClick={() => {
                             initSimulation(idx, 0);
                             setIsPlaying(true);
                           }}
                         >
-                          play lvl {idx + 1}
+                          lvl {idx + 1}
                         </button>
                       ))}
                     </div>
@@ -4140,192 +5508,571 @@ export default function GameStudioPage() {
                 </div>
               </div>
 
-              {/* RIGHT PANEL: Physics, Abilities, Colors & Studio Publish */}
-              <form class="studio-panel" onSubmit={handlePublishGame}>
-                <h3 class="studio-panel-title">
-                  <span>4. mechanics & physics</span>
-                  <i class="fa-solid fa-sliders"></i>
-                </h3>
-
-                <div class="studio-field">
-                  <label>
-                    <span>move speed</span>
-                    <span>{moveSpeed.toFixed(1)}</span>
-                  </label>
-                  <input
-                    type="range"
-                    min="1.5"
-                    max="8"
-                    step="0.2"
-                    value={moveSpeed}
-                    onInput={(e) => setMoveSpeed(parseFloat(e.currentTarget.value))}
-                  />
+              {/* RIGHT PANEL: 100% NO-CODE TABBED INSPECTOR (HERO & WEAPONS / VISUAL RULES / WORLD FX / PUBLISH) */}
+              <form class="studio-panel studio-right-panel" onSubmit={handlePublishGame}>
+                <div class="studio-inspector-tabs">
+                  {(
+                    [
+                      { id: "hero", label: "hero & gear", icon: "fa-bolt" },
+                      { id: "rules", label: "rules", icon: "fa-diagram-project" },
+                      { id: "world", label: "fx & theme", icon: "fa-palette" },
+                      { id: "publish", label: "publish", icon: "fa-rocket" },
+                    ] as const
+                  ).map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      class={`studio-inspector-tab ${inspectorTab === t.id ? "active" : ""}`}
+                      onClick={() => setInspectorTab(t.id)}
+                    >
+                      <i class={`fa-solid ${t.icon}`}></i>
+                      <span>{t.label}</span>
+                    </button>
+                  ))}
                 </div>
 
-                <div class="studio-field">
-                  <label>
-                    <span>player max hp (hearts)</span>
-                    <span>{maxHp} ❤️</span>
-                  </label>
-                  <input
-                    type="range"
-                    min="1"
-                    max="6"
-                    step="1"
-                    value={maxHp}
-                    onInput={(e) => setMaxHp(parseInt(e.currentTarget.value, 10))}
-                  />
-                </div>
-
-                {(mode === "platformer" || mode === "flappy") && (
+                {/* INSPECTOR TAB 1: HERO, PHYSICS, ABILITIES & 6 WEAPONS */}
+                {inspectorTab === "hero" && (
                   <>
                     <div class="studio-field">
                       <label>
-                        <span>jump / flap power</span>
-                        <span>{jumpForce.toFixed(1)}</span>
+                        <span>equipped weapon</span>
+                        <span style={{ color: "#38bdf8" }}>{weaponType}</span>
                       </label>
-                      <input
-                        type="range"
-                        min="5"
-                        max="16"
-                        step="0.5"
-                        value={jumpForce}
-                        onInput={(e) => setJumpForce(parseFloat(e.currentTarget.value))}
-                      />
+                      <div class="studio-tool-grid">
+                        {WEAPON_OPTIONS.map((w) => (
+                          <button
+                            key={w.id}
+                            type="button"
+                            class={`studio-tool-btn studio-compact-btn ${
+                              weaponType === w.id ? "active" : ""
+                            }`}
+                            title={w.desc}
+                            onClick={() => setWeaponType(w.id)}
+                          >
+                            <i class={`fa-solid ${w.icon}`}></i>
+                            <span>{w.label}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
+
+                    <div class="studio-field">
+                      <label>no-code abilities & controls</label>
+                      <div class="studio-tool-grid">
+                        <button
+                          type="button"
+                          class={`studio-tool-btn studio-compact-btn ${
+                            enableDoubleJump ? "active" : ""
+                          }`}
+                          onClick={() => setEnableDoubleJump((v) => !v)}
+                        >
+                          <i class="fa-solid fa-angles-up"></i>
+                          <span>double jump</span>
+                        </button>
+                        <button
+                          type="button"
+                          class={`studio-tool-btn studio-compact-btn ${
+                            enableWallJump ? "active" : ""
+                          }`}
+                          onClick={() => setEnableWallJump((v) => !v)}
+                        >
+                          <i class="fa-solid fa-person-shelter"></i>
+                          <span>wall-kick</span>
+                        </button>
+                        <button
+                          type="button"
+                          class={`studio-tool-btn studio-compact-btn ${enableDash ? "active" : ""}`}
+                          onClick={() => setEnableDash((v) => !v)}
+                        >
+                          <i class="fa-solid fa-wind"></i>
+                          <span>shift dash</span>
+                        </button>
+                        <button
+                          type="button"
+                          class={`studio-tool-btn studio-compact-btn ${
+                            enableJetpack ? "active" : ""
+                          }`}
+                          onClick={() => setEnableJetpack((v) => !v)}
+                        >
+                          <i class="fa-solid fa-fire-flame-simple"></i>
+                          <span>jetpack</span>
+                        </button>
+                        <button
+                          type="button"
+                          class={`studio-tool-btn studio-compact-btn ${mouseAim ? "active" : ""}`}
+                          onClick={() => setMouseAim((v) => !v)}
+                        >
+                          <i class="fa-solid fa-bullseye"></i>
+                          <span>360° cursor aim</span>
+                        </button>
+                        <button
+                          type="button"
+                          class={`studio-tool-btn studio-compact-btn ${autoFire ? "active" : ""}`}
+                          onClick={() => setAutoFire((v) => !v)}
+                        >
+                          <i class="fa-solid fa-infinity"></i>
+                          <span>auto-fire</span>
+                        </button>
+                      </div>
+                    </div>
+
                     <div class="studio-field">
                       <label>
-                        <span>gravity</span>
-                        <span>{gravity.toFixed(2)}</span>
+                        <span>move speed</span>
+                        <span>{moveSpeed.toFixed(1)}</span>
                       </label>
                       <input
                         type="range"
-                        min="0.15"
-                        max="1.2"
+                        min="1.5"
+                        max="8.5"
+                        step="0.2"
+                        value={moveSpeed}
+                        onInput={(e) => setMoveSpeed(parseFloat(e.currentTarget.value))}
+                      />
+                    </div>
+
+                    <div class="studio-field">
+                      <label>
+                        <span>hero max hearts</span>
+                        <span>{maxHp} hp</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="1"
+                        max="10"
+                        step="1"
+                        value={maxHp}
+                        onInput={(e) => setMaxHp(parseInt(e.currentTarget.value, 10))}
+                      />
+                    </div>
+
+                    {mode !== "fps3d" && mode !== "topdown" && mode !== "shooter" && mode !== "survivor" && (
+                      <>
+                        <div class="studio-field">
+                          <label>
+                            <span>jump / thruster power</span>
+                            <span>{jumpForce.toFixed(1)}</span>
+                          </label>
+                          <input
+                            type="range"
+                            min="5"
+                            max="17"
+                            step="0.5"
+                            value={jumpForce}
+                            onInput={(e) => setJumpForce(parseFloat(e.currentTarget.value))}
+                          />
+                        </div>
+                        <div class="studio-field">
+                          <label>
+                            <span>gravity pull</span>
+                            <span>{gravity.toFixed(2)}</span>
+                          </label>
+                          <input
+                            type="range"
+                            min="0.12"
+                            max="1.25"
+                            step="0.04"
+                            value={gravity}
+                            onInput={(e) => setGravity(parseFloat(e.currentTarget.value))}
+                          />
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* INSPECTOR TAB 2: NO-CODE WIN GOALS, NPC DIALOGUE & "WHEN -> DO" VISUAL RULE BUILDER */}
+                {inspectorTab === "rules" && (
+                  <>
+                    <div class="studio-field">
+                      <label>level win objective</label>
+                      <select
+                        class="studio-select"
+                        value={currentLevel?.winCondition || winCondition}
+                        onChange={(e) => {
+                          const val = e.currentTarget.value as WinConditionType;
+                          setWinCondition(val);
+                          setLevels((prev) =>
+                            prev.map((l, i) =>
+                              i === activeLevelIdx ? { ...l, winCondition: val } : l
+                            )
+                          );
+                        }}
+                      >
+                        <option value="portal">reach emerald goal portal</option>
+                        <option value="all_enemies">defeat all enemies & spawners</option>
+                        <option value="all_coins">collect every coin in stage</option>
+                        <option value="survive_timer">survive countdown timer</option>
+                      </select>
+                    </div>
+
+                    {(currentLevel?.winCondition || winCondition) === "survive_timer" && (
+                      <div class="studio-field">
+                        <label>
+                          <span>survival countdown</span>
+                          <span>{currentLevel?.timeLimitSec || timeLimitSec}s</span>
+                        </label>
+                        <input
+                          type="range"
+                          min="15"
+                          max="180"
+                          step="5"
+                          value={currentLevel?.timeLimitSec || timeLimitSec}
+                          onInput={(e) => {
+                            const sec = parseInt(e.currentTarget.value, 10);
+                            setTimeLimitSec(sec);
+                            setLevels((prev) =>
+                              prev.map((l, i) =>
+                                i === activeLevelIdx ? { ...l, timeLimitSec: sec } : l
+                              )
+                            );
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    <div class="studio-field">
+                      <label>npc / signpost dialogue (lvl {activeLevelIdx + 1})</label>
+                      <input
+                        type="text"
+                        class="studio-input"
+                        maxLength={80}
+                        placeholder="shown when hero walks near a signpost..."
+                        value={currentLevel?.signText || ""}
+                        onInput={(e) => {
+                          const val = e.currentTarget.value;
+                          setLevels((prev) =>
+                            prev.map((l, i) => (i === activeLevelIdx ? { ...l, signText: val } : l))
+                          );
+                        }}
+                      />
+                    </div>
+
+                    <div class="studio-panel-title" style={{ marginTop: "4px" }}>
+                      <span>visual logic rules ({rules.length})</span>
+                      <button
+                        type="button"
+                        class="studio-tool-btn studio-mini-action"
+                        onClick={() =>
+                          setRules((prev) => [
+                            ...prev,
+                            {
+                              id: `rule_${Date.now()}`,
+                              when: "on_all_coins",
+                              action: "open_doors",
+                              text: "all coins collected — secret doors unlocked!",
+                            },
+                          ])
+                        }
+                      >
+                        <i class="fa-solid fa-plus"></i> add rule
+                      </button>
+                    </div>
+
+                    <div class="studio-rules-list">
+                      {rules.length === 0 ? (
+                        <div class="studio-brush-hint">
+                          no visual rules yet — click <strong>add rule</strong> to build automatic
+                          events without writing a single line of code!
+                        </div>
+                      ) : (
+                        rules.map((rl, rIdx) => (
+                          <div key={rl.id} class="studio-rule-card">
+                            <div class="studio-rule-row">
+                              <span class="studio-rule-badge">when</span>
+                              <select
+                                class="studio-select studio-rule-select"
+                                value={rl.when}
+                                onChange={(e) => {
+                                  const val = e.currentTarget.value as RuleTriggerType;
+                                  setRules((prev) =>
+                                    prev.map((item, i) =>
+                                      i === rIdx ? { ...item, when: val } : item
+                                    )
+                                  );
+                                }}
+                              >
+                                {RULE_TRIGGERS.map((tr) => (
+                                  <option key={tr.id} value={tr.id}>
+                                    {tr.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                class="studio-rule-del"
+                                title="Remove rule"
+                                onClick={() =>
+                                  setRules((prev) => prev.filter((_, i) => i !== rIdx))
+                                }
+                              >
+                                <i class="fa-solid fa-xmark"></i>
+                              </button>
+                            </div>
+                            <div class="studio-rule-row">
+                              <span class="studio-rule-badge do">then</span>
+                              <select
+                                class="studio-select studio-rule-select"
+                                value={rl.action}
+                                onChange={(e) => {
+                                  const val = e.currentTarget.value as RuleActionType;
+                                  setRules((prev) =>
+                                    prev.map((item, i) =>
+                                      i === rIdx ? { ...item, action: val } : item
+                                    )
+                                  );
+                                }}
+                              >
+                                {RULE_ACTIONS.map((ac) => (
+                                  <option key={ac.id} value={ac.id}>
+                                    {ac.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <input
+                              type="text"
+                              class="studio-input"
+                              style={{ fontSize: "11px", padding: "5px 8px" }}
+                              placeholder="optional screen announcement banner..."
+                              maxLength={60}
+                              value={rl.text || ""}
+                              onInput={(e) => {
+                                const val = e.currentTarget.value;
+                                setRules((prev) =>
+                                  prev.map((item, i) =>
+                                    i === rIdx ? { ...item, text: val } : item
+                                  )
+                                );
+                              }}
+                            />
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {/* INSPECTOR TAB 3: WORLD ATMOSPHERE, WEATHER, LIGHTING & PALETTES */}
+                {inspectorTab === "world" && (
+                  <>
+                    <div class="studio-field">
+                      <label>1-click neon theme presets</label>
+                      <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+                        {THEME_PALETTES.map((pal) => (
+                          <button
+                            key={pal.name}
+                            type="button"
+                            class="studio-tool-btn studio-mini-action"
+                            onClick={() => {
+                              setBgColor(pal.bg);
+                              setWallColor(pal.wall);
+                              setPlayerColor(pal.hero);
+                              setLevels((prev) =>
+                                prev.map((l, i) =>
+                                  i === activeLevelIdx
+                                    ? { ...l, bgColor: pal.bg, wallColor: pal.wall }
+                                    : l
+                                )
+                              );
+                            }}
+                          >
+                            <span class="studio-Swatch" style={{ backgroundColor: pal.wall }}></span>
+                            <span>{pal.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                      <div class="studio-field">
+                        <label>hero</label>
+                        <input
+                          type="color"
+                          value={playerColor}
+                          onInput={(e) => setPlayerColor(e.currentTarget.value)}
+                          style={{ width: "100%", height: "30px", border: "none", borderRadius: "6px" }}
+                        />
+                      </div>
+                      <div class="studio-field">
+                        <label>lvl wall</label>
+                        <input
+                          type="color"
+                          value={currentLevel?.wallColor || wallColor}
+                          onInput={(e) => {
+                            const val = e.currentTarget.value;
+                            setWallColor(val);
+                            setLevels((prev) =>
+                              prev.map((l, i) => (i === activeLevelIdx ? { ...l, wallColor: val } : l))
+                            );
+                          }}
+                          style={{ width: "100%", height: "30px", border: "none", borderRadius: "6px" }}
+                        />
+                      </div>
+                      <div class="studio-field">
+                        <label>lvl sky</label>
+                        <input
+                          type="color"
+                          value={currentLevel?.bgColor || bgColor}
+                          onInput={(e) => {
+                            const val = e.currentTarget.value;
+                            setBgColor(val);
+                            setLevels((prev) =>
+                              prev.map((l, i) => (i === activeLevelIdx ? { ...l, bgColor: val } : l))
+                            );
+                          }}
+                          style={{ width: "100%", height: "30px", border: "none", borderRadius: "6px" }}
+                        />
+                      </div>
+                    </div>
+
+                    <div class="studio-field">
+                      <label>weather & particle atmosphere</label>
+                      <select
+                        class="studio-select"
+                        value={currentLevel?.weather || weather}
+                        onChange={(e) => {
+                          const val = e.currentTarget.value as WeatherType;
+                          setWeather(val);
+                          setLevels((prev) =>
+                            prev.map((l, i) => (i === activeLevelIdx ? { ...l, weather: val } : l))
+                          );
+                        }}
+                      >
+                        <option value="starfield">parallax starfield</option>
+                        <option value="rain">cyber neon rain</option>
+                        <option value="snow">blizzard snowfall</option>
+                        <option value="embers">rising lava embers</option>
+                        <option value="matrix">matrix digital stream</option>
+                        <option value="none">clear sky (none)</option>
+                      </select>
+                    </div>
+
+                    <div class="studio-tool-grid">
+                      <button
+                        type="button"
+                        class={`studio-tool-btn studio-compact-btn ${
+                          currentLevel?.darknessMode ?? darknessMode ? "active" : ""
+                        }`}
+                        onClick={() => {
+                          const next = !(currentLevel?.darknessMode ?? darknessMode);
+                          setDarknessMode(next);
+                          setLevels((prev) =>
+                            prev.map((l, i) =>
+                              i === activeLevelIdx ? { ...l, darknessMode: next } : l
+                            )
+                          );
+                        }}
+                      >
+                        <i class="fa-solid fa-moon"></i>
+                        <span>flashlight dark</span>
+                      </button>
+                      <button
+                        type="button"
+                        class={`studio-tool-btn studio-compact-btn ${screenShake ? "active" : ""}`}
+                        onClick={() => setScreenShake((v) => !v)}
+                      >
+                        <i class="fa-solid fa-burst"></i>
+                        <span>screen shake</span>
+                      </button>
+                      <button
+                        type="button"
+                        class={`studio-tool-btn studio-compact-btn ${sfxEnabled ? "active" : ""}`}
+                        onClick={() => setSfxEnabled((v) => !v)}
+                      >
+                        <i class="fa-solid fa-volume-high"></i>
+                        <span>synth sfx</span>
+                      </button>
+                      <button
+                        type="button"
+                        class={`studio-tool-btn studio-compact-btn ${
+                          render3DInTest ? "active" : ""
+                        }`}
+                        onClick={() => setRender3DInTest((v) => !v)}
+                      >
+                        <i class="fa-solid fa-cube"></i>
+                        <span>3d raycaster</span>
+                      </button>
+                    </div>
+
+                    <div class="studio-field">
+                      <label>
+                        <span>camera zoom</span>
+                        <span>{cameraZoom.toFixed(2)}x</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0.8"
+                        max="1.35"
                         step="0.05"
-                        value={gravity}
-                        onInput={(e) => setGravity(parseFloat(e.currentTarget.value))}
+                        value={cameraZoom}
+                        onInput={(e) => setCameraZoom(parseFloat(e.currentTarget.value))}
                       />
                     </div>
                   </>
                 )}
 
-                <div class="studio-tool-grid">
-                  <button
-                    type="button"
-                    class={`studio-tool-btn ${enableDoubleJump ? "active" : ""}`}
-                    onClick={() => setEnableDoubleJump((v) => !v)}
-                  >
-                    <i class="fa-solid fa-angles-up"></i>
-                    <span>double jump</span>
-                  </button>
-                  <button
-                    type="button"
-                    class={`studio-tool-btn ${enableDash ? "active" : ""}`}
-                    onClick={() => setEnableDash((v) => !v)}
-                  >
-                    <i class="fa-solid fa-wind"></i>
-                    <span>shift dash</span>
-                  </button>
-                  <button
-                    type="button"
-                    class={`studio-tool-btn ${enableBlaster ? "active" : ""}`}
-                    onClick={() => setEnableBlaster((v) => !v)}
-                  >
-                    <i class="fa-solid fa-crosshairs"></i>
-                    <span>plasma blaster</span>
-                  </button>
-                  <button
-                    type="button"
-                    class={`studio-tool-btn ${render3DInTest ? "active" : ""}`}
-                    onClick={() => setRender3DInTest((v) => !v)}
-                  >
-                    <i class="fa-solid fa-cube"></i>
-                    <span>first-person 3d</span>
-                  </button>
-                </div>
+                {/* INSPECTOR TAB 4: PUBLISH & STANDALONE EXPORT */}
+                {inspectorTab === "publish" && (
+                  <>
+                    <div class="studio-brush-hint">
+                      <i class={`fa-solid ${userStudio.icon}`} style={{ color: userStudio.color }}></i>
+                      <span>
+                        publishing under <strong>{userStudio.name}</strong> · includes{" "}
+                        <strong>{levels.length}</strong> level{levels.length > 1 ? "s" : ""},{" "}
+                        <strong>{rules.length}</strong> visual rule{rules.length === 1 ? "" : "s"} &{" "}
+                        <strong>{weaponType}</strong>
+                      </span>
+                    </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
-                  <div class="studio-field">
-                    <label>hero</label>
-                    <input
-                      type="color"
-                      value={playerColor}
-                      onInput={(e) => setPlayerColor(e.currentTarget.value)}
-                      style={{ width: "100%", height: "28px", border: "none", borderRadius: "6px" }}
-                    />
-                  </div>
-                  <div class="studio-field">
-                    <label>lvl wall</label>
-                    <input
-                      type="color"
-                      value={currentLevel?.wallColor || wallColor}
-                      onInput={(e) => {
-                        const val = e.currentTarget.value;
-                        setWallColor(val);
-                        setLevels((prev) =>
-                          prev.map((l, i) => (i === activeLevelIdx ? { ...l, wallColor: val } : l))
-                        );
-                      }}
-                      style={{ width: "100%", height: "28px", border: "none", borderRadius: "6px" }}
-                    />
-                  </div>
-                  <div class="studio-field">
-                    <label>lvl sky</label>
-                    <input
-                      type="color"
-                      value={currentLevel?.bgColor || bgColor}
-                      onInput={(e) => {
-                        const val = e.currentTarget.value;
-                        setBgColor(val);
-                        setLevels((prev) =>
-                          prev.map((l, i) => (i === activeLevelIdx ? { ...l, bgColor: val } : l))
-                        );
-                      }}
-                      style={{ width: "100%", height: "28px", border: "none", borderRadius: "6px" }}
-                    />
-                  </div>
-                </div>
+                    <div class="studio-field">
+                      <label>game title</label>
+                      <input
+                        type="text"
+                        class="studio-input"
+                        value={title}
+                        onInput={(e) => setTitle(e.currentTarget.value)}
+                        maxLength={50}
+                        required
+                      />
+                    </div>
 
-                <h3 class="studio-panel-title" style={{ marginTop: "4px" }}>
-                  <span>5. publish under {userStudio.name}</span>
-                  <i class="fa-solid fa-cloud-arrow-up"></i>
-                </h3>
+                    <div class="studio-field">
+                      <label>description</label>
+                      <textarea
+                        class="studio-input"
+                        style={{ minHeight: "64px", resize: "vertical" }}
+                        value={description}
+                        onInput={(e) => setDescription(e.currentTarget.value)}
+                        maxLength={140}
+                      />
+                    </div>
 
-                <div class="studio-field">
-                  <label>game title</label>
-                  <input
-                    type="text"
-                    class="studio-input"
-                    value={title}
-                    onInput={(e) => setTitle(e.currentTarget.value)}
-                    maxLength={50}
-                    required
-                  />
-                </div>
+                    <button
+                      type="button"
+                      class="studio-tool-btn"
+                      style={{ justifyContent: "center", width: "100%" }}
+                      onClick={handleExportStandaloneHtmlFile}
+                    >
+                      <i class="fa-solid fa-download"></i>
+                      <span>export standalone playable .html</span>
+                    </button>
+                  </>
+                )}
 
-                <div class="studio-field">
-                  <label>description</label>
-                  <input
-                    type="text"
-                    class="studio-input"
-                    value={description}
-                    onInput={(e) => setDescription(e.currentTarget.value)}
-                    maxLength={140}
-                  />
-                </div>
-
+                {/* ALWAYS-ACCESSIBLE PUBLISH CTA AT BOTTOM OF INSPECTOR */}
                 <button
                   type="submit"
                   class="apps-custom-btn"
-                  style={{ justifyContent: "center", width: "100%", marginTop: "4px" }}
+                  style={{ justifyContent: "center", width: "100%", marginTop: "auto" }}
                   disabled={isPublishing}
                 >
                   <i class="fa-solid fa-rocket"></i>
                   <span>
                     {isPublishing
                       ? "publishing..."
-                      : `publish ${levels.length}-level game (+50 coins)`}
+                      : `publish ${levels.length}-lvl game (+50 coins)`}
                   </span>
                 </button>
               </form>
