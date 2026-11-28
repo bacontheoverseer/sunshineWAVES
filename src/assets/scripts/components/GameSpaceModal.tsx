@@ -668,11 +668,7 @@ export default function GameSpaceModal() {
               (arr) => Array.isArray(arr) && arr.some((e) => e.username.toLowerCase() === me)
             ).length;
           }
-          checkGameplayMilestoneAchievements(
-            gName,
-            Math.max(playSeconds, Number(myEntry?.seconds) || 0),
-            uniqueCount
-          );
+          checkGameplayMilestoneAchievements(gName, playSeconds, uniqueCount);
         } catch {}
       }
     }, 1000);

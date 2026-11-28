@@ -237,18 +237,26 @@ export async function unlockAchievement(input: {
   return { unlocked: true, achievement: ach, level: nextProgress.level };
 }
 
+const NON_GAME_MILESTONE_TITLES = new Set([
+  "game studio",
+  "studio",
+  "cloudplay 2p party",
+  "operation cookie",
+  "browsing",
+]);
+
 /**
  * Universal gameplay milestones so even canvas-only WebGL games earn profile achievements.
  */
 export function checkGameplayMilestoneAchievements(
   gameTitle: string,
-  gameSeconds: number,
+  sessionSeconds: number,
   uniqueGamesCount: number
 ): void {
   const g = cleanText(gameTitle, 64).toLowerCase();
-  if (!g || isWebsiteNotGame(g)) return;
+  if (!g || isWebsiteNotGame(g) || NON_GAME_MILESTONE_TITLES.has(g)) return;
 
-  if (gameSeconds >= 60) {
+  if (sessionSeconds >= 60) {
     void unlockAchievement({
       game: g,
       title: `first steps in ${g}`,
@@ -257,7 +265,7 @@ export function checkGameplayMilestoneAchievements(
       icon: "fa-gamepad",
     });
   }
-  if (gameSeconds >= 900) {
+  if (sessionSeconds >= 900) {
     void unlockAchievement({
       game: g,
       title: `${g} regular`,
@@ -266,7 +274,7 @@ export function checkGameplayMilestoneAchievements(
       icon: "fa-fire",
     });
   }
-  if (gameSeconds >= 3600) {
+  if (sessionSeconds >= 3600) {
     void unlockAchievement({
       game: g,
       title: `${g} master`,
