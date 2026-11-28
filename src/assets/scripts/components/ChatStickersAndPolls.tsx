@@ -262,12 +262,15 @@ export function ChatPollCard({
   currentUserLower,
   disabled,
   onVote,
+  onOpenUserProfile,
 }: {
   poll: ChatPollData;
   currentUserLower: string;
   disabled?: boolean;
   onVote: (optionId: string) => void;
+  onOpenUserProfile?: (username: string) => void;
 }) {
+  const [showVoters, setShowVoters] = useState(false);
   const totalVotes = poll.options.reduce(
     (sum, o) => sum + (Array.isArray(o.votes) ? o.votes.length : 0),
     0
@@ -306,8 +309,88 @@ export function ChatPollCard({
         })}
       </div>
       <div class="chat-poll-footer">
-        {totalVotes} {totalVotes === 1 ? "vote" : "votes"} · click an option to vote
+        <button
+          type="button"
+          class="chat-poll-votes-trigger"
+          title="View who voted and what they picked"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowVoters(true);
+          }}
+        >
+          {totalVotes} {totalVotes === 1 ? "vote" : "votes"}
+        </button>
+        <span> · click an option to vote</span>
       </div>
+
+      {showVoters && (
+        <div
+          class="chat-poll-voters-backdrop"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (e.target === e.currentTarget) setShowVoters(false);
+          }}
+        >
+          <div class="chat-poll-voters-modal" onClick={(e) => e.stopPropagation()}>
+            <div class="chat-poll-voters-head">
+              <div class="chat-poll-voters-title-wrap">
+                <div class="chat-poll-voters-title">
+                  <i class="fa-solid fa-square-poll-horizontal" /> {poll.question}
+                </div>
+                <div class="chat-poll-voters-sub">
+                  {totalVotes} total {totalVotes === 1 ? "vote" : "votes"}
+                </div>
+              </div>
+              <button
+                type="button"
+                class="chat-poll-voters-close"
+                aria-label="Close poll votes"
+                onClick={() => setShowVoters(false)}
+              >
+                <i class="fa-solid fa-xmark" />
+              </button>
+            </div>
+
+            <div class="chat-poll-voters-body">
+              {poll.options.map((opt) => {
+                const votes = Array.isArray(opt.votes) ? opt.votes : [];
+                const pct = totalVotes > 0 ? Math.round((votes.length / totalVotes) * 100) : 0;
+                return (
+                  <div key={opt.id} class="chat-poll-voters-group">
+                    <div class="chat-poll-voters-opt-head">
+                      <span class="chat-poll-voters-opt-name">{opt.text}</span>
+                      <span class="chat-poll-voters-opt-meta">
+                        {votes.length} ({pct}%)
+                      </span>
+                    </div>
+                    {votes.length === 0 ? (
+                      <div class="chat-poll-voters-empty">no votes yet</div>
+                    ) : (
+                      <div class="chat-poll-voters-chips">
+                        {votes.map((voter) => (
+                          <button
+                            key={voter}
+                            type="button"
+                            class="chat-poll-voter-chip"
+                            onClick={() => {
+                              if (onOpenUserProfile) {
+                                setShowVoters(false);
+                                onOpenUserProfile(voter);
+                              }
+                            }}
+                          >
+                            @{voter}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1074,6 +1074,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
               currentUserLower={(cloudUser || "").toLowerCase()}
               disabled={!cloudUser}
               onVote={(optId) => onVotePoll(msg.id, optId)}
+              onOpenUserProfile={onOpenUserProfile}
             />
           )}
           {isAllowedKlipyUrl(msg.gifUrl) && (
