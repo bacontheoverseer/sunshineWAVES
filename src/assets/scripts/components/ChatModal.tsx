@@ -3123,7 +3123,7 @@ export default function ChatModal() {
                 const ch = item.channel || "general";
                 const isPinnedCh =
                   ch === "announcements" || ch === "updates" || ch === "rules" || ch === "staff-chat";
-                const limit = isPinnedCh ? 150 : 90;
+                const limit = isPinnedCh ? 200 : 150;
                 const c = perChCounts.get(ch) || 0;
                 if (c >= limit) continue;
                 perChCounts.set(ch, c + 1);

@@ -1965,9 +1965,7 @@ function mergeKvValueBeforeRemoteWrite(key, remoteVal, localVal) {
       const prev = byId.get(m.id);
       if (!prev || Number(m.editedAt || 0) >= Number(prev.editedAt || 0)) byId.set(m.id, m);
     }
-    return Array.from(byId.values())
-      .sort((a, b) => (Date.parse(a.timestamp || "") || 0) - (Date.parse(b.timestamp || "") || 0))
-      .slice(-250);
+    return trimChatHistoryPerChannel(Array.from(byId.values()));
   }
   if ((k === "staff_moderators_v1" || k === "goat_users_v1" || k === "deleted_users_v1") && Array.isArray(remoteVal) && Array.isArray(localVal)) {
     return Array.from(new Set([...remoteVal, ...localVal].map((s) => String(s || "").trim().toLowerCase()).filter(Boolean)));
@@ -3919,10 +3917,10 @@ function trimChatHistoryPerChannel(list) {
     if (!m || !m.id || !m.channel) continue;
     const ch = String(m.channel);
     const pinned = isPinnedHistoryChannel(ch);
-    const chLimit = pinned ? 150 : 90;
+    const chLimit = pinned ? 200 : 150;
     const curChCount = perChannelCounts.get(ch) || 0;
     if (curChCount >= chLimit) continue;
-    if (!pinned && normalCount >= 480) continue;
+    if (!pinned && normalCount >= 3000) continue;
     perChannelCounts.set(ch, curChCount + 1);
     if (!pinned) normalCount++;
     keptReversed.push(m);
