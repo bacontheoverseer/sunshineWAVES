@@ -987,26 +987,34 @@ export class CloudSync {
                     </div>
 
                     <div class="cloudsync-recovery-setup-card">
-                        <div id="account-recovery-status" class="cloudsync-recovery-status">
-                            <i class="fa-solid fa-key"></i>
-                            <span>account recovery question</span>
+                        <div class="cloudsync-recovery-head">
+                            <div id="account-recovery-status" class="cloudsync-recovery-status">
+                                <i class="fa-solid fa-key"></i>
+                                <span>account recovery</span>
+                            </div>
+                            <button type="button" id="toggle-recovery-edit-btn" class="cloudsync-recovery-toggle-btn" style="display: none;">
+                                edit
+                            </button>
                         </div>
-                        <select id="account-recovery-question" class="cloudsync-select">
-                            ${questionOptionsHtml}
-                        </select>
-                        <input type="text" id="account-recovery-answer" class="cloudsync-recovery-input" placeholder="write your recovery answer..." autocomplete="off">
-                        <button type="button" id="save-recovery-btn" class="auth-action-btn" style="padding: 8px 12px; font-size: 12.5px; margin-top: 4px;">
-                            save recovery question
-                        </button>
+                        <div id="account-recovery-body" class="cloudsync-recovery-body">
+                            <select id="account-recovery-question" class="cloudsync-select">
+                                ${questionOptionsHtml}
+                            </select>
+                            <input type="text" id="account-recovery-answer" class="cloudsync-recovery-input" placeholder="recovery answer..." autocomplete="off">
+                            <button type="button" id="save-recovery-btn" class="cloudsync-recovery-save-btn">
+                                save recovery question
+                            </button>
+                        </div>
                     </div>
 
-                    <button id="logout-btn" class="auth-action-btn auth-secondary-btn">
-                        logout
-                    </button>
-
-                    <button id="delete-account-btn" class="auth-action-btn auth-secondary-btn">
-                        delete account
-                    </button>
+                    <div class="cloudsync-account-actions">
+                        <button id="logout-btn" class="auth-action-btn auth-secondary-btn">
+                            logout
+                        </button>
+                        <button id="delete-account-btn" class="auth-action-btn auth-secondary-btn cloudsync-danger-btn">
+                            delete account
+                        </button>
+                    </div>
                 </div>
             <button id="close-auth-modal" class="cloudsync-close-btn">
                 <i class="fa-solid fa-xmark"></i>
@@ -1246,6 +1254,18 @@ export class CloudSync {
       void this.handleSaveRecoveryQuestion();
     });
 
+    const toggleRecBtn = modal.querySelector<HTMLButtonElement>("#toggle-recovery-edit-btn");
+    const recBody = modal.querySelector<HTMLElement>("#account-recovery-body");
+    toggleRecBtn?.addEventListener("click", () => {
+      if (!recBody) return;
+      const isHidden = recBody.style.display === "none";
+      recBody.style.display = isHidden ? "flex" : "none";
+      toggleRecBtn.textContent = isHidden ? "cancel" : "edit";
+      if (isHidden) {
+        (document.getElementById("account-recovery-answer") as HTMLInputElement | null)?.focus();
+      }
+    });
+
     modal
       .querySelector<HTMLElement>("#logout-btn")!
       .addEventListener("click", () => this.logout());
@@ -1346,14 +1366,23 @@ export class CloudSync {
 
       const recSelect = document.getElementById("account-recovery-question") as HTMLSelectElement | null;
       const recStatus = document.getElementById("account-recovery-status");
+      const recBody = document.getElementById("account-recovery-body");
+      const toggleRecBtn = document.getElementById("toggle-recovery-edit-btn");
       if (recSelect && this.user?.recoveryQuestionId) {
         recSelect.value = String(this.user.recoveryQuestionId);
       }
       if (recStatus) {
         if (this.user?.hasRecoveryQuestion) {
-          recStatus.innerHTML = `<i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i> <span>recovery question saved (update anytime)</span>`;
+          recStatus.innerHTML = `<i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i> <span>recovery question saved</span>`;
+          if (recBody) recBody.style.display = "none";
+          if (toggleRecBtn) {
+            toggleRecBtn.style.display = "inline-flex";
+            toggleRecBtn.textContent = "edit";
+          }
         } else {
-          recStatus.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color: #facc15;"></i> <span>choose a recovery question &amp; save an answer</span>`;
+          recStatus.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color: #facc15;"></i> <span>set up account recovery</span>`;
+          if (recBody) recBody.style.display = "flex";
+          if (toggleRecBtn) toggleRecBtn.style.display = "none";
         }
       }
     } else {

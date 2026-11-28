@@ -187,3 +187,133 @@
   color: var(--text-white);
   opacity: 1;
 }
+
+/* Polished CloudSync Account & Recovery Panel */
+.cloudsync-recovery-setup-card {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin: 0 auto 14px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cloudsync-recovery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cloudsync-recovery-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-white);
+}
+
+.cloudsync-recovery-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px !important;
+  margin: 0 !important;
+  width: auto !important;
+  border-radius: 8px !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: var(--text-white) !important;
+  font-size: 11.5px !important;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.cloudsync-recovery-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.13) !important;
+  border-color: rgba(255, 255, 255, 0.24) !important;
+}
+
+.cloudsync-recovery-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cloudsync-recovery-setup-card .cloudsync-select,
+.cloudsync-recovery-setup-card .cloudsync-recovery-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  color: var(--text-white);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.cloudsync-recovery-setup-card .cloudsync-select:focus,
+.cloudsync-recovery-setup-card .cloudsync-recovery-input:focus {
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.cloudsync-recovery-save-btn {
+  width: 100%;
+  height: 34px;
+  margin-top: 2px;
+  border-radius: 9px;
+  border: none;
+  background: #f4f4f5;
+  color: #09090b;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.14s ease, transform 0.1s ease;
+}
+
+.cloudsync-recovery-save-btn:hover {
+  background: #ffffff;
+}
+
+.cloudsync-recovery-save-btn:active {
+  transform: scale(0.99);
+}
+
+.cloudsync-account-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.cloudsync-account-actions .auth-action-btn {
+  width: 100% !important;
+  margin: 0 !important;
+  height: 36px;
+  padding: 0 12px !important;
+  font-size: 12.5px !important;
+  border-radius: 10px !important;
+}
+
+.cloudsync-account-actions .cloudsync-danger-btn {
+  color: #fca5a5 !important;
+  border: 1px solid rgba(239, 68, 68, 0.28) !important;
+  background: rgba(239, 68, 68, 0.08) !important;
+}
+
+.cloudsync-account-actions .cloudsync-danger-btn:hover {
+  background: rgba(239, 68, 68, 0.18) !important;
+  border-color: rgba(239, 68, 68, 0.45) !important;
+}
