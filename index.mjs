@@ -4857,7 +4857,7 @@ function setCloudSyncAuthCookie(res, token, req) {
     "Path=/",
     "HttpOnly",
     `Max-Age=${maxAge}`,
-    isHttps ? "SameSite=Strict; Secure" : "SameSite=Lax",
+    isHttps ? "SameSite=Lax; Secure" : "SameSite=Lax",
   ];
   res.setHeader("Set-Cookie", cookieParts.join("; "));
 }
@@ -4875,44 +4875,48 @@ async function getAuthenticatedCloudSyncUser(req, { allowUnmirroredJwt = false }
     (req.headers.authorization?.startsWith("Bearer ")
       ? req.headers.authorization.slice(7).trim()
       : null);
-  const headerClaims = verifyCloudSyncJwt(headerToken);
-  const cookieClaims = verifyCloudSyncJwt(cookieToken);
-  const claims =
-    (headerClaims && !String(headerClaims.typ || "").startsWith("oxium_") ? headerClaims : null) ||
-    (cookieClaims && !String(cookieClaims.typ || "").startsWith("oxium_") ? cookieClaims : null);
-  if (!claims || !claims.id || !claims.username) return null;
-  const claimsUsername = String(claims.username).trim();
-  const claimsLower = claimsUsername.toLowerCase();
-  if (!claimsUsername || isReservedSystemUsername(claimsUsername)) return null;
-  if (getDeletedUsersSet().has(claimsLower)) return null;
-  if (bannedAccounts.has(claimsLower) && !OWNER_USERNAMES.has(claimsLower)) return null;
+  const candidateClaims = [
+    verifyCloudSyncJwt(headerToken),
+    verifyCloudSyncJwt(cookieToken),
+  ].filter((c) => c && c.id && c.username && !String(c.typ || "").startsWith("oxium_"));
 
-  try {
-    const byIdRow = await dbFindUserById(claims.id);
-    let row = byIdRow && String(byIdRow.username).toLowerCase() === claimsLower ? byIdRow : null;
-    if (!row && claimsUsername) {
-      row = await dbFindUserByUsername(claimsUsername);
-    }
-    if (!row) {
-      const authedFallback = { id: Number(claims.id), username: claimsUsername };
+  if (candidateClaims.length === 0) return null;
+
+  for (const claims of candidateClaims) {
+    const claimsUsername = String(claims.username).trim();
+    const claimsLower = claimsUsername.toLowerCase();
+    if (!claimsUsername || isReservedSystemUsername(claimsUsername)) continue;
+    if (getDeletedUsersSet().has(claimsLower)) continue;
+    if (bannedAccounts.has(claimsLower) && !OWNER_USERNAMES.has(claimsLower)) continue;
+
+    try {
+      const byIdRow = await dbFindUserById(claims.id);
+      let row = byIdRow && String(byIdRow.username).toLowerCase() === claimsLower ? byIdRow : null;
+      if (!row && claimsUsername) {
+        row = await dbFindUserByUsername(claimsUsername);
+      }
+      if (!row) {
+        const authedFallback = { id: Number(claims.id), username: claimsUsername, tokenVersion: Number(claims.v || 1) };
+        upsertUserInCaches(authedFallback);
+        return authedFallback;
+      }
+      if (String(row.username).toLowerCase() !== claimsLower) {
+        continue;
+      }
+      if (row.id === Number(claims.id) && Number(row.token_version || 1) !== Number(claims.v || 1)) {
+        continue;
+      }
+      const authed = { id: Number(row.id), username: String(row.username), tokenVersion: Number(row.token_version || 1) };
+      upsertUserInCaches(authed);
+      return authed;
+    } catch {
+      // Transient Supabase / DB connectivity blip should not silently strip verified auth
+      const authedFallback = { id: Number(claims.id), username: claimsUsername, tokenVersion: Number(claims.v || 1) };
       upsertUserInCaches(authedFallback);
       return authedFallback;
     }
-    if (String(row.username).toLowerCase() !== claimsLower) {
-      return null;
-    }
-    if (row.id === Number(claims.id) && Number(row.token_version || 1) !== Number(claims.v || 1)) {
-      return null;
-    }
-    const authed = { id: Number(row.id), username: String(row.username) };
-    upsertUserInCaches(authed);
-    return authed;
-  } catch {
-    // Transient Supabase / DB connectivity blip should not silently strip verified moderator auth
-    const authedFallback = { id: Number(claims.id), username: claimsUsername };
-    upsertUserInCaches(authedFallback);
-    return authedFallback;
   }
+  return null;
 }
 
 // --- Native CloudSync Auth & Sync Endpoints (/api/auth/* & /api/sync/*) ---
@@ -5188,11 +5192,22 @@ app.get("/api/auth/me", async (req, res) => {
       .status(401)
       .json({ success: false, user: null, error: "unauthorized" });
   }
+  const exp = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
+  const refreshedToken = signCloudSyncJwt({
+    id: user.id,
+    username: user.username,
+    v: Number(user.tokenVersion || 1),
+    exp,
+  });
+  setCloudSyncAuthCookie(res, refreshedToken, req);
+  touchUserLastActive(user.username);
   const rec = userRecoveryMap.get(String(user.username || "").toLowerCase());
   res.json({
     success: true,
+    token: refreshedToken,
     user: {
-      ...user,
+      id: user.id,
+      username: user.username,
       hasRecoveryQuestion: Boolean(rec?.questionId && rec?.answerNorm),
       recoveryQuestionId: rec?.questionId || "",
       recoveryQuestionText: rec?.questionId ? RECOVERY_QUESTIONS_BY_ID.get(rec.questionId) || "" : "",

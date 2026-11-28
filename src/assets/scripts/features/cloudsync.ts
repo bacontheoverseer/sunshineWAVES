@@ -230,7 +230,29 @@ export class CloudSync {
     document.addEventListener("toggleAuthModal", () => this.toggleModal());
     this.hookStorage();
 
-    if (!this.user || Object.keys(this.user).length === 0) {
+    const hasLocalUser = Boolean(this.user && Object.keys(this.user).length > 0);
+    if (!hasLocalUser) {
+      // Still check /api/auth/me in case the HttpOnly cookie or auth_token is valid
+      try {
+        const probeRes = await fetchWithTimeout("/api/auth/me", { cache: "no-store" }, 5000);
+        if (probeRes.ok) {
+          const probeData = await probeRes.json().catch(() => null);
+          if (probeData?.user?.username) {
+            this.user = probeData.user;
+            this.isAuthenticated = true;
+            localStorage.setItem("auth_user", JSON.stringify(this.user));
+            if (typeof probeData.token === "string" && probeData.token) {
+              localStorage.setItem("auth_token", probeData.token);
+            }
+            window.dispatchEvent(
+              new CustomEvent("cloudsync-auth-changed", { detail: this.user })
+            );
+            this.updateModalState();
+            this.startPolling();
+            return;
+          }
+        }
+      } catch {}
       this.isAuthenticated = false;
       this.updateModalState();
       await this.enforceAuthGate();
@@ -251,15 +273,23 @@ export class CloudSync {
         this.user = data.user;
         this.isAuthenticated = true;
         localStorage.setItem("auth_user", JSON.stringify(this.user));
+        if (typeof data.token === "string" && data.token) {
+          localStorage.setItem("auth_token", data.token);
+        }
         window.dispatchEvent(
           new CustomEvent("cloudsync-auth-changed", { detail: this.user })
         );
-      } else if (authRes.status === 401 || authRes.status === 403) {
-        this.isAuthenticated = false;
-        this.user = {};
-        localStorage.removeItem("auth_user");
-        localStorage.removeItem("auth_token");
-        window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+      } else if (authRes.status === 401) {
+        const errData = await authRes.json().catch(() => null);
+        if (errData && errData.success === false) {
+          this.isAuthenticated = false;
+          this.user = {};
+          localStorage.removeItem("auth_user");
+          localStorage.removeItem("auth_token");
+          window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+        } else {
+          this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+        }
       } else {
         // Transient 5xx/503 deploy restart or 429 must never log the user out
         this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
@@ -433,16 +463,24 @@ export class CloudSync {
           this.user = data.user;
           this.isAuthenticated = true;
           localStorage.setItem("auth_user", JSON.stringify(this.user));
+          if (typeof data.token === "string" && data.token) {
+            localStorage.setItem("auth_token", data.token);
+          }
           if (prevName !== this.user?.username) {
             window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: this.user }));
           }
           this.startPolling();
-        } else if (res.status === 401 || res.status === 403) {
-          this.isAuthenticated = false;
-          this.user = {};
-          localStorage.removeItem("auth_user");
-          localStorage.removeItem("auth_token");
-          window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+        } else if (res.status === 401) {
+          const errData = await res.json().catch(() => null);
+          if (errData && errData.success === false) {
+            this.isAuthenticated = false;
+            this.user = {};
+            localStorage.removeItem("auth_user");
+            localStorage.removeItem("auth_token");
+            window.dispatchEvent(new CustomEvent("cloudsync-auth-changed", { detail: null }));
+          } else {
+            this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
+          }
         } else {
           this.isAuthenticated = Boolean(this.user && Object.keys(this.user).length > 0);
         }
