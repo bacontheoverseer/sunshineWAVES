@@ -1592,6 +1592,20 @@ const CHAT_META_KV_KEYS = [
   OXIUM_PROMOS_KV_KEY,
 ];
 
+function getStudioGameContentKey(g) {
+  const titleNorm = String(g?.title || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const html = typeof g?.customHtmlContent === "string" ? g.customHtmlContent.trim() : "";
+  if (html.length >= 64) {
+    const hash = crypto.createHash("sha256").update(html).digest("hex").slice(0, 16);
+    return `html:${hash}`;
+  }
+  const url = String(g?.playUrl || g?.gameUrl || g?.url || "").trim().toLowerCase();
+  if (url) {
+    return `url:${titleNorm}|${url}`;
+  }
+  return `title:${titleNorm}`;
+}
+
 function mergeStudioGamesLists(...lists) {
   const byId = new Map();
   for (const list of lists) {
@@ -1616,16 +1630,55 @@ function mergeStudioGamesLists(...lists) {
       } else {
         const prevTs = Date.parse(prev.updatedAt || prev.createdAt || "") || 0;
         const nextTs = Date.parse(incoming.updatedAt || incoming.createdAt || "") || 0;
+        const prevCreated = Date.parse(prev.createdAt || "") || Infinity;
+        const nextCreated = Date.parse(incoming.createdAt || "") || Infinity;
+        const originalAuthor = prevCreated <= nextCreated ? prev.author : incoming.author;
+        const earliestCreatedAt = prevCreated <= nextCreated ? prev.createdAt : incoming.createdAt;
         const winner = nextTs >= prevTs ? incoming : prev;
         byId.set(id, {
           ...winner,
+          author: originalAuthor || winner.author,
+          createdAt: earliestCreatedAt || winner.createdAt,
           plays: Math.max(Number(prev.plays) || 0, Number(incoming.plays) || 0),
           likes: Math.max(Number(prev.likes) || 0, Number(incoming.likes) || 0),
         });
       }
     }
   }
-  return Array.from(byId.values())
+
+  // Collapse duplicate uploads (same HTML content hash or same title+url/title) keeping the earliest original creator
+  const byContent = new Map();
+  const sortedByCreated = Array.from(byId.values()).sort(
+    (a, b) =>
+      (Date.parse(a.createdAt || a.updatedAt || "") || 0) -
+      (Date.parse(b.createdAt || b.updatedAt || "") || 0)
+  );
+  for (const item of sortedByCreated) {
+    const cKey = getStudioGameContentKey(item);
+    const existing = byContent.get(cKey);
+    if (!existing) {
+      byContent.set(cKey, item);
+    } else {
+      const sameAuthor =
+        String(existing.author || "").toLowerCase() === String(item.author || "").toLowerCase();
+      // Always preserve the earliest original creator & id; if same author updated it, take their newer content
+      const contentWinner = sameAuthor ? item : existing;
+      byContent.set(cKey, {
+        ...contentWinner,
+        id: existing.id,
+        author: existing.author,
+        createdAt: existing.createdAt,
+        updatedAt:
+          (Date.parse(item.updatedAt || "") || 0) > (Date.parse(existing.updatedAt || "") || 0)
+            ? item.updatedAt
+            : existing.updatedAt,
+        plays: Math.max(Number(existing.plays) || 0, Number(item.plays) || 0),
+        likes: Math.max(Number(existing.likes) || 0, Number(item.likes) || 0),
+      });
+    }
+  }
+
+  return Array.from(byContent.values())
     .sort(
       (a, b) =>
         (Date.parse(b.updatedAt || b.createdAt || "") || 0) -
@@ -11856,15 +11909,48 @@ app.post(["/api/studio/games", "/api/games/community", "/api/creator/games"], as
       getMergedStudioGamesAsync().catch(() => publishedStudioGames),
     ]);
 
+    const requesterName = authUser?.username || String(game.author).trim().slice(0, 60);
+    const requesterKey = requesterName.toLowerCase();
+    const isStaffPublisher = Boolean(authUser && isStaffRoleUser(authUser.username));
+
     const nowIso = new Date().toISOString();
-    const entryId = String(game.id || "").trim() || `game_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const existing = publishedStudioGames.find((g) => g.id === entryId);
+    let entryId = String(game.id || "").trim() || `game_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    let existing = publishedStudioGames.find((g) => g.id === entryId);
+
+    // Check for duplicate content or duplicate title before publishing
+    const incomingKey = getStudioGameContentKey({ ...game, title: cleanTitle });
+    const dupMatch = publishedStudioGames.find(
+      (g) => g.id !== entryId && getStudioGameContentKey(g) === incomingKey
+    );
+    if (dupMatch) {
+      const dupAuthorKey = String(dupMatch.author || "").trim().toLowerCase();
+      if (dupAuthorKey && dupAuthorKey !== requesterKey && !isStaffPublisher) {
+        return res.status(409).json({
+          success: false,
+          error: `This game was already published by @${dupMatch.author}`,
+        });
+      }
+      // Same author re-publishing the same game -> update existing entry instead of duplicating
+      existing = dupMatch;
+      entryId = dupMatch.id;
+    }
+
+    if (existing) {
+      const existingAuthorKey = String(existing.author || "").trim().toLowerCase();
+      if (existingAuthorKey && existingAuthorKey !== requesterKey && !isStaffPublisher) {
+        return res.status(403).json({
+          success: false,
+          error: `Only @${existing.author} can edit this game`,
+        });
+      }
+    }
+
     const entry = {
       ...game,
       id: entryId,
       title: cleanTitle,
       description: cleanDesc,
-      author: authUser?.username || existing?.author || String(game.author).trim().slice(0, 60),
+      author: existing?.author || requesterName,
       createdAt: existing?.createdAt || game.createdAt || nowIso,
       updatedAt: nowIso,
       plays: Math.max(Number(existing?.plays) || 0, Number(game.plays) || 0),
@@ -11891,6 +11977,34 @@ app.post(["/api/studio/games", "/api/games/community", "/api/creator/games"], as
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/studio/games/:id", async (req, res) => {
+  try {
+    const actor = await getModActor(req);
+    await getMergedStudioGamesAsync().catch(() => publishedStudioGames);
+    const id = String(req.params.id || "").trim();
+    const idx = publishedStudioGames.findIndex((g) => g.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: "Game not found" });
+    }
+    const target = publishedStudioGames[idx];
+    const isAuthor =
+      actor.usernameLower &&
+      String(target.author || "").trim().toLowerCase() === actor.usernameLower;
+    if (!actor.isMod && !isAuthor) {
+      return res.status(403).json({ success: false, error: "Only the game creator or staff can delete this game" });
+    }
+    publishedStudioGames.splice(idx, 1);
+    await flushKvKeyToSqliteAndSupabaseAsync(
+      STUDIO_GAMES_KV_KEY,
+      publishedStudioGames,
+      { awaitRemote: true, timeoutMs: 25000 }
+    );
+    res.json({ success: true, deletedId: id, totalGames: publishedStudioGames.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || "Failed to delete game" });
   }
 });
 
